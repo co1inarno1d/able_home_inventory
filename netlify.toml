@@ -1,6 +1,7 @@
 [build]
+  command = "./netlify_build.sh"
   publish = "build/web"
-  command = "flutter build web --release"
+  functions = "netlify/functions"
 
 [functions]
   directory = "netlify/functions"
@@ -8,14 +9,13 @@
 # IMPORTANT: Order matters!
 # Functions and static assets must come BEFORE the SPA fallback
 
-# Serve the Netlify function (don't redirect to index.html)
 [[redirects]]
-  from = "/.netlify/functions/*"
+  from = "/api/*"
   to = "/.netlify/functions/:splat"
   status = 200
 
-# SPA fallback - handle all other routes by serving index.html
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
+
