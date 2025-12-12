@@ -1,0 +1,5 @@
+package com.example.able_home_inventory
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
