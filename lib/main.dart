@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'prep_checklist_form.dart';
+
 /// =======================
 /// CONFIG
 /// =======================
@@ -372,6 +374,69 @@ class LiftServiceRecord {
   }
 }
 
+class PrepChecklist {
+  final String checklistId;
+  final DateTime? timestamp;
+  final String liftId;
+  final String serialNumber;
+  final String brand;
+  final String series;
+  final String prepDate;
+  final String preppedByName;
+  final String preppedByEmail;
+  final String notes;
+  final Map<String, bool> checklistItems;
+
+  PrepChecklist({
+    required this.checklistId,
+    this.timestamp,
+    required this.liftId,
+    required this.serialNumber,
+    required this.brand,
+    required this.series,
+    required this.prepDate,
+    required this.preppedByName,
+    required this.preppedByEmail,
+    required this.notes,
+    required this.checklistItems,
+  });
+
+  factory PrepChecklist.fromJson(Map<String, dynamic> json) {
+    String s(dynamic v) => v?.toString() ?? '';
+
+    DateTime? parseDate(dynamic v) {
+      if (v == null) return null;
+      try {
+        return DateTime.parse(v.toString());
+      } catch (_) {
+        return null;
+      }
+    }
+
+    // Extract checklist items (all boolean fields)
+    final checklistItems = <String, bool>{};
+    json.forEach((key, value) {
+      if (value == true || value == 'TRUE' || value == false || value == 'FALSE') {
+        checklistItems[key] = (value == true || value == 'TRUE');
+      }
+    });
+
+    return PrepChecklist(
+      checklistId: s(json['checklist_id']),
+      timestamp: parseDate(json['timestamp']),
+      liftId: s(json['lift_id']),
+      serialNumber: s(json['serial_number']),
+      brand: s(json['brand']),
+      series: s(json['series']),
+      prepDate: s(json['prep_date']),
+      preppedByName: s(json['prepped_by_name']),
+      preppedByEmail: s(json['prepped_by_email']),
+      notes: s(json['notes']),
+      checklistItems: checklistItems,
+    );
+  }
+}
+
 class InventoryData {
   final List<StairliftItem> stairlifts;
   final List<RampItem> ramps;
@@ -544,6 +609,103 @@ Future<List<LiftServiceRecord>> fetchLiftService({
   return svcJson
       .map((e) => LiftServiceRecord.fromJson(e as Map<String, dynamic>))
       .toList();
+}
+
+Future<List<PrepChecklist>> fetchPrepChecklists({
+  required String serialNumber,
+}) async {
+  final queryParams = {
+    'action': 'get_prep_checklists',
+    'serial_number': serialNumber,
+    if (apiKey != null) 'api_key': apiKey!,
+  };
+
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
+
+  debugPrint('Fetching prep checklists for serial: $serialNumber');
+
+  final response = await http.get(uri);
+
+  debugPrint('Prep checklists response status: ${response.statusCode}');
+
+  if (response.statusCode != 200) {
+    throw Exception('Failed to load prep checklists: ${response.statusCode}');
+  }
+
+  final data = json.decode(response.body);
+  if (data['status'] != 'ok') {
+    throw Exception('API error: ${data['message']}');
+  }
+
+  final checklistsJson = (data['checklists'] as List<dynamic>? ?? []);
+  debugPrint('Found ${checklistsJson.length} prep checklists');
+  return checklistsJson
+      .map((e) => PrepChecklist.fromJson(e as Map<String, dynamic>))
+      .toList();
+}
+
+Future<String> savePrepChecklist({
+  required Map<String, dynamic> checklistData,
+}) async {
+  final uri = Uri.parse(apiBaseUrl);
+
+  debugPrint('Saving prep checklist');
+
+  final response = await http.post(
+    uri,
+    headers: {'Content-Type': 'application/json'},
+    body: json.encode({
+      'action': 'save_prep_checklist',
+      ...checklistData,
+      if (apiKey != null) 'api_key': apiKey,
+    }),
+  );
+
+  debugPrint('Save prep checklist response: ${response.statusCode}');
+
+  if (response.statusCode != 200) {
+    throw Exception('Failed to save prep checklist: ${response.statusCode}');
+  }
+
+  final data = json.decode(response.body);
+  if (data['status'] != 'ok') {
+    throw Exception('API error: ${data['message']}');
+  }
+
+  return data['checklist_id']?.toString() ?? '';
+}
+
+Future<Map<String, dynamic>> getPrepChecklistTemplate({
+  required String brand,
+  required String series,
+}) async {
+  final queryParams = {
+    'action': 'get_prep_checklist_template',
+    'brand': brand,
+    'series': series,
+    if (apiKey != null) 'api_key': apiKey!,
+  };
+
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
+
+  debugPrint('Fetching prep checklist template for: $brand $series');
+
+  final response = await http.get(uri);
+
+  if (response.statusCode != 200) {
+    throw Exception(
+        'Failed to load prep checklist template: ${response.statusCode}');
+  }
+
+  final data = json.decode(response.body);
+  if (data['status'] != 'ok') {
+    throw Exception('API error: ${data['message']}');
+  }
+
+  return {
+    'checklist_type': data['checklist_type'],
+    'fields': List<String>.from(data['fields'] ?? []),
+  };
 }
 
 Future<void> submitFullCheck({
@@ -3080,6 +3242,7 @@ class LiftDetailScreen extends StatefulWidget {
 class _LiftDetailScreenState extends State<LiftDetailScreen> {
   late Future<List<LiftHistoryEvent>> _historyFuture;
   late Future<List<LiftServiceRecord>> _serviceFuture;
+  late Future<List<PrepChecklist>> _prepChecklistsFuture;
 
   String get _liftIdForApi => widget.lift.liftId;
   String get _serialForApi => widget.lift.serialNumber;
@@ -3095,6 +3258,11 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
 
     // Service is also keyed purely by serial number
     _serviceFuture = fetchLiftService(
+      serialNumber: _serialForApi,
+    );
+
+    // Prep checklists are also keyed by serial number
+    _prepChecklistsFuture = fetchPrepChecklists(
       serialNumber: _serialForApi,
     );
   }
@@ -3293,6 +3461,78 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
     );
   }
 
+  Widget _buildPrepHistoryTab() {
+    return FutureBuilder<List<PrepChecklist>>(
+      future: _prepChecklistsFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(
+            child: Text(
+              'Error loading prep checklists:\n${snapshot.error}',
+              textAlign: TextAlign.center,
+            ),
+          );
+        }
+
+        final checklists = snapshot.data ?? [];
+        if (checklists.isEmpty) {
+          return const Center(
+            child: Text('No prep checklists for this lift yet.'),
+          );
+        }
+
+        return ListView.builder(
+          padding: const EdgeInsets.all(12.0),
+          itemCount: checklists.length,
+          itemBuilder: (context, index) {
+            final c = checklists[index];
+            final prepDate = formatDate(c.timestamp);
+            final completedCount = c.checklistItems.values.where((v) => v).length;
+            final totalCount = c.checklistItems.length;
+
+            return Card(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              child: ListTile(
+                title: Text('${c.brand} ${c.series}'),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(prepDate),
+                    Text('Prepped by: ${c.preppedByName}'),
+                    Text('Completed: $completedCount/$totalCount items'),
+                    if (c.notes.isNotEmpty) Text('Notes: ${c.notes}'),
+                  ],
+                ),
+                onTap: () async {
+                  // Open the checklist form in view/edit mode
+                  final result = await Navigator.of(context).push<bool>(
+                    MaterialPageRoute(
+                      builder: (_) => PrepChecklistFormScreen(
+                        lift: widget.lift,
+                        existingChecklist: c,
+                      ),
+                    ),
+                  );
+                  if (result == true && mounted) {
+                    // Refresh the prep checklists
+                    setState(() {
+                      _prepChecklistsFuture = fetchPrepChecklists(
+                        serialNumber: _serialForApi,
+                      );
+                    });
+                  }
+                },
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final title = widget.lift.serialNumber.isNotEmpty
@@ -3300,7 +3540,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
         : 'Lift details';
 
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Scaffold(
         appBar: AppBar(
           title: Text(title),
@@ -3315,6 +3555,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
               Tab(text: 'Details'),
               Tab(text: 'Locations'),
               Tab(text: 'Service'),
+              Tab(text: 'Prep History'),
             ],
           ),
         ),
@@ -3323,6 +3564,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
             _buildDetailsTab(),
             _buildHistoryTab(),
             _buildServiceTab(),
+            _buildPrepHistoryTab(),
           ],
         ),
         floatingActionButton: FloatingActionButton.extended(
@@ -4071,10 +4313,59 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                 labelText: 'Prepped status',
                 border: OutlineInputBorder(),
               ),
-              onChanged: (value) {
-                setState(() {
-                  _preppedStatus = value ?? 'Needs prepping';
-                });
+              onChanged: (value) async {
+                // If changing from "Needs prepping" to "Prepped", open checklist
+                if (_preppedStatus == 'Needs prepping' && value == 'Prepped') {
+                  // Need to have brand and series selected to determine checklist type
+                  if (_selectedBrand == null || _selectedSeries == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Please select brand and series first'),
+                      ),
+                    );
+                    return;
+                  }
+
+                  // Create a temporary LiftRecord for the checklist form
+                  final tempLift = LiftRecord(
+                    liftId: widget.existing?.liftId ?? '',
+                    serialNumber: _serialController.text.trim(),
+                    brand: _selectedBrand!,
+                    series: _selectedSeries!,
+                    orientation: _selectedOrientation ?? '',
+                    foldType: _selectedFoldType ?? '',
+                    condition: _condition,
+                    dateAcquired: _dateAcquiredController.text.trim(),
+                    status: _status,
+                    currentLocation: _currentLocationController.text.trim(),
+                    currentJob: _currentJobController.text.trim(),
+                    installDate: _installDateController.text.trim(),
+                    installerName: _installerNameController.text.trim(),
+                    preppedStatus: _preppedStatus,
+                    lastPrepDate: _lastPrepDateController.text.trim(),
+                    notes: _notesController.text.trim(),
+                  );
+
+                  // Open prep checklist form
+                  final result = await Navigator.of(context).push<bool>(
+                    MaterialPageRoute(
+                      builder: (_) => PrepChecklistFormScreen(lift: tempLift),
+                    ),
+                  );
+
+                  // Only update status if checklist was saved
+                  if (result == true && mounted) {
+                    setState(() {
+                      _preppedStatus = 'Prepped';
+                      _lastPrepDateController.text = DateTime.now().toString().split(' ')[0];
+                    });
+                  }
+                } else {
+                  // Normal status change
+                  setState(() {
+                    _preppedStatus = value ?? 'Needs prepping';
+                  });
+                }
               },
             ),
             const SizedBox(height: 12),
