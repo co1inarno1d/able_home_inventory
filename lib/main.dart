@@ -1688,11 +1688,6 @@ class _RampsScreenState extends State<RampsScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        leadingWidth: 56,
-        leading: Padding(
-          padding: const EdgeInsets.all(8.0),
-          child: Image.asset('assets/able_home_logo.png'),
-        ),
         title: const Text('Ramps Inventory'),
         actions: [
           IconButton(
@@ -1755,7 +1750,15 @@ class _RampsScreenState extends State<RampsScreen> {
                 belowMinCount: rampBelowMinCount,
               ),
               Expanded(
-                child: _buildRampsList(ramps, rampBrands),
+                child: RefreshIndicator(
+                  onRefresh: () async {
+                    setState(() {
+                      _future = fetchInventory();
+                    });
+                    await _future;
+                  },
+                  child: _buildRampsList(ramps, rampBrands),
+                ),
               ),
             ],
           );
@@ -1894,19 +1897,17 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
       final List<Map<String, dynamic>> items = [];
       int parseInt(String v) => int.tryParse(v) ?? 0;
 
-      // Ramps only
+      // Ramps only - only send items that have values entered
       for (final item in data.ramps) {
-        for (final cond in ['New', 'Used']) {
-          final key = _keyFor(item.itemId, cond);
-          final raw = _newQuantities[key];
-          if (raw == null || raw.isEmpty) continue;
-          items.add({
-            'item_id': item.itemId,
-            'category': 'ramp',
-            'new_qty': parseInt(raw),
-            'condition': cond,
-          });
-        }
+        final key = _keyFor(item.itemId, item.condition);
+        final raw = _newQuantities[key];
+        if (raw == null || raw.isEmpty) continue;
+        items.add({
+          'item_id': item.itemId,
+          'category': 'ramp',
+          'new_qty': parseInt(raw),
+          'condition': item.condition,
+        });
       }
 
       if (items.isEmpty) {
@@ -1986,8 +1987,6 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
           ),
           children: brandItems.map((item) {
             final key = _keyFor(item.itemId, condition);
-            final controllerValue = _newQuantities[key] ?? '';
-            final controller = TextEditingController(text: controllerValue);
             return Card(
               margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               child: ListTile(
@@ -1997,11 +1996,11 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
                   children: [
                     Text('Current: ${item.currentQty} (Min: ${item.minQty})'),
                     TextField(
+                      key: ValueKey(key),
                       keyboardType: TextInputType.number,
                       decoration: const InputDecoration(
                         labelText: 'New quantity',
                       ),
-                      controller: controller,
                       onChanged: (v) =>
                           _onQtyChanged(item.itemId, condition, v),
                     ),
@@ -2589,53 +2588,61 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 )
               else
                 Expanded(
-                  child: ListView.builder(
-                    itemCount: filtered.length,
-                    itemBuilder: (context, index) {
-                      final l = filtered[index];
-                      final status = l.status.isEmpty ? 'Unknown' : l.status;
-                      final loc = l.currentLocation.isEmpty
-                          ? 'Location: N/A'
-                          : 'Location: ${l.currentLocation}';
-                      final job = l.currentJob.isEmpty
-                          ? 'Job: N/A'
-                          : 'Job: ${l.currentJob}';
+                  child: RefreshIndicator(
+                    onRefresh: () async {
+                      setState(() {
+                        _future = fetchLifts();
+                      });
+                      await _future;
+                    },
+                    child: ListView.builder(
+                      itemCount: filtered.length,
+                      itemBuilder: (context, index) {
+                        final l = filtered[index];
+                        final status = l.status.isEmpty ? 'Unknown' : l.status;
+                        final loc = l.currentLocation.isEmpty
+                            ? 'Location: N/A'
+                            : 'Location: ${l.currentLocation}';
+                        final job = l.currentJob.isEmpty
+                            ? 'Job: N/A'
+                            : 'Job: ${l.currentJob}';
 
-                      return Card(
-                        margin: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 4),
-                        child: ListTile(
-                          onTap: () {
-                            Navigator.of(context).push(
-                              MaterialPageRoute(
-                                builder: (_) => LiftDetailScreen(
-                                  lift: l,
+                        return Card(
+                          margin: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          child: ListTile(
+                            onTap: () {
+                              Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => LiftDetailScreen(
+                                    lift: l,
+                                  ),
                                 ),
+                              );
+                            },
+                            title: Text(
+                              '${l.brand}${l.series.isNotEmpty ? ' – ${l.series}' : ''}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
                               ),
-                            );
-                          },
-                          title: Text(
-                            '${l.brand}${l.series.isNotEmpty ? ' – ${l.series}' : ''}',
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w600,
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('SN: ${l.serialNumber.isNotEmpty ? l.serialNumber : 'N/A'}'),
+                                Text('Status: $status'),
+                                Text(loc),
+                                Text(job),
+                                if (l.preppedStatus.isNotEmpty)
+                                  Text('Prep: ${l.preppedStatus}'),
+                                if (l.notes.isNotEmpty)
+                                  Text('Notes: ${l.notes}'),
+                              ],
                             ),
                           ),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('SN: ${l.serialNumber.isNotEmpty ? l.serialNumber : 'N/A'}'),
-                              Text('Status: $status'),
-                              Text(loc),
-                              Text(job),
-                              if (l.preppedStatus.isNotEmpty)
-                                Text('Prep: ${l.preppedStatus}'),
-                              if (l.notes.isNotEmpty)
-                                Text('Notes: ${l.notes}'),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
                 ),
             ],
@@ -2719,7 +2726,8 @@ class StairliftQuantitiesScreen extends StatefulWidget {
 
 class _StairliftQuantitiesScreenState
     extends State<StairliftQuantitiesScreen> {
-  late Future<InventoryData> _future;
+  late Future<List<LiftRecord>> _liftsFuture;
+  late Future<InventoryData> _inventoryFuture; // Still need for min_qty from old sheet
 
   String _searchQuery = '';
   String _stairliftConditionFilter = 'New';
@@ -2729,12 +2737,14 @@ class _StairliftQuantitiesScreenState
   @override
   void initState() {
     super.initState();
-    _future = fetchInventory();
+    _liftsFuture = fetchLifts();
+    _inventoryFuture = fetchInventory();
   }
 
   void _refresh() {
     setState(() {
-      _future = fetchInventory();
+      _liftsFuture = fetchLifts();
+      _inventoryFuture = fetchInventory();
     });
   }
 
@@ -3028,8 +3038,8 @@ class _StairliftQuantitiesScreenState
           ),
         ],
       ),
-      body: FutureBuilder<InventoryData>(
-        future: _future,
+      body: FutureBuilder<List<dynamic>>(
+        future: Future.wait([_liftsFuture, _inventoryFuture]),
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Center(child: CircularProgressIndicator());
@@ -3037,14 +3047,60 @@ class _StairliftQuantitiesScreenState
           if (snapshot.hasError) {
             return Center(
               child: Text(
-                'Error loading inventory:\n${snapshot.error}',
+                'Error loading data:\n${snapshot.error}',
                 textAlign: TextAlign.center,
               ),
             );
           }
 
-          final data = snapshot.data!;
-          final stairlifts = data.stairlifts.where((s) => s.active).toList();
+          final lifts = snapshot.data![0] as List<LiftRecord>;
+          final inventoryData = snapshot.data![1] as InventoryData;
+
+          // Calculate stairlift quantities from lifts with status "In Stock"
+          final inStockLifts = lifts.where((l) => l.status == 'In Stock').toList();
+
+          // Group by brand + series + condition and count
+          final Map<String, int> counts = {};
+          for (final lift in inStockLifts) {
+            final key = '${lift.brand}|${lift.series}|${lift.orientation}|${lift.condition}';
+            counts[key] = (counts[key] ?? 0) + 1;
+          }
+
+          // Get min_qty values from the old inventory sheet
+          final Map<String, int> minQtyMap = {};
+          for (final s in inventoryData.stairlifts) {
+            final key = '${s.brand}|${s.series}|${s.orientation}|${s.condition}';
+            minQtyMap[key] = s.minQty;
+          }
+
+          // Build StairliftItem list from calculated counts
+          final List<StairliftItem> stairlifts = [];
+          final allKeys = {...counts.keys, ...minQtyMap.keys};
+
+          for (final key in allKeys) {
+            final parts = key.split('|');
+            if (parts.length != 4) continue;
+
+            final brand = parts[0];
+            final series = parts[1];
+            final orientation = parts[2];
+            final condition = parts[3];
+            final currentQty = counts[key] ?? 0;
+            final minQty = minQtyMap[key] ?? 0;
+
+            stairlifts.add(StairliftItem(
+              itemId: key,
+              brand: brand,
+              series: series,
+              orientation: orientation,
+              foldType: '',
+              condition: condition,
+              minQty: minQty,
+              currentQty: currentQty,
+              active: true,
+              notes: '',
+            ));
+          }
 
           int totalUnits = 0;
           int totalNew = 0;
@@ -3198,7 +3254,7 @@ class _ChangeHistoryScreenState extends State<ChangeHistoryScreen> {
                           padding: const EdgeInsets.symmetric(vertical: 2.0),
                           child: Text(
                             '• $displayItem (${c.condition}): '
-                            '${c.oldQty} → ${c.newQty} (Δ ${c.delta})',
+                            'Changed from ${c.oldQty} to ${c.newQty}',
                             style: const TextStyle(fontSize: 13),
                           ),
                         );
