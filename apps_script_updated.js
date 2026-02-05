@@ -94,9 +94,17 @@ function handleRequest(params) {
         result = apiUpdatePickupItem(params);
         break;
 
+      case 'delete_pickup_item':
+        result = apiDeletePickupItem(params);
+        break;
+
       // === Prep Checklist API ===
       case 'get_prep_checklists':
         result = apiGetPrepChecklists(params);
+        break;
+
+      case 'get_all_prep_checklists':
+        result = apiGetAllPrepChecklists(params);
         break;
 
       case 'save_prep_checklist':
@@ -105,6 +113,10 @@ function handleRequest(params) {
 
       case 'get_prep_checklist_template':
         result = apiGetPrepChecklistTemplate(params);
+        break;
+
+      case 'check_duplicate_serial':
+        result = apiCheckDuplicateSerial(params);
         break;
 
       default:
@@ -276,7 +288,8 @@ function apiGetLifts() {
       installer_name:  String(r[12] || ''),
       prepped_status:  String(r[13] || ''),
       last_prep_date:  String(r[14] || ''),
-      notes:           String(r[15] || '')
+      notes:           String(r[15] || ''),
+      bin_number:      String(r[16] || '')
     }));
 
   return {
@@ -596,6 +609,7 @@ function apiUpsertLift(params) {
   const installerName  = (params.installer_name || '').toString();
   const lastPrepDate   = (params.last_prep_date || '').toString();
   const notes          = (params.notes || '').toString();
+  const binNumber      = (params.bin_number || '').toString();
 
   const ss = getSs();
   const masterSheet  = ss.getSheetByName(SHEET_LIFTS_MASTER);
@@ -670,7 +684,8 @@ function apiUpsertLift(params) {
     installerName,
     preppedStatus,
     lastPrepDate,
-    notes
+    notes,
+    binNumber
   ];
 
   if (rowIndex > 0) {
@@ -851,6 +866,61 @@ function apiDeleteLift(params) {
 }
 
 /**************************************
+ * CHECK DUPLICATE SERIAL NUMBER
+ **************************************/
+
+function apiCheckDuplicateSerial(params) {
+  const serialNumber = (params.serial_number || '').toString().trim();
+  const currentLiftId = (params.lift_id || '').toString().trim(); // Optional: when editing
+
+  // Empty serial numbers are allowed (for folding rails)
+  if (!serialNumber) {
+    return { status: 'ok', exists: false };
+  }
+
+  const ss = getSs();
+  const masterSheet = ss.getSheetByName(SHEET_LIFTS_MASTER);
+  const values = masterSheet.getDataRange().getValues();
+  const rows = values.slice(1); // skip header
+
+  // Check if any lift has this serial number (excluding the current lift being edited)
+  for (let i = 0; i < rows.length; i++) {
+    const rowLiftId = String(rows[i][0] || '').trim();
+    const rowSerial = String(rows[i][1] || '').trim();
+
+    // If we find a match and it's not the current lift being edited
+    if (rowSerial === serialNumber && rowLiftId !== currentLiftId) {
+      // Return the existing lift data
+      return {
+        status: 'ok',
+        exists: true,
+        lift: {
+          lift_id:         rowLiftId,
+          serial_number:   rowSerial,
+          brand:           String(rows[i][2] || ''),
+          series:          String(rows[i][3] || ''),
+          orientation:     String(rows[i][4] || ''),
+          fold_type:       String(rows[i][5] || ''),
+          condition:       String(rows[i][6] || ''),
+          date_acquired:   String(rows[i][7] || ''),
+          status:          String(rows[i][8] || ''),
+          current_location:String(rows[i][9] || ''),
+          current_job:     String(rows[i][10] || ''),
+          install_date:    String(rows[i][11] || ''),
+          installer_name:  String(rows[i][12] || ''),
+          prepped_status:  String(rows[i][13] || ''),
+          last_prep_date:  String(rows[i][14] || ''),
+          notes:           String(rows[i][15] || ''),
+          bin_number:      String(rows[i][16] || '')
+        }
+      };
+    }
+  }
+
+  return { status: 'ok', exists: false };
+}
+
+/**************************************
  * PICKUP LIST
  **************************************/
 function apiGetPickupList() {
@@ -948,6 +1018,40 @@ function apiUpdatePickupItem(params) {
   }
 }
 
+function apiDeletePickupItem(params) {
+  try {
+    const itemId = (params.id || '').toString().trim();
+    if (!itemId) return { status: 'error', message: 'Missing id' };
+
+    const ss = getSs();
+    const sheet = ss.getSheetByName(SHEET_PICKUP_LIST);
+    if (!sheet) return { status: 'error', message: 'Sheet not found' };
+
+    const values = sheet.getDataRange().getValues();
+    if (values.length < 2) return { status: 'error', message: 'No rows found' };
+
+    const header = values[0];
+    const colIndexes = {};
+    header.forEach((h, i) => {
+      colIndexes[h.toString().trim().toLowerCase()] = i;
+    });
+
+    // Find the row with matching id and delete it
+    for (let i = 1; i < values.length; i++) {
+      const row = values[i];
+      if (row[colIndexes['id']] && row[colIndexes['id']].toString() === itemId) {
+        sheet.deleteRow(i + 1); // +1 because sheet rows are 1-indexed
+        return { status: 'ok' };
+      }
+    }
+
+    return { status: 'error', message: 'Item not found' };
+  } catch (e) {
+    Logger.log('apiDeletePickupItem error: ' + e);
+    return { status: 'error', message: 'internal: ' + e.message };
+  }
+}
+
 /**************************************
  * PREP CHECKLISTS
  **************************************/
@@ -1007,6 +1111,67 @@ function apiGetPrepChecklists(params) {
 
   } catch (e) {
     Logger.log('apiGetPrepChecklists error: ' + e);
+    return { status: 'error', message: 'internal: ' + e.message };
+  }
+}
+
+/**
+ * Get all prep checklists (no serial number filter)
+ */
+function apiGetAllPrepChecklists(params) {
+  try {
+    const ss = getSs();
+    const sheet = ss.getSheetByName(SHEET_PREP_CHECKLISTS);
+    if (!sheet) {
+      return { status: 'ok', checklists: [] };
+    }
+
+    const values = sheet.getDataRange().getValues();
+    if (values.length < 2) {
+      return { status: 'ok', checklists: [] };
+    }
+
+    const header = values[0];
+    const rows = values.slice(1);
+
+    // Build column index map
+    const colIndexes = {};
+    header.forEach((h, i) => {
+      colIndexes[h.toString().trim().toLowerCase().replace(/_/g, '_')] = i;
+    });
+
+    // Convert all rows to checklist objects
+    const checklists = rows.map(r => {
+      const obj = {
+        checklist_id: String(r[colIndexes['checklist_id']] || ''),
+        lift_id: String(r[colIndexes['lift_id']] || ''),
+        serial_number: String(r[colIndexes['serial_number']] || ''),
+        brand: String(r[colIndexes['brand']] || ''),
+        series: String(r[colIndexes['series']] || ''),
+        prep_date: String(r[colIndexes['prep_date']] || ''),
+        prepped_by_name: String(r[colIndexes['prepped_by_name']] || ''),
+        prepped_by_email: String(r[colIndexes['prepped_by_email']] || ''),
+        notes: String(r[colIndexes['notes']] || '')
+      };
+
+      // Add all checklist item fields
+      header.forEach((h, i) => {
+        const field = h.toString().trim().toLowerCase();
+        if (field && !obj.hasOwnProperty(field)) {
+          obj[field] = r[i];
+        }
+      });
+
+      return obj;
+    });
+
+    return {
+      status: 'ok',
+      checklists: checklists
+    };
+
+  } catch (e) {
+    Logger.log('apiGetAllPrepChecklists error: ' + e);
     return { status: 'error', message: 'internal: ' + e.message };
   }
 }

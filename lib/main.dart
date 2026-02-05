@@ -245,6 +245,7 @@ class LiftRecord {
   final String preppedStatus; // Needs prepping / Prepped / Not applicable
   final String lastPrepDate;
   final String notes;
+  final String binNumber; // Bin number for used lifts
 
   LiftRecord({
     required this.liftId,
@@ -263,6 +264,7 @@ class LiftRecord {
     required this.preppedStatus,
     required this.lastPrepDate,
     required this.notes,
+    required this.binNumber,
   });
 
   factory LiftRecord.fromJson(Map<String, dynamic> json) {
@@ -279,6 +281,7 @@ class LiftRecord {
       dateAcquired: s(json['date_acquired']),
       status: s(json['status']),
       currentLocation: s(json['current_location']),
+      binNumber: s(json['bin_number']),
       currentJob: s(json['current_job']),
       installDate: s(json['install_date']),
       installerName: s(json['installer_name']),
@@ -611,6 +614,38 @@ Future<List<LiftServiceRecord>> fetchLiftService({
       .toList();
 }
 
+/// Fetch all prep checklists for all lifts
+Future<List<PrepChecklist>> fetchAllPrepChecklists() async {
+  final queryParams = {
+    'action': 'get_all_prep_checklists',
+    if (apiKey != null) 'api_key': apiKey!,
+  };
+
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
+
+  debugPrint('Fetching all prep checklists');
+
+  final response = await http.get(uri);
+
+  debugPrint('All prep checklists response status: ${response.statusCode}');
+
+  if (response.statusCode != 200) {
+    throw Exception('Failed to load prep checklists: ${response.statusCode}');
+  }
+
+  final data = json.decode(response.body);
+  if (data['status'] != 'ok') {
+    throw Exception('API error: ${data['message']}');
+  }
+
+  final checklistsJson = (data['checklists'] as List<dynamic>? ?? []);
+  debugPrint('Found ${checklistsJson.length} prep checklists');
+  return checklistsJson
+      .map((e) => PrepChecklist.fromJson(e as Map<String, dynamic>))
+      .toList();
+}
+
+/// Fetch prep checklists for a specific lift by serial number
 Future<List<PrepChecklist>> fetchPrepChecklists({
   required String serialNumber,
 }) async {
@@ -790,6 +825,37 @@ Future<void> submitJobAdjustment({
   }
 }
 
+/// Check if a serial number already exists in Lifts_Master
+Future<LiftRecord?> checkDuplicateSerial(String serialNumber) async {
+  if (serialNumber.trim().isEmpty) {
+    return null; // Empty serial numbers are allowed (e.g., folding rail lifts)
+  }
+
+  final queryParams = {
+    'action': 'check_duplicate_serial',
+    'serial_number': serialNumber.trim(),
+    if (apiKey != null) 'api_key': apiKey!,
+  };
+
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
+  final response = await http.get(uri);
+
+  if (response.statusCode != 200) {
+    throw Exception('Failed to check duplicate serial: ${response.statusCode}');
+  }
+
+  final data = json.decode(response.body);
+  if (data['status'] != 'ok') {
+    throw Exception('API error: ${data['message']}');
+  }
+
+  if (data['exists'] == true && data['lift'] != null) {
+    return LiftRecord.fromJson(data['lift']);
+  }
+
+  return null;
+}
+
 /// Create or update a lift row in Lifts_Master
 Future<void> upsertLift({
   required String userEmail,
@@ -809,6 +875,7 @@ Future<void> upsertLift({
   String? installerName,
   String? lastPrepDate,
   String? notes,
+  String? binNumber,
 }) async {
   final uri = Uri.parse(apiBaseUrl);
 
@@ -831,6 +898,7 @@ Future<void> upsertLift({
     if (installerName != null) 'installer_name': installerName,
     if (lastPrepDate != null) 'last_prep_date': lastPrepDate,
     if (notes != null) 'notes': notes,
+    if (binNumber != null && binNumber.isNotEmpty) 'bin_number': binNumber,
     if (apiKey != null) 'api_key': apiKey,
   };
 
@@ -913,6 +981,62 @@ Future<void> addLiftService({
 }
 
 /// =======================
+/// UTILITY FUNCTIONS
+/// =======================
+
+/// Check if a stairlift item is a folding rail type (quantity-based, no serial numbers)
+bool isFoldingRail(StairliftItem item) {
+  final brand = item.brand.toLowerCase();
+  final series = item.series.toLowerCase();
+
+  // Bruno Manual Fold, Bruno Power Fold, Harmar Auto Fold
+  if (brand.contains('bruno')) {
+    return series.contains('manual fold') || series.contains('power fold');
+  }
+  if (brand.contains('harmar')) {
+    return series.contains('auto fold');
+  }
+
+  return false;
+}
+
+/// Check if a lift record represents a folding rail (by brand/series)
+bool isLiftRecordFoldingRail(LiftRecord lift) {
+  final brand = lift.brand.toLowerCase();
+  final series = lift.series.toLowerCase();
+
+  if (brand.contains('bruno')) {
+    return series.contains('manual fold') || series.contains('power fold');
+  }
+  if (brand.contains('harmar')) {
+    return series.contains('auto fold');
+  }
+
+  return false;
+}
+
+/// Get display title for a ramp, adding "(Low Prof)" suffix for low-profile EZ Access 3G platforms
+String getRampDisplayTitle(RampItem item) {
+  String title = '${item.brand} – ${item.size}';
+
+  // Check if this is a low-profile EZ Access 3G platform
+  final brand = item.brand.toLowerCase();
+  final size = item.size.toLowerCase();
+  final notes = item.notes.toLowerCase();
+
+  // EZ Access 3G platforms: 4x4, 5x4, 5x5 can be low-profile
+  // The indicator is in the notes field as "LOW_PROF" or similar
+  if (brand.contains('ez access') && brand.contains('3g')) {
+    if ((size.contains('4x4') || size.contains('5x4') || size.contains('5x5')) &&
+        notes.contains('low_prof')) {
+      title += ' (Low Prof)';
+    }
+  }
+
+  return title;
+}
+
+/// =======================
 /// HOME SHELL (BOTTOM NAV)
 /// =======================
 
@@ -921,6 +1045,479 @@ class HomeShell extends StatefulWidget {
 
   @override
   State<HomeShell> createState() => _HomeShellState();
+}
+
+/// =======================
+/// PREP SCREEN (dedicated prep workflow)
+/// =======================
+
+class PrepScreen extends StatefulWidget {
+  const PrepScreen({super.key});
+
+  @override
+  State<PrepScreen> createState() => _PrepScreenState();
+}
+
+class _PrepScreenState extends State<PrepScreen> {
+  late Future<List<LiftRecord>> _liftsFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _liftsFuture = fetchLifts();
+  }
+
+  void _refresh() {
+    setState(() {
+      _liftsFuture = fetchLifts();
+    });
+  }
+
+  void _openPrepHistory() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const PrepHistoryScreen(),
+      ),
+    );
+  }
+
+  Future<void> _openPrepChecklist(LiftRecord lift) async {
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => PrepChecklistFormScreen(lift: lift),
+      ),
+    );
+
+    if (result == true && mounted) {
+      _refresh();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Prep'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: 'Prep history',
+            onPressed: _openPrepHistory,
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _refresh,
+          ),
+        ],
+      ),
+      body: FutureBuilder<List<LiftRecord>>(
+        future: _liftsFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(
+              child: Text(
+                'Error loading lifts:\n${snapshot.error}',
+                textAlign: TextAlign.center,
+              ),
+            );
+          }
+
+          final lifts = snapshot.data ?? [];
+
+          // Group lifts by prep status
+          final needsPrepping = lifts
+              .where((l) => l.preppedStatus.toLowerCase() == 'needs prepping')
+              .toList();
+          final needsRepair = lifts
+              .where((l) => l.preppedStatus.toLowerCase() == 'needs repair')
+              .toList();
+
+          return RefreshIndicator(
+            onRefresh: () async {
+              setState(() {
+                _liftsFuture = fetchLifts();
+              });
+              await _liftsFuture;
+            },
+            child: ListView(
+              padding: const EdgeInsets.all(12.0),
+              children: [
+                // Needs Prepping Section
+                _buildSection(
+                  title: 'Needs Prepping',
+                  lifts: needsPrepping,
+                  emptyMessage: 'No lifts need prepping',
+                  onTap: _openPrepChecklist,
+                ),
+                const SizedBox(height: 16),
+
+                // Needs Repair Section
+                _buildSection(
+                  title: 'Needs Repair',
+                  lifts: needsRepair,
+                  emptyMessage: 'No lifts need repair',
+                  onTap: null, // No checklist for repair items
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildSection({
+    required String title,
+    required List<LiftRecord> lifts,
+    required String emptyMessage,
+    required Future<void> Function(LiftRecord)? onTap,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 8.0),
+          child: Row(
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: kBrandGreen.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  '${lifts.length}',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.bold,
+                    color: kBrandGreen,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (lifts.isEmpty)
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Text(
+              emptyMessage,
+              style: TextStyle(
+                color: Colors.grey[600],
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+          )
+        else
+          ...lifts.map((lift) => Card(
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                child: ListTile(
+                  onTap: onTap != null ? () => onTap(lift) : null,
+                  title: Text(
+                    '${lift.brand}${lift.series.isNotEmpty ? ' – ${lift.series}' : ''}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('SN: ${lift.serialNumber.isNotEmpty ? lift.serialNumber : 'N/A'}'),
+                      if (lift.currentLocation.isNotEmpty)
+                        Text('Location: ${lift.currentLocation}'),
+                      Text('Status: ${lift.status.isEmpty ? 'Unknown' : lift.status}'),
+                    ],
+                  ),
+                  trailing: onTap != null
+                      ? const Icon(Icons.chevron_right)
+                      : null,
+                ),
+              )),
+      ],
+    );
+  }
+}
+
+/// =======================
+/// PREP HISTORY SCREEN
+/// =======================
+
+class PrepHistoryScreen extends StatefulWidget {
+  const PrepHistoryScreen({super.key});
+
+  @override
+  State<PrepHistoryScreen> createState() => _PrepHistoryScreenState();
+}
+
+class _PrepHistoryScreenState extends State<PrepHistoryScreen> {
+  late Future<List<PrepChecklist>> _future;
+  String _sortBy = 'date'; // date, brand, or serial
+
+  @override
+  void initState() {
+    super.initState();
+    _future = fetchAllPrepChecklists();
+  }
+
+  void _refresh() {
+    setState(() {
+      _future = fetchAllPrepChecklists();
+    });
+  }
+
+  List<PrepChecklist> _sortChecklists(List<PrepChecklist> checklists) {
+    final sorted = List<PrepChecklist>.from(checklists);
+
+    switch (_sortBy) {
+      case 'brand':
+        sorted.sort((a, b) {
+          final brandCompare = a.brand.compareTo(b.brand);
+          if (brandCompare != 0) return brandCompare;
+          return a.series.compareTo(b.series);
+        });
+        break;
+      case 'serial':
+        sorted.sort((a, b) => a.serialNumber.compareTo(b.serialNumber));
+        break;
+      case 'date':
+      default:
+        sorted.sort((a, b) {
+          if (a.timestamp == null && b.timestamp == null) return 0;
+          if (a.timestamp == null) return 1;
+          if (b.timestamp == null) return -1;
+          return b.timestamp!.compareTo(a.timestamp!); // Most recent first
+        });
+    }
+
+    return sorted;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Prep History'),
+        actions: [
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.sort),
+            tooltip: 'Sort by',
+            onSelected: (value) {
+              setState(() {
+                _sortBy = value;
+              });
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: 'date',
+                child: Text('Sort by Date'),
+              ),
+              const PopupMenuItem(
+                value: 'brand',
+                child: Text('Sort by Brand'),
+              ),
+              const PopupMenuItem(
+                value: 'serial',
+                child: Text('Sort by Serial'),
+              ),
+            ],
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _refresh,
+          ),
+        ],
+      ),
+      body: FutureBuilder<List<PrepChecklist>>(
+        future: _future,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(
+              child: Text(
+                'Error loading prep history:\n${snapshot.error}',
+                textAlign: TextAlign.center,
+              ),
+            );
+          }
+
+          final checklists = _sortChecklists(snapshot.data ?? []);
+
+          if (checklists.isEmpty) {
+            return const Center(
+              child: Text('No prep history found'),
+            );
+          }
+
+          return RefreshIndicator(
+            onRefresh: () async {
+              setState(() {
+                _future = fetchAllPrepChecklists();
+              });
+              await _future;
+            },
+            child: ListView.builder(
+              padding: const EdgeInsets.all(12.0),
+              itemCount: checklists.length,
+              itemBuilder: (context, index) {
+                final checklist = checklists[index];
+                final dateStr = checklist.timestamp != null
+                    ? '${checklist.timestamp!.year}-${checklist.timestamp!.month.toString().padLeft(2, '0')}-${checklist.timestamp!.day.toString().padLeft(2, '0')}'
+                    : checklist.prepDate;
+
+                return Card(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  child: ListTile(
+                    title: Text(
+                      '${checklist.brand}${checklist.series.isNotEmpty ? ' – ${checklist.series}' : ''}',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('SN: ${checklist.serialNumber}'),
+                        Text('Date: $dateStr'),
+                        Text('Prepped by: ${checklist.preppedByName}'),
+                        if (checklist.notes.isNotEmpty)
+                          Text('Notes: ${checklist.notes}'),
+                      ],
+                    ),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (context) => PrepChecklistDetailScreen(checklist: checklist),
+                        ),
+                      );
+                    },
+                  ),
+                );
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// =======================
+/// PREP CHECKLIST DETAIL SCREEN
+/// =======================
+
+class PrepChecklistDetailScreen extends StatelessWidget {
+  final PrepChecklist checklist;
+
+  const PrepChecklistDetailScreen({super.key, required this.checklist});
+
+  @override
+  Widget build(BuildContext context) {
+    final dateStr = checklist.timestamp != null
+        ? '${checklist.timestamp!.year}-${checklist.timestamp!.month.toString().padLeft(2, '0')}-${checklist.timestamp!.day.toString().padLeft(2, '0')}'
+        : checklist.prepDate;
+
+    // Sort checklist items alphabetically for consistent display
+    final sortedItems = checklist.checklistItems.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Prep Checklist Details'),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Header Card with lift info
+            Card(
+              color: kBrandGreen.withValues(alpha: 0.1),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${checklist.brand}${checklist.series.isNotEmpty ? ' – ${checklist.series}' : ''}',
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text('Serial Number: ${checklist.serialNumber}'),
+                    Text('Date: $dateStr'),
+                    Text('Prepped by: ${checklist.preppedByName}'),
+                    if (checklist.preppedByEmail.isNotEmpty)
+                      Text('Email: ${checklist.preppedByEmail}'),
+                    if (checklist.notes.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Notes:',
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      Text(checklist.notes),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Checklist Items Section
+            const Text(
+              'Checklist Items',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+
+            // Display all checklist items with checkboxes (read-only)
+            ...sortedItems.map((entry) {
+              final itemName = entry.key;
+              final isChecked = entry.value;
+
+              return Card(
+                margin: const EdgeInsets.symmetric(vertical: 2),
+                child: CheckboxListTile(
+                  value: isChecked,
+                  onChanged: null, // Read-only
+                  title: Text(
+                    _formatChecklistItemName(itemName),
+                  ),
+                  secondary: Icon(
+                    isChecked ? Icons.check_circle : Icons.circle_outlined,
+                    color: isChecked ? Colors.green : Colors.grey,
+                  ),
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Format checklist item names to be more readable
+  /// Example: "rails_in_good_condition" -> "Rails In Good Condition"
+  String _formatChecklistItemName(String name) {
+    return name
+        .split('_')
+        .map((word) => word.isEmpty ? '' : word[0].toUpperCase() + word.substring(1))
+        .join(' ');
+  }
 }
 
 /// Minimal PickupListScreen placeholder. If you already have a full
@@ -1092,6 +1689,78 @@ class _PickupListScreenState extends State<PickupListScreen> {
     }
   }
 
+  Future<void> _deleteItem(Map<String, dynamic> item) async {
+    final itemId = item['id']?.toString() ?? '';
+    if (itemId.isEmpty) return;
+
+    // Show confirmation dialog
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Item'),
+        content: Text('Are you sure you want to delete "${item['item']}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    // Optimistic update: remove from list immediately
+    final itemIndex = _items.indexWhere((it) => it['id'] == itemId);
+    final removedItem = item;
+    setState(() {
+      _items.removeAt(itemIndex);
+    });
+
+    try {
+      final queryParams = {
+        'action': 'delete_pickup_item',
+        'id': itemId,
+        if (apiKey != null) 'api_key': apiKey!,
+      };
+
+      final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
+      final resp = await http.get(uri);
+
+      if (resp.statusCode != 200) {
+        throw Exception('Server error: ${resp.statusCode}');
+      }
+
+      final data = json.decode(resp.body);
+      if (data is Map && data['status'] != 'ok') {
+        throw Exception('API error: ${data['message'] ?? 'unknown'}');
+      }
+
+      // Success - show confirmation
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Item deleted')),
+        );
+      }
+    } catch (e) {
+      debugPrint('Failed to delete pickup item: $e');
+      // Revert optimistic update on failure
+      setState(() {
+        _items.insert(itemIndex, removedItem);
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to delete item: $e')),
+        );
+      }
+    }
+  }
+
   Future<void> _refresh() async => _fetchItems();
 
   Future<void> _openUserSettings() async {
@@ -1216,14 +1885,25 @@ class _PickupListScreenState extends State<PickupListScreen> {
                           itemBuilder: (context, index) {
                             final it = _items[index];
                             final completed = it['completed'] == true || it['completed'] == 'TRUE';
-                            return CheckboxListTile(
-                              value: completed,
-                              onChanged: (v) => _toggleComplete(it, v ?? false),
-                              title: Text(it['item']?.toString() ?? ''),
-                              subtitle: Text("Added by: ${it['added_by'] ?? ''}"),
-                              secondary: completed
+                            return ListTile(
+                              leading: completed
                                   ? const Icon(Icons.check_circle)
                                   : const Icon(Icons.inventory_2),
+                              title: Text(it['item']?.toString() ?? ''),
+                              subtitle: Text("Added by: ${it['added_by'] ?? ''}"),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Checkbox(
+                                    value: completed,
+                                    onChanged: (v) => _toggleComplete(it, v ?? false),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete_outline, color: Colors.red),
+                                    onPressed: () => _deleteItem(it),
+                                  ),
+                                ],
+                              ),
                             );
                           },
                         ),
@@ -1245,6 +1925,7 @@ class _HomeShellState extends State<HomeShell> {
   final List<Widget> _pages = [
     const LiftsScreen(),
     const RampsScreen(),
+    const PrepScreen(),
     const PickupListScreen(),
   ];
 
@@ -1287,6 +1968,10 @@ class _HomeShellState extends State<HomeShell> {
           BottomNavigationBarItem(
             icon: Icon(Icons.stairs),
             label: 'Ramps',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.build),
+            label: 'Prep',
           ),
           BottomNavigationBarItem(
             icon: Icon(Icons.check_box),
@@ -1630,7 +2315,7 @@ class _RampsScreenState extends State<RampsScreen> {
               color: belowMin ? Colors.red.shade50 : null,
               child: ListTile(
                 title: Text(
-                  '${item.brand} – ${item.size}',
+                  getRampDisplayTitle(item),
                   style: TextStyle(
                     fontWeight: FontWeight.w600,
                     color: belowMin ? Colors.red.shade700 : null,
@@ -2418,6 +3103,10 @@ class _LiftsScreenState extends State<LiftsScreen> {
   late Future<List<LiftRecord>> _future;
   String _search = '';
   String? _statusFilter;
+  String? _brandFilter;
+  String? _seriesFilter;
+  String? _orientationFilter;
+  String? _prepStatusFilter;
 
   @override
   void initState() {
@@ -2446,6 +3135,14 @@ class _LiftsScreenState extends State<LiftsScreen> {
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => StairliftQuantitiesScreen(),
+      ),
+    );
+  }
+
+  void _openFoldingRails() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => const FoldingRailsScreen(),
       ),
     );
   }
@@ -2518,6 +3215,11 @@ class _LiftsScreenState extends State<LiftsScreen> {
         title: const Text('Lifts'),
         actions: [
           IconButton(
+            icon: const Icon(Icons.view_module),
+            tooltip: 'Folding rails',
+            onPressed: _openFoldingRails,
+          ),
+          IconButton(
             icon: const Icon(Icons.list_alt),
             tooltip: 'Stairlift quantities',
             onPressed: _openStairliftQuantities,
@@ -2548,7 +3250,12 @@ class _LiftsScreenState extends State<LiftsScreen> {
             );
           }
 
-          final lifts = snapshot.data ?? [];
+          final allLifts = snapshot.data ?? [];
+
+          // Filter out folding rail individual entries from lifts list
+          final lifts = allLifts.where((l) => !isLiftRecordFoldingRail(l)).toList();
+
+          // Extract unique values for all filters
           final statuses = (lifts
                   .map((l) => l.status.trim())
                   .where((s) => s.isNotEmpty)
@@ -2556,16 +3263,76 @@ class _LiftsScreenState extends State<LiftsScreen> {
                   .toList()
                 ..sort());
 
+          final brands = (lifts
+                  .map((l) => l.brand.trim())
+                  .where((b) => b.isNotEmpty)
+                  .toSet()
+                  .toList()
+                ..sort());
+
+          final allSeries = (lifts
+                  .map((l) => l.series.trim())
+                  .where((s) => s.isNotEmpty)
+                  .toSet()
+                  .toList()
+                ..sort());
+
+          final orientations = (lifts
+                  .map((l) => l.orientation.trim())
+                  .where((o) => o.isNotEmpty)
+                  .toSet()
+                  .toList()
+                ..sort());
+
+          final prepStatuses = (lifts
+                  .map((l) => l.preppedStatus.trim())
+                  .where((p) => p.isNotEmpty)
+                  .toSet()
+                  .toList()
+                ..sort());
+
+          // Single filtering pipeline with AND logic
           final filtered = lifts.where((l) {
+            // Status filter
             if (_statusFilter != null &&
                 _statusFilter!.isNotEmpty &&
                 l.status.trim() != _statusFilter) {
               return false;
             }
 
+            // Brand filter
+            if (_brandFilter != null &&
+                _brandFilter!.isNotEmpty &&
+                l.brand.trim() != _brandFilter) {
+              return false;
+            }
+
+            // Series filter
+            if (_seriesFilter != null &&
+                _seriesFilter!.isNotEmpty &&
+                l.series.trim() != _seriesFilter) {
+              return false;
+            }
+
+            // Orientation filter
+            if (_orientationFilter != null &&
+                _orientationFilter!.isNotEmpty &&
+                l.orientation.trim() != _orientationFilter) {
+              return false;
+            }
+
+            // Prep Status filter
+            if (_prepStatusFilter != null &&
+                _prepStatusFilter!.isNotEmpty &&
+                l.preppedStatus.trim() != _prepStatusFilter) {
+              return false;
+            }
+
+            // Search filter (applies to multiple fields)
             if (_search.isNotEmpty) {
               final haystack = [
                 l.serialNumber,
+                l.binNumber,
                 l.brand,
                 l.series,
                 l.currentLocation,
@@ -2579,7 +3346,13 @@ class _LiftsScreenState extends State<LiftsScreen> {
 
           return Column(
             children: [
-              _buildLiftsFilters(statuses),
+              _buildLiftsFilters(
+                statuses: statuses,
+                brands: brands,
+                series: allSeries,
+                orientations: orientations,
+                prepStatuses: prepStatuses,
+              ),
               if (filtered.isEmpty)
                 const Expanded(
                   child: Center(
@@ -2659,15 +3432,22 @@ class _LiftsScreenState extends State<LiftsScreen> {
     );
   }
 
-  Widget _buildLiftsFilters(List<String> statuses) {
+  Widget _buildLiftsFilters({
+    required List<String> statuses,
+    required List<String> brands,
+    required List<String> series,
+    required List<String> orientations,
+    required List<String> prepStatuses,
+  }) {
     return Column(
       children: [
+        // Search bar
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: TextField(
             decoration: const InputDecoration(
               prefixIcon: Icon(Icons.search),
-              hintText: 'Search by serial, brand, or location...',
+              hintText: 'Search by serial, bin #, brand, location...',
               border: OutlineInputBorder(),
             ),
             onChanged: (value) {
@@ -2677,38 +3457,449 @@ class _LiftsScreenState extends State<LiftsScreen> {
             },
           ),
         ),
-        if (statuses.isNotEmpty)
-          Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: DropdownButton<String>(
-                value: _statusFilter ?? '',
-                hint: const Text('All statuses'),
-                items: <DropdownMenuItem<String>>[
-                  const DropdownMenuItem<String>(
-                    value: '',
-                    child: Text('All statuses'),
-                  ),
-                  ...statuses.map(
-                    (s) => DropdownMenuItem<String>(
-                      value: s,
-                      child: Text(s),
+
+        // Filters - Two row grid layout
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
+          child: Column(
+            children: [
+              // First row: Status, Brand, Series
+              Row(
+                children: [
+                  if (statuses.isNotEmpty)
+                    Expanded(
+                      child: _buildCompactDropdown(
+                        value: _statusFilter,
+                        hint: 'Status',
+                        items: statuses,
+                        onChanged: (value) {
+                          setState(() {
+                            _statusFilter = value;
+                          });
+                        },
+                      ),
                     ),
-                  ),
+                  if (statuses.isNotEmpty && brands.isNotEmpty)
+                    const SizedBox(width: 8),
+                  if (brands.isNotEmpty)
+                    Expanded(
+                      child: _buildCompactDropdown(
+                        value: _brandFilter,
+                        hint: 'Brand',
+                        items: brands,
+                        onChanged: (value) {
+                          setState(() {
+                            _brandFilter = value;
+                          });
+                        },
+                      ),
+                    ),
+                  if (brands.isNotEmpty && series.isNotEmpty)
+                    const SizedBox(width: 8),
+                  if (series.isNotEmpty)
+                    Expanded(
+                      child: _buildCompactDropdown(
+                        value: _seriesFilter,
+                        hint: 'Series',
+                        items: series,
+                        onChanged: (value) {
+                          setState(() {
+                            _seriesFilter = value;
+                          });
+                        },
+                      ),
+                    ),
                 ],
-                onChanged: (value) {
-                  setState(() {
-                    _statusFilter =
-                        (value == null || value.isEmpty) ? null : value;
-                  });
-                },
               ),
-            ),
+              const SizedBox(height: 8),
+              // Second row: Orientation, Prep Status
+              Row(
+                children: [
+                  if (orientations.isNotEmpty)
+                    Expanded(
+                      child: _buildCompactDropdown(
+                        value: _orientationFilter,
+                        hint: 'Orientation',
+                        items: orientations,
+                        onChanged: (value) {
+                          setState(() {
+                            _orientationFilter = value;
+                          });
+                        },
+                      ),
+                    ),
+                  if (orientations.isNotEmpty && prepStatuses.isNotEmpty)
+                    const SizedBox(width: 8),
+                  if (prepStatuses.isNotEmpty)
+                    Expanded(
+                      child: _buildCompactDropdown(
+                        value: _prepStatusFilter,
+                        hint: 'Prep Status',
+                        items: prepStatuses,
+                        onChanged: (value) {
+                          setState(() {
+                            _prepStatusFilter = value;
+                          });
+                        },
+                      ),
+                    ),
+                  // Add empty expanded to balance if only one filter in row
+                  if (orientations.isNotEmpty && prepStatuses.isEmpty)
+                    const Expanded(child: SizedBox()),
+                  if (orientations.isEmpty && prepStatuses.isNotEmpty)
+                    const Expanded(child: SizedBox()),
+                ],
+              ),
+            ],
           ),
+        ),
       ],
     );
+  }
+
+  Widget _buildCompactDropdown({
+    required String? value,
+    required String hint,
+    required List<String> items,
+    required void Function(String?) onChanged,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.grey.shade300),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: value,
+          hint: Text(hint, style: const TextStyle(fontSize: 14)),
+          isExpanded: true,
+          isDense: true,
+          items: <DropdownMenuItem<String>>[
+            DropdownMenuItem<String>(
+              value: null,
+              child: Text('All $hint', style: const TextStyle(fontSize: 14)),
+            ),
+            ...items.map(
+              (item) => DropdownMenuItem<String>(
+                value: item,
+                child: Text(item, style: const TextStyle(fontSize: 14)),
+              ),
+            ),
+          ],
+          onChanged: onChanged,
+        ),
+      ),
+    );
+  }
+}
+
+/// =======================
+/// FOLDING RAILS SCREEN (with New/Used tabs)
+/// =======================
+
+class FoldingRailsScreen extends StatefulWidget {
+  const FoldingRailsScreen({super.key});
+
+  @override
+  State<FoldingRailsScreen> createState() => _FoldingRailsScreenState();
+}
+
+class _FoldingRailsScreenState extends State<FoldingRailsScreen>
+    with SingleTickerProviderStateMixin {
+  late Future<InventoryData> _future;
+  late TabController _tabController;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = fetchInventory();
+    _tabController = TabController(length: 2, vsync: this);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  void _refresh() {
+    setState(() {
+      _future = fetchInventory();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Folding Rails'),
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(text: 'New'),
+            Tab(text: 'Used'),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _refresh,
+          ),
+        ],
+      ),
+      body: FutureBuilder<InventoryData>(
+        future: _future,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(
+              child: Text(
+                'Error loading inventory:\n${snapshot.error}',
+                textAlign: TextAlign.center,
+              ),
+            );
+          }
+
+          final data = snapshot.data;
+          if (data == null) {
+            return const Center(child: Text('No data available'));
+          }
+
+          // Get folding rails only
+          final allFoldingRails = data.stairlifts
+              .where((item) => item.active && isFoldingRail(item))
+              .toList();
+
+          final newFoldingRails = allFoldingRails
+              .where((item) => item.condition == 'New')
+              .toList();
+          final usedFoldingRails = allFoldingRails
+              .where((item) => item.condition == 'Used')
+              .toList();
+
+          return TabBarView(
+            controller: _tabController,
+            children: [
+              _buildFoldingRailList(newFoldingRails, 'New'),
+              _buildFoldingRailList(usedFoldingRails, 'Used'),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildFoldingRailList(List<StairliftItem> items, String condition) {
+    if (items.isEmpty) {
+      return Center(
+        child: Text(
+          'No $condition folding rails',
+          style: const TextStyle(fontSize: 16, color: Colors.grey),
+        ),
+      );
+    }
+
+    // Group by brand + series + orientation
+    final Map<String, List<StairliftItem>> grouped = {};
+    for (final item in items) {
+      final key = '${item.brand}|${item.series}|${item.orientation}';
+      grouped.putIfAbsent(key, () => []).add(item);
+    }
+
+    return RefreshIndicator(
+      onRefresh: () async {
+        setState(() {
+          _future = fetchInventory();
+        });
+        await _future;
+      },
+      child: ListView.builder(
+        padding: const EdgeInsets.all(12.0),
+        itemCount: grouped.length,
+        itemBuilder: (context, index) {
+          final key = grouped.keys.elementAt(index);
+          final groupItems = grouped[key]!;
+          final item = groupItems.first;
+
+          return _buildFoldingRailTile(item);
+        },
+      ),
+    );
+  }
+
+  Widget _buildFoldingRailTile(StairliftItem item) {
+    // Determine color based on condition
+    final color = item.condition == 'New' ? Colors.green : Colors.blue;
+
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      color: color.shade50,
+      child: ListTile(
+        leading: Icon(Icons.format_list_numbered, color: color),
+        title: Text(
+          '${item.brand} ${item.series}',
+          style: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Orientation: ${item.orientation}'),
+            Text('Condition: ${item.condition}'),
+            Text('${item.currentQty} units',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.remove_circle_outline),
+              onPressed: item.currentQty > 0
+                  ? () => _adjustFoldingRailQuantity(item, -1)
+                  : null,
+            ),
+            IconButton(
+              icon: const Icon(Icons.add_circle_outline),
+              onPressed: () => _adjustFoldingRailQuantity(item, 1),
+            ),
+          ],
+        ),
+        onTap: () => _showFoldingRailQuantityDialog(item),
+      ),
+    );
+  }
+
+  Future<void> _adjustFoldingRailQuantity(StairliftItem item, int delta) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userName = prefs.getString('user_name') ?? '';
+      final userEmail = prefs.getString('user_email') ?? '';
+
+      if (userEmail.isEmpty || userName.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please set your name & email in settings'),
+          ),
+        );
+        return;
+      }
+
+      await submitJobAdjustment(
+        userEmail: userEmail,
+        userName: userName,
+        jobRef: 'Folding Rail Adjustment',
+        items: [
+          {
+            'item_id': item.itemId,
+            'category': 'stairlift',
+            'delta': delta,
+            'condition': item.condition,
+          }
+        ],
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Updated ${item.brand} ${item.series} (${item.orientation}) by ${delta > 0 ? '+' : ''}$delta',
+          ),
+        ),
+      );
+
+      _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error adjusting quantity: $e')),
+      );
+    }
+  }
+
+  Future<void> _showFoldingRailQuantityDialog(StairliftItem item) async {
+    final controller = TextEditingController(text: item.currentQty.toString());
+
+    final result = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('${item.brand} ${item.series}\n${item.orientation} - ${item.condition}'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+            labelText: 'Quantity',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: kBrandGreen,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () {
+              final qty = int.tryParse(controller.text);
+              Navigator.of(context).pop(qty);
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    if (result != null && result != item.currentQty) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final userName = prefs.getString('user_name') ?? '';
+        final userEmail = prefs.getString('user_email') ?? '';
+
+        if (userEmail.isEmpty || userName.isEmpty) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Please set your name & email in settings'),
+            ),
+          );
+          return;
+        }
+
+        await submitFullCheck(
+          userEmail: userEmail,
+          userName: userName,
+          items: [
+            {
+              'item_id': item.itemId,
+              'category': 'stairlift',
+              'condition': item.condition,
+              'new_qty': result,
+            }
+          ],
+        );
+
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Set ${item.brand} ${item.series} (${item.orientation}) to $result units'),
+          ),
+        );
+
+        _refresh();
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error setting quantity: $e')),
+        );
+      }
+    }
   }
 }
 
@@ -3885,6 +5076,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   String _preppedStatus = 'Needs prepping';
 
   final _serialController = TextEditingController();
+  final _binNumberController = TextEditingController();
   final _dateAcquiredController = TextEditingController();
   final _currentLocationController = TextEditingController();
   final _currentJobController = TextEditingController();
@@ -3904,6 +5096,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
     final existing = widget.existing;
     if (existing != null) {
       _serialController.text = existing.serialNumber;
+      _binNumberController.text = existing.binNumber;
       _dateAcquiredController.text = existing.dateAcquired;
       _currentLocationController.text = existing.currentLocation;
       _currentJobController.text = existing.currentJob;
@@ -4072,6 +5265,112 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
       return;
     }
 
+    // Check for serial number edit confirmation (only if editing and serial changed)
+    if (_isEditing) {
+      final originalSerial = widget.existing!.serialNumber;
+      final newSerial = _serialController.text.trim();
+
+      if (originalSerial.isNotEmpty &&
+          newSerial.isNotEmpty &&
+          originalSerial != newSerial) {
+        if (!mounted) return;
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Confirm Serial Number Change'),
+            content: Text(
+              'You are changing the serial number from "$originalSerial" to "$newSerial".\n\n'
+              'This will affect the lift history and tracking. Are you sure you want to continue?'
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Continue'),
+              ),
+            ],
+          ),
+        );
+
+        if (confirmed != true) return;
+      }
+    }
+
+    // Check for duplicate serial number (only for new lifts)
+    if (!_isEditing) {
+      final serialNumber = _serialController.text.trim();
+      if (serialNumber.isNotEmpty) {
+        setState(() {
+          _saving = true;
+        });
+
+        try {
+          final existingLift = await checkDuplicateSerial(serialNumber);
+
+          if (existingLift != null) {
+            if (!mounted) {
+              setState(() {
+                _saving = false;
+              });
+              return;
+            }
+
+            final action = await showDialog<String>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: const Text('Duplicate Serial Number'),
+                content: Text(
+                  'A lift with serial number "$serialNumber" already exists.\n\n'
+                  'Brand: ${existingLift.brand}\n'
+                  'Series: ${existingLift.series}\n'
+                  'Status: ${existingLift.status}\n\n'
+                  'Would you like to edit the existing lift instead?'
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop('cancel'),
+                    child: const Text('Cancel'),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop('edit'),
+                    child: const Text('Go to Existing Lift'),
+                  ),
+                ],
+              ),
+            );
+
+            setState(() {
+              _saving = false;
+            });
+
+            if (action == 'edit') {
+              if (!mounted) return;
+              // Close this form and open the existing lift's form
+              Navigator.of(context).pop(false);
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => LiftFormScreen(existing: existingLift),
+                ),
+              );
+            }
+            return;
+          }
+        } catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error checking serial number: $e')),
+          );
+          setState(() {
+            _saving = false;
+          });
+          return;
+        }
+      }
+    }
+
     setState(() {
       _saving = true;
     });
@@ -4105,6 +5404,9 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         notes: _notesController.text.trim().isEmpty
             ? null
             : _notesController.text.trim(),
+        binNumber: _binNumberController.text.trim().isEmpty
+            ? null
+            : _binNumberController.text.trim(),
       );
 
       if (!mounted) return;
@@ -4128,6 +5430,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   @override
   void dispose() {
     _serialController.dispose();
+    _binNumberController.dispose();
     _dateAcquiredController.dispose();
     _currentLocationController.dispose();
     _currentJobController.dispose();
@@ -4170,18 +5473,39 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         child: ListView(
           padding: const EdgeInsets.all(12.0),
           children: [
-            TextFormField(
-              controller: _serialController,
-              decoration: const InputDecoration(
-                labelText: 'Serial number',
-                border: OutlineInputBorder(),
-              ),
-              validator: (v) {
-                if (v == null || v.trim().isEmpty) {
-                  return 'Serial number is required';
-                }
-                return null;
-              },
+            Row(
+              children: [
+                Expanded(
+                  flex: _condition == 'Used' ? 2 : 1,
+                  child: TextFormField(
+                    controller: _serialController,
+                    decoration: const InputDecoration(
+                      labelText: 'Serial number',
+                      border: OutlineInputBorder(),
+                    ),
+                    validator: (v) {
+                      if (v == null || v.trim().isEmpty) {
+                        return 'Serial number is required';
+                      }
+                      return null;
+                    },
+                  ),
+                ),
+                if (_condition == 'Used') ...[
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 1,
+                    child: TextFormField(
+                      controller: _binNumberController,
+                      decoration: const InputDecoration(
+                        labelText: 'Bin #',
+                        border: OutlineInputBorder(),
+                        hintText: 'Optional',
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
@@ -4357,12 +5681,12 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                   child: Text('Needs prepping'),
                 ),
                 DropdownMenuItem<String>(
-                  value: 'Prepped',
-                  child: Text('Prepped'),
+                  value: 'Needs repair',
+                  child: Text('Needs repair'),
                 ),
                 DropdownMenuItem<String>(
-                  value: 'Not applicable',
-                  child: Text('Not applicable'),
+                  value: 'Prepped',
+                  child: Text('Prepped'),
                 ),
               ],
               decoration: const InputDecoration(
@@ -4400,6 +5724,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                     preppedStatus: _preppedStatus,
                     lastPrepDate: _lastPrepDateController.text.trim(),
                     notes: _notesController.text.trim(),
+                    binNumber: widget.existing?.binNumber ?? '',
                   );
 
                   // Open prep checklist form
