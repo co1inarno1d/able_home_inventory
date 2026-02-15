@@ -437,65 +437,69 @@ function apiFullCheck(params) {
   }
 
   const ss = getSs();
-  const rampsSheet   = ss.getSheetByName(SHEET_RAMPS);
-  const changesSheet = ss.getSheetByName(SHEET_CHANGES);
+  const rampsSheet      = ss.getSheetByName(SHEET_RAMPS);
+  const stairliftsSheet = ss.getSheetByName(SHEET_STAIRLIFTS);
+  const changesSheet    = ss.getSheetByName(SHEET_CHANGES);
 
-  const rampValues = rampsSheet.getDataRange().getValues();
-  const rampRows   = rampValues.slice(1);
+  // Build lookup maps: item_id|condition -> sheet row index (1-based)
+  function buildIndexMap(sheet, condColIndex, idColIndex) {
+    const rows = sheet.getDataRange().getValues().slice(1);
+    const map = {};
+    rows.forEach((r, i) => {
+      const id   = String(r[idColIndex]   || '').trim();
+      const cond = String(r[condColIndex] || '').trim();
+      if (id) map[id + '|' + cond] = i + 2;
+    });
+    return map;
+  }
 
-  // Build a map of item_id|condition -> row index
-  // This matches the Job Adjustment logic to find the correct row
-  const itemIndexByKey = {};
-  rampRows.forEach((r, i) => {
-    const id = String(r[0] || '').trim();
-    const cond = String(r[3] || '').trim(); // condition is column D
-    if (id) {
-      const key = id + '|' + cond;
-      itemIndexByKey[key] = i + 2; // +2 for header and 1-based indexing
-    }
-  });
+  // Ramps: col A=item_id(0), D=condition(3), E=current_qty(4)
+  const rampIndex  = buildIndexMap(rampsSheet,      3, 0);
+  // Stairlifts: col A=item_id(0), F=condition(5), H=current_qty(7)
+  const stairIndex = buildIndexMap(stairliftsSheet, 5, 0);
 
   let updatedCount = 0;
   const now = new Date();
 
   items.forEach(it => {
-    const itemId    = String(it.item_id || '').trim();
+    const itemId    = String(it.item_id   || '').trim();
     const condition = String(it.condition || '').trim();
     const newQty    = toNumber(it.new_qty);
+    const category  = String(it.category  || 'ramp').toLowerCase();
 
-    const key = itemId + '|' + condition;
-    const rowIndex = itemIndexByKey[key];
+    const isStairlift = category === 'stairlift';
+    const sheet       = isStairlift ? stairliftsSheet : rampsSheet;
+    const indexMap    = isStairlift ? stairIndex : rampIndex;
+    const qtyCol      = isStairlift ? 8 : 5; // H=8 for stairlifts, E=5 for ramps
+
+    const key      = itemId + '|' + condition;
+    const rowIndex = indexMap[key];
 
     if (!rowIndex) {
-      Logger.log('Full Check: item not found for key: ' + key);
+      Logger.log('Full Check: item not found for key: ' + key + ' (category: ' + category + ')');
       return;
     }
 
-    // Get the current row data
-    const row = rampsSheet.getRange(rowIndex, 1, 1, 6).getValues()[0];
-    const currentQty = toNumber(row[4]); // column E (current_qty)
-    const delta = newQty - currentQty;
+    const row        = sheet.getRange(rowIndex, 1, 1, isStairlift ? 10 : 6).getValues()[0];
+    const currentQty = toNumber(row[isStairlift ? 7 : 4]);
+    const delta      = newQty - currentQty;
 
-    // Update the quantity in the sheet
-    rampsSheet.getRange(rowIndex, 5).setValue(newQty); // column E
+    sheet.getRange(rowIndex, qtyCol).setValue(newQty);
 
-    Logger.log('Full Check: Updated ' + key + ' from ' + currentQty + ' to ' + newQty);
-
-    // Append to Inventory_Changes
     changesSheet.appendRow([
-      now,                    // 0 timestamp
-      userEmail,              // 1 user_email
-      userName,               // 2 user_name
-      'Full Check',           // 3 change_type
-      itemId,                 // 4 item_id
-      String(row[1] || ''),   // 5 brand
-      String(row[2] || ''),   // 6 size / series_or_size
-      '',                     // 7 orientation
-      condition,              // 8 condition
-      currentQty,             // 9 old_qty
-      newQty,                 // 10 new_qty
-      delta,                  // 11 delta
-      ''                      // 12 job_ref (empty for full check)
+      now,
+      userEmail,
+      userName,
+      'Full Check',
+      itemId,
+      String(row[1] || ''),   // brand
+      String(row[2] || ''),   // series or size
+      isStairlift ? String(row[3] || '') : '', // orientation (stairlifts only)
+      condition,
+      currentQty,
+      newQty,
+      delta,
+      ''
     ]);
 
     updatedCount++;
@@ -505,7 +509,7 @@ function apiFullCheck(params) {
 }
 
 /**************************************
- * JOB ADJUSTMENT – Ramps only (as used now)
+ * JOB ADJUSTMENT – Ramps and Stairlifts
  **************************************/
 
 function apiJobAdjustment(params) {
@@ -519,63 +523,69 @@ function apiJobAdjustment(params) {
   }
 
   const ss = getSs();
-  const rampsSheet   = ss.getSheetByName(SHEET_RAMPS);
-  const changesSheet = ss.getSheetByName(SHEET_CHANGES);
+  const rampsSheet      = ss.getSheetByName(SHEET_RAMPS);
+  const stairliftsSheet = ss.getSheetByName(SHEET_STAIRLIFTS);
+  const changesSheet    = ss.getSheetByName(SHEET_CHANGES);
 
-  const rampValues = rampsSheet.getDataRange().getValues();
-  const rampRows   = rampValues.slice(1);
+  // Build lookup maps: item_id|condition -> sheet row index (1-based)
+  function buildIndexMap(sheet, condColIndex, idColIndex) {
+    const rows = sheet.getDataRange().getValues().slice(1);
+    const map = {};
+    rows.forEach((r, i) => {
+      const id   = String(r[idColIndex]   || '').trim();
+      const cond = String(r[condColIndex] || '').trim();
+      if (id) map[id + '|' + cond] = i + 2;
+    });
+    return map;
+  }
 
-  // Build a map of item_id|condition -> row index
-  // This is the FIX: we need to match both item_id AND condition
-  const itemIndexByKey = {};
-  rampRows.forEach((r, i) => {
-    const id = String(r[0] || '').trim();
-    const cond = String(r[3] || '').trim(); // condition is column D
-    if (id) {
-      const key = id + '|' + cond;
-      itemIndexByKey[key] = i + 2; // +2 for header and 1-based indexing
-    }
-  });
+  // Ramps: col A=item_id(0), D=condition(3), E=current_qty(4)
+  const rampIndex  = buildIndexMap(rampsSheet,      3, 0);
+  // Stairlifts: col A=item_id(0), F=condition(5), H=current_qty(7)
+  const stairIndex = buildIndexMap(stairliftsSheet, 5, 0);
 
   let updatedCount = 0;
   const now = new Date();
 
   items.forEach(it => {
-    const itemId    = String(it.item_id || '').trim();
+    const itemId    = String(it.item_id   || '').trim();
     const condition = String(it.condition || '').trim();
     const delta     = toNumber(it.delta);
+    const category  = String(it.category  || 'ramp').toLowerCase();
 
-    const key = itemId + '|' + condition;
-    const rowIndex = itemIndexByKey[key];
+    const isStairlift = category === 'stairlift';
+    const sheet       = isStairlift ? stairliftsSheet : rampsSheet;
+    const indexMap    = isStairlift ? stairIndex : rampIndex;
+    const qtyCol      = isStairlift ? 8 : 5; // H=8 for stairlifts, E=5 for ramps
+
+    const key      = itemId + '|' + condition;
+    const rowIndex = indexMap[key];
 
     if (!rowIndex) {
-      Logger.log('Job Adjustment: item not found for key: ' + key);
+      Logger.log('Job Adjustment: item not found for key: ' + key + ' (category: ' + category + ')');
       return;
     }
 
-    const row = rampsSheet.getRange(rowIndex, 1, 1, 6).getValues()[0];
-    const currentQty = toNumber(row[4]);
+    const row        = sheet.getRange(rowIndex, 1, 1, isStairlift ? 10 : 6).getValues()[0];
+    const currentQty = toNumber(row[isStairlift ? 7 : 4]);
     const newQty     = currentQty + delta;
 
-    rampsSheet.getRange(rowIndex, 5).setValue(newQty);
+    sheet.getRange(rowIndex, qtyCol).setValue(newQty);
 
-    Logger.log('Job Adjustment: Updated ' + key + ' from ' + currentQty + ' to ' + newQty + ' (delta: ' + delta + ')');
-
-    // Append to Inventory_Changes with the same 13-column layout
     changesSheet.appendRow([
-      now,                                    // 0 timestamp
-      userEmail,                              // 1 user_email
-      userName,                               // 2 user_name
-      delta < 0 ? 'Job Install' : 'Job Removal', // 3 change_type
-      itemId,                                 // 4 item_id
-      String(row[1] || ''),                   // 5 brand
-      String(row[2] || ''),                   // 6 size / series_or_size
-      '',                                     // 7 orientation
-      condition,                              // 8 condition
-      currentQty,                             // 9 old_qty
-      newQty,                                 // 10 new_qty
-      delta,                                  // 11 delta
-      jobRef                                  // 12 job_ref
+      now,
+      userEmail,
+      userName,
+      delta < 0 ? 'Job Install' : 'Job Removal',
+      itemId,
+      String(row[1] || ''),   // brand
+      String(row[2] || ''),   // series or size
+      isStairlift ? String(row[3] || '') : '', // orientation (stairlifts only)
+      condition,
+      currentQty,
+      newQty,
+      delta,
+      jobRef
     ]);
 
     updatedCount++;
@@ -1229,14 +1239,25 @@ function apiSavePrepChecklist(params) {
     // Build the row data matching the header order
     const rowData = new Array(header.length).fill('');
 
-    // Set common fields
-    rowData[colIndexes['checklist_id']] = newChecklistId;
-    rowData[colIndexes['timestamp']] = now;
-    rowData[colIndexes['serial_number']] = serialNumber;
-    rowData[colIndexes['brand']] = brand;
-    rowData[colIndexes['series']] = series;
+    // Helper to safely set a cell by column name (ignores missing columns)
+    function setCol(colName, value) {
+      const idx = colIndexes[colName];
+      if (idx !== undefined) rowData[idx] = value;
+    }
 
-    // Copy all other fields from params
+    // Set common fields — support both 'timestamp' and 'prep_date' column names
+    setCol('checklist_id', newChecklistId);
+    setCol('timestamp', now);
+    setCol('prep_date', now);   // sheet may use either name
+    setCol('lift_id', (params.lift_id || '').toString());
+    setCol('serial_number', serialNumber);
+    setCol('brand', brand);
+    setCol('series', series);
+    setCol('prepped_by_name', (params.prepped_by_name || '').toString());
+    setCol('prepped_by_email', (params.prepped_by_email || '').toString());
+    setCol('notes', (params.notes || '').toString());
+
+    // Copy all checklist item fields from params (boolean fields)
     Object.keys(params).forEach(key => {
       const normalizedKey = key.toLowerCase().replace(/ /g, '_');
       if (colIndexes[normalizedKey] !== undefined) {

@@ -698,16 +698,25 @@ Future<String> savePrepChecklist({
 
   debugPrint('Save prep checklist response: ${response.statusCode}');
 
+  if (response.statusCode == 302) {
+    // Apps Script redirects POST requests — treat as success
+    return '';
+  }
+
   if (response.statusCode != 200) {
     throw Exception('Failed to save prep checklist: ${response.statusCode}');
   }
 
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
+  try {
+    final data = json.decode(response.body);
+    if (data is Map && data['status'] != null && data['status'] != 'ok') {
+      throw Exception('API error: ${data['message']}');
+    }
+    return data['checklist_id']?.toString() ?? '';
+  } catch (_) {
+    // Non-JSON 200 response — treat as success
+    return '';
   }
-
-  return data['checklist_id']?.toString() ?? '';
 }
 
 Future<Map<String, dynamic>> getPrepChecklistTemplate({
@@ -989,12 +998,15 @@ bool isFoldingRail(StairliftItem item) {
   final brand = item.brand.toLowerCase();
   final series = item.series.toLowerCase();
 
-  // Bruno Manual Fold, Bruno Power Fold, Harmar Auto Fold
   if (brand.contains('bruno')) {
     return series.contains('manual fold') || series.contains('power fold');
   }
   if (brand.contains('harmar')) {
     return series.contains('auto fold');
+  }
+  // Acorn and Brooks folding rails
+  if (brand.contains('acorn') || brand.contains('brooks')) {
+    return series.contains('fold');
   }
 
   return false;
@@ -1010,6 +1022,9 @@ bool isLiftRecordFoldingRail(LiftRecord lift) {
   }
   if (brand.contains('harmar')) {
     return series.contains('auto fold');
+  }
+  if (brand.contains('acorn') || brand.contains('brooks')) {
+    return series.contains('fold');
   }
 
   return false;
@@ -1060,6 +1075,7 @@ class PrepScreen extends StatefulWidget {
 
 class _PrepScreenState extends State<PrepScreen> {
   late Future<List<LiftRecord>> _liftsFuture;
+  String? _statusFilter;
 
   @override
   void initState() {
@@ -1085,6 +1101,18 @@ class _PrepScreenState extends State<PrepScreen> {
     final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => PrepChecklistFormScreen(lift: lift),
+      ),
+    );
+
+    if (result == true && mounted) {
+      _refresh();
+    }
+  }
+
+  Future<void> _openServiceForm(LiftRecord lift) async {
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => LiftServiceFormScreen(lift: lift),
       ),
     );
 
@@ -1127,11 +1155,24 @@ class _PrepScreenState extends State<PrepScreen> {
 
           final lifts = snapshot.data ?? [];
 
-          // Group lifts by prep status
-          final needsPrepping = lifts
+          // Derive available statuses for the filter
+          final statuses = lifts
+              .map((l) => l.status.trim())
+              .where((s) => s.isNotEmpty)
+              .toSet()
+              .toList()
+            ..sort();
+
+          // Apply status filter before grouping
+          final filtered = _statusFilter == null
+              ? lifts
+              : lifts.where((l) => l.status.trim() == _statusFilter).toList();
+
+          // Group filtered lifts by prep status
+          final needsPrepping = filtered
               .where((l) => l.preppedStatus.toLowerCase() == 'needs prepping')
               .toList();
-          final needsRepair = lifts
+          final needsRepair = filtered
               .where((l) => l.preppedStatus.toLowerCase() == 'needs repair')
               .toList();
 
@@ -1145,6 +1186,25 @@ class _PrepScreenState extends State<PrepScreen> {
             child: ListView(
               padding: const EdgeInsets.all(12.0),
               children: [
+                // Status filter
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8.0),
+                  child: DropdownButtonFormField<String>(
+                    initialValue: _statusFilter,
+                    decoration: const InputDecoration(
+                      labelText: 'Filter by status',
+                      border: OutlineInputBorder(),
+                      contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      isDense: true,
+                    ),
+                    items: [
+                      const DropdownMenuItem(value: null, child: Text('All statuses')),
+                      ...statuses.map((s) => DropdownMenuItem(value: s, child: Text(s))),
+                    ],
+                    onChanged: (value) => setState(() => _statusFilter = value),
+                  ),
+                ),
+
                 // Needs Prepping Section
                 _buildSection(
                   title: 'Needs Prepping',
@@ -1159,7 +1219,7 @@ class _PrepScreenState extends State<PrepScreen> {
                   title: 'Needs Repair',
                   lifts: needsRepair,
                   emptyMessage: 'No lifts need repair',
-                  onTap: null, // No checklist for repair items
+                  onTap: _openServiceForm,
                 ),
               ],
             ),
@@ -1261,6 +1321,7 @@ class PrepHistoryScreen extends StatefulWidget {
 class _PrepHistoryScreenState extends State<PrepHistoryScreen> {
   late Future<List<PrepChecklist>> _future;
   String _sortBy = 'date'; // date, brand, or serial
+  String _search = '';
 
   @override
   void initState() {
@@ -1351,23 +1412,49 @@ class _PrepHistoryScreenState extends State<PrepHistoryScreen> {
             );
           }
 
-          final checklists = _sortChecklists(snapshot.data ?? []);
+          final sorted = _sortChecklists(snapshot.data ?? []);
 
-          if (checklists.isEmpty) {
-            return const Center(
-              child: Text('No prep history found'),
-            );
-          }
+          final checklists = _search.isEmpty
+              ? sorted
+              : sorted.where((c) {
+                  final haystack = [
+                    c.brand,
+                    c.series,
+                    c.serialNumber,
+                    c.preppedByName,
+                    c.prepDate,
+                  ].join(' ').toLowerCase();
+                  return haystack.contains(_search);
+                }).toList();
 
-          return RefreshIndicator(
-            onRefresh: () async {
-              setState(() {
-                _future = fetchAllPrepChecklists();
-              });
-              await _future;
-            },
-            child: ListView.builder(
-              padding: const EdgeInsets.all(12.0),
+          return Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+                child: TextField(
+                  decoration: const InputDecoration(
+                    prefixIcon: Icon(Icons.search),
+                    hintText: 'Search by brand, serial, prepped by...',
+                    border: OutlineInputBorder(),
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(vertical: 10),
+                  ),
+                  onChanged: (v) => setState(() => _search = v.trim().toLowerCase()),
+                ),
+              ),
+              if (checklists.isEmpty)
+                const Expanded(
+                  child: Center(child: Text('No prep history found')),
+                )
+              else
+              Expanded(
+                child: RefreshIndicator(
+                  onRefresh: () async {
+                    setState(() { _future = fetchAllPrepChecklists(); });
+                    await _future;
+                  },
+                  child: ListView.builder(
+                    padding: const EdgeInsets.all(12.0),
               itemCount: checklists.length,
               itemBuilder: (context, index) {
                 final checklist = checklists[index];
@@ -1403,7 +1490,10 @@ class _PrepHistoryScreenState extends State<PrepHistoryScreen> {
                   ),
                 );
               },
-            ),
+                  ),
+                ),
+              ),
+            ],
           );
         },
       ),
@@ -2000,7 +2090,8 @@ class _RampsScreenState extends State<RampsScreen> {
   String _searchQuery = '';
   String _rampConditionFilter = 'New';
   bool _showBelowMinOnlyRamps = false;
-  String? _rampBrandFilter;
+  String? _rampBrandFilter;   // 'EZ Access', 'Prairie View', etc.
+  String? _rampEzSubFilter;   // '2G' or '3G' — only active when _rampBrandFilter == 'EZ Access'
 
   String _userName = '';
   String _userEmail = '';
@@ -2231,6 +2322,14 @@ class _RampsScreenState extends State<RampsScreen> {
     final condition = _rampConditionFilter;
     final belowMinOnly = _showBelowMinOnlyRamps;
     final brandFilter = _rampBrandFilter;
+    final ezSub = _rampEzSubFilter; // '2G', '3G', or null
+
+    // Derive the parent brand list: collapse "EZ Access 2G" / "EZ Access 3G" -> "EZ Access"
+    final parentBrands = brands.map((b) {
+      final lower = b.toLowerCase();
+      if (lower.contains('ez access')) return 'EZ Access';
+      return b;
+    }).toSet().toList()..sort();
 
     final filtered = items.where((item) {
       if (item.condition != condition) return false;
@@ -2239,7 +2338,16 @@ class _RampsScreenState extends State<RampsScreen> {
         return false;
       }
       if (brandFilter != null && brandFilter.isNotEmpty) {
-        if (item.brand != brandFilter) return false;
+        if (brandFilter == 'EZ Access') {
+          // Match any EZ Access variant
+          if (!item.brand.toLowerCase().contains('ez access')) return false;
+          // Apply sub-filter if selected
+          if (ezSub != null && ezSub.isNotEmpty) {
+            if (!item.brand.toLowerCase().contains(ezSub.toLowerCase())) return false;
+          }
+        } else {
+          if (item.brand != brandFilter) return false;
+        }
       }
       if (_searchQuery.isNotEmpty) {
         final haystack = '${item.brand} ${item.size}'.toLowerCase();
@@ -2270,32 +2378,48 @@ class _RampsScreenState extends State<RampsScreen> {
           child: _buildFilterRow(),
         ),
         Padding(
-          padding:
-              const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: DropdownButton<String>(
-              value: _rampBrandFilter ?? '',
-              hint: const Text('All brands'),
-              items: <DropdownMenuItem<String>>[
-                const DropdownMenuItem<String>(
-                  value: '',
-                  child: Text('All brands'),
-                ),
-                ...brands.map(
-                  (brand) => DropdownMenuItem<String>(
-                    value: brand,
-                    child: Text(brand),
+          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
+          child: Row(
+            children: [
+              DropdownButton<String>(
+                value: _rampBrandFilter ?? '',
+                hint: const Text('All brands'),
+                items: <DropdownMenuItem<String>>[
+                  const DropdownMenuItem<String>(
+                    value: '',
+                    child: Text('All brands'),
                   ),
+                  ...parentBrands.map(
+                    (brand) => DropdownMenuItem<String>(
+                      value: brand,
+                      child: Text(brand),
+                    ),
+                  ),
+                ],
+                onChanged: (value) {
+                  setState(() {
+                    _rampBrandFilter = (value == null || value.isEmpty) ? null : value;
+                    _rampEzSubFilter = null; // reset sub-filter on brand change
+                  });
+                },
+              ),
+              if (_rampBrandFilter == 'EZ Access') ...[
+                const SizedBox(width: 12),
+                DropdownButton<String>(
+                  value: _rampEzSubFilter ?? '',
+                  items: const [
+                    DropdownMenuItem(value: '', child: Text('All EZ Access')),
+                    DropdownMenuItem(value: '2G', child: Text('2G')),
+                    DropdownMenuItem(value: '3G', child: Text('3G')),
+                  ],
+                  onChanged: (value) {
+                    setState(() {
+                      _rampEzSubFilter = (value == null || value.isEmpty) ? null : value;
+                    });
+                  },
                 ),
               ],
-              onChanged: (value) {
-                setState(() {
-                  _rampBrandFilter =
-                      (value == null || value.isEmpty) ? null : value;
-                });
-              },
-            ),
+            ],
           ),
         ),
         const SizedBox(height: 4),
@@ -3102,6 +3226,7 @@ class LiftsScreen extends StatefulWidget {
 class _LiftsScreenState extends State<LiftsScreen> {
   late Future<List<LiftRecord>> _future;
   String _search = '';
+  String? _conditionFilter;
   String? _statusFilter;
   String? _brandFilter;
   String? _seriesFilter;
@@ -3293,6 +3418,13 @@ class _LiftsScreenState extends State<LiftsScreen> {
 
           // Single filtering pipeline with AND logic
           final filtered = lifts.where((l) {
+            // Condition filter (New / Used)
+            if (_conditionFilter != null &&
+                _conditionFilter!.isNotEmpty &&
+                l.condition.trim() != _conditionFilter) {
+              return false;
+            }
+
             // Status filter
             if (_statusFilter != null &&
                 _statusFilter!.isNotEmpty &&
@@ -3352,6 +3484,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 series: allSeries,
                 orientations: orientations,
                 prepStatuses: prepStatuses,
+                conditions: const ['New', 'Used'],
               ),
               if (filtered.isEmpty)
                 const Expanded(
@@ -3384,14 +3517,15 @@ class _LiftsScreenState extends State<LiftsScreen> {
                           margin: const EdgeInsets.symmetric(
                               horizontal: 8, vertical: 4),
                           child: ListTile(
-                            onTap: () {
-                              Navigator.of(context).push(
+                            onTap: () async {
+                              final deleted = await Navigator.of(context).push<bool>(
                                 MaterialPageRoute(
                                   builder: (_) => LiftDetailScreen(
                                     lift: l,
                                   ),
                                 ),
                               );
+                              if (deleted == true) _refresh();
                             },
                             title: Text(
                               '${l.brand}${l.series.isNotEmpty ? ' – ${l.series}' : ''}',
@@ -3403,6 +3537,14 @@ class _LiftsScreenState extends State<LiftsScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text('SN: ${l.serialNumber.isNotEmpty ? l.serialNumber : 'N/A'}'),
+                                if (l.condition.trim() == 'Used' && l.binNumber.isNotEmpty)
+                                  Text(
+                                    'Bin: ${l.binNumber}',
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.blueGrey,
+                                    ),
+                                  ),
                                 Text('Status: $status'),
                                 Text(loc),
                                 Text(job),
@@ -3438,6 +3580,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
     required List<String> series,
     required List<String> orientations,
     required List<String> prepStatuses,
+    required List<String> conditions,
   }) {
     return Column(
       children: [
@@ -3458,96 +3601,72 @@ class _LiftsScreenState extends State<LiftsScreen> {
           ),
         ),
 
-        // Filters - Two row grid layout
+        // Filters - Two rows of three
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
           child: Column(
             children: [
-              // First row: Status, Brand, Series
+              // Row 1: Condition, Brand, Series
               Row(
                 children: [
-                  if (statuses.isNotEmpty)
-                    Expanded(
-                      child: _buildCompactDropdown(
-                        value: _statusFilter,
-                        hint: 'Status',
-                        items: statuses,
-                        onChanged: (value) {
-                          setState(() {
-                            _statusFilter = value;
-                          });
-                        },
-                      ),
+                  Expanded(
+                    child: _buildCompactDropdown(
+                      value: _conditionFilter,
+                      hint: 'Condition',
+                      items: conditions,
+                      onChanged: (value) => setState(() => _conditionFilter = value),
                     ),
-                  if (statuses.isNotEmpty && brands.isNotEmpty)
-                    const SizedBox(width: 8),
-                  if (brands.isNotEmpty)
-                    Expanded(
-                      child: _buildCompactDropdown(
-                        value: _brandFilter,
-                        hint: 'Brand',
-                        items: brands,
-                        onChanged: (value) {
-                          setState(() {
-                            _brandFilter = value;
-                          });
-                        },
-                      ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildCompactDropdown(
+                      value: _brandFilter,
+                      hint: 'Brand',
+                      items: brands,
+                      onChanged: (value) => setState(() => _brandFilter = value),
                     ),
-                  if (brands.isNotEmpty && series.isNotEmpty)
-                    const SizedBox(width: 8),
-                  if (series.isNotEmpty)
-                    Expanded(
-                      child: _buildCompactDropdown(
-                        value: _seriesFilter,
-                        hint: 'Series',
-                        items: series,
-                        onChanged: (value) {
-                          setState(() {
-                            _seriesFilter = value;
-                          });
-                        },
-                      ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildCompactDropdown(
+                      value: _seriesFilter,
+                      hint: 'Series',
+                      items: series,
+                      onChanged: (value) => setState(() => _seriesFilter = value),
                     ),
+                  ),
                 ],
               ),
               const SizedBox(height: 8),
-              // Second row: Orientation, Prep Status
+              // Row 2: Status, Orientation, Prep Status
               Row(
                 children: [
-                  if (orientations.isNotEmpty)
-                    Expanded(
-                      child: _buildCompactDropdown(
-                        value: _orientationFilter,
-                        hint: 'Orientation',
-                        items: orientations,
-                        onChanged: (value) {
-                          setState(() {
-                            _orientationFilter = value;
-                          });
-                        },
-                      ),
+                  Expanded(
+                    child: _buildCompactDropdown(
+                      value: _statusFilter,
+                      hint: 'Status',
+                      items: statuses,
+                      onChanged: (value) => setState(() => _statusFilter = value),
                     ),
-                  if (orientations.isNotEmpty && prepStatuses.isNotEmpty)
-                    const SizedBox(width: 8),
-                  if (prepStatuses.isNotEmpty)
-                    Expanded(
-                      child: _buildCompactDropdown(
-                        value: _prepStatusFilter,
-                        hint: 'Prep Status',
-                        items: prepStatuses,
-                        onChanged: (value) {
-                          setState(() {
-                            _prepStatusFilter = value;
-                          });
-                        },
-                      ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildCompactDropdown(
+                      value: _orientationFilter,
+                      hint: 'Orientation',
+                      items: orientations,
+                      onChanged: (value) => setState(() => _orientationFilter = value),
                     ),
-                  // Add empty expanded to balance if only one filter in row
-                  if (orientations.isNotEmpty && prepStatuses.isEmpty)
-                    const Expanded(child: SizedBox()),
-                  if (orientations.isEmpty && prepStatuses.isNotEmpty)
-                    const Expanded(child: SizedBox()),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildCompactDropdown(
+                      value: _prepStatusFilter,
+                      hint: 'Prep',
+                      items: prepStatuses,
+                      onChanged: (value) => setState(() => _prepStatusFilter = value),
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -4412,58 +4531,82 @@ class _ChangeHistoryScreenState extends State<ChangeHistoryScreen> {
                   ? first.jobRef
                   : (group.length == 1 ? first.itemId : 'Multiple items');
 
+              final isMulti = group.length > 1;
+
               return Card(
-                margin:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        '${first.changeType} – $titleSuffix',
-                        style: const TextStyle(
-                            fontWeight: FontWeight.w700, fontSize: 15),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        ts,
-                        style: const TextStyle(
-                            fontSize: 12, color: Colors.black54),
-                      ),
-                      const SizedBox(height: 6),
-                      ...group.map((c) {
-                        final itemLabel = [
-                          c.brand,
-                          c.seriesOrSize,
-                          if (c.orientation.isNotEmpty) c.orientation,
-                        ].where((s) => s.isNotEmpty).join(' ');
-                        final displayItem =
-                            itemLabel.isEmpty ? c.itemId : itemLabel;
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 2.0),
-                          child: Text(
-                            '• $displayItem (${c.condition}): '
-                            'Changed from ${c.oldQty} to ${c.newQty}',
-                            style: const TextStyle(fontSize: 13),
-                          ),
-                        );
-                      }).toList(),
-                      const SizedBox(height: 6),
-                      if (first.note.isNotEmpty)
-                        Text(
-                          'Note: ${first.note}',
-                          style: const TextStyle(fontSize: 13),
+                margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                clipBehavior: Clip.hardEdge,
+                child: isMulti
+                    ? ExpansionTile(
+                        tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                        title: Text(
+                          '${first.changeType} – $titleSuffix',
+                          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
                         ),
-                      Text(
-                        'By: ${first.userName} (${first.userEmail})',
-                        style: const TextStyle(
-                            fontSize: 12, color: Colors.black87),
+                        subtitle: Text(
+                          '$ts · ${group.length} items · By: ${first.userName}',
+                          style: const TextStyle(fontSize: 12, color: Colors.black54),
+                        ),
+                        children: [
+                          ...group.map((c) {
+                            final itemLabel = [
+                              c.brand,
+                              c.seriesOrSize,
+                              if (c.orientation.isNotEmpty) c.orientation,
+                            ].where((s) => s.isNotEmpty).join(' ');
+                            final displayItem = itemLabel.isEmpty ? c.itemId : itemLabel;
+                            return Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 2.0),
+                              child: Text(
+                                '• $displayItem (${c.condition}): ${c.oldQty} → ${c.newQty}',
+                                style: const TextStyle(fontSize: 13),
+                              ),
+                            );
+                          }),
+                          if (first.note.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text('Note: ${first.note}', style: const TextStyle(fontSize: 13)),
+                          ],
+                        ],
+                      )
+                    : Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${first.changeType} – $titleSuffix',
+                              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(ts, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                            const SizedBox(height: 6),
+                            () {
+                              final c = group.first;
+                              final itemLabel = [
+                                c.brand,
+                                c.seriesOrSize,
+                                if (c.orientation.isNotEmpty) c.orientation,
+                              ].where((s) => s.isNotEmpty).join(' ');
+                              final displayItem = itemLabel.isEmpty ? c.itemId : itemLabel;
+                              return Text(
+                                '• $displayItem (${c.condition}): ${c.oldQty} → ${c.newQty}',
+                                style: const TextStyle(fontSize: 13),
+                              );
+                            }(),
+                            if (first.note.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text('Note: ${first.note}', style: const TextStyle(fontSize: 13)),
+                            ],
+                            const SizedBox(height: 4),
+                            Text(
+                              'By: ${first.userName} (${first.userEmail})',
+                              style: const TextStyle(fontSize: 12, color: Colors.black87),
+                            ),
+                          ],
+                        ),
                       ),
-                    ],
-                  ),
-                ),
               );
             },
           );
@@ -4522,6 +4665,64 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
     );
     if (result == true && mounted) {
       Navigator.of(context).pop(); // back to list; it will refresh there
+    }
+  }
+
+  Future<void> _deleteLift() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Lift'),
+        content: Text(
+          'Remove ${widget.lift.brand} ${widget.lift.series} (SN: ${widget.lift.serialNumber}) from the lifts master?\n\nThis cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userName = prefs.getString('user_name') ?? '';
+      final userEmail = prefs.getString('user_email') ?? '';
+
+      final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
+        'action': 'delete_lift',
+        'lift_id': widget.lift.liftId,
+        'user_email': userEmail,
+        'user_name': userName,
+        if (apiKey != null) 'api_key': apiKey!,
+      });
+
+      final resp = await http.get(uri);
+      if (resp.statusCode != 200) throw Exception('Server error ${resp.statusCode}');
+      final data = json.decode(resp.body);
+      if (data is Map && data['status'] != 'ok') {
+        throw Exception(data['message'] ?? 'Unknown error');
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Lift removed from master list')),
+        );
+        Navigator.of(context).pop(true); // return true so list refreshes
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Delete failed: $e')),
+        );
+      }
     }
   }
 
@@ -4792,6 +4993,12 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
         appBar: AppBar(
           title: Text(title),
           actions: [
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              color: Colors.red,
+              tooltip: 'Delete lift',
+              onPressed: _deleteLift,
+            ),
             IconButton(
               icon: const Icon(Icons.edit),
               onPressed: _openEdit,
