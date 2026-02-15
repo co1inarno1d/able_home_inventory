@@ -1548,8 +1548,6 @@ class PrepChecklistDetailScreen extends StatelessWidget {
                     Text('Serial Number: ${checklist.serialNumber}'),
                     Text('Date: $dateStr'),
                     Text('Prepped by: ${checklist.preppedByName}'),
-                    if (checklist.preppedByEmail.isNotEmpty)
-                      Text('Email: ${checklist.preppedByEmail}'),
                     if (checklist.notes.isNotEmpty) ...[
                       const SizedBox(height: 8),
                       const Text(
@@ -1856,31 +1854,18 @@ class _PickupListScreenState extends State<PickupListScreen> {
   Future<void> _openUserSettings() async {
     final prefs = await SharedPreferences.getInstance();
     final userName = prefs.getString('user_name') ?? '';
-    final userEmail = prefs.getString('user_email') ?? '';
 
     final nameController = TextEditingController(text: userName);
-    final emailController = TextEditingController(text: userEmail);
 
     await showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
           title: const Text('User Settings'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                decoration:
-                    const InputDecoration(labelText: 'Your name (for logs)'),
-              ),
-              TextField(
-                controller: emailController,
-                decoration:
-                    const InputDecoration(labelText: 'Your email (for logs)'),
-                keyboardType: TextInputType.emailAddress,
-              ),
-            ],
+          content: TextField(
+            controller: nameController,
+            decoration:
+                const InputDecoration(labelText: 'Your name (for logs)'),
           ),
           actions: [
             TextButton(
@@ -1895,7 +1880,6 @@ class _PickupListScreenState extends State<PickupListScreen> {
               child: const Text('Save'),
               onPressed: () async {
                 await prefs.setString('user_name', nameController.text.trim());
-                await prefs.setString('user_email', emailController.text.trim());
                 if (!context.mounted) return;
                 Navigator.of(context).pop();
               },
@@ -2094,7 +2078,6 @@ class _RampsScreenState extends State<RampsScreen> {
   String? _rampEzSubFilter;   // '2G' or '3G' — only active when _rampBrandFilter == 'EZ Access'
 
   String _userName = '';
-  String _userEmail = '';
 
   @override
   void initState() {
@@ -2107,17 +2090,14 @@ class _RampsScreenState extends State<RampsScreen> {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
       _userName = prefs.getString('user_name') ?? '';
-      _userEmail = prefs.getString('user_email') ?? '';
     });
   }
 
-  Future<void> _saveUserPrefs(String name, String email) async {
+  Future<void> _saveUserPrefs(String name) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('user_name', name);
-    await prefs.setString('user_email', email);
     setState(() {
       _userName = name;
-      _userEmail = email;
     });
   }
 
@@ -2129,28 +2109,16 @@ class _RampsScreenState extends State<RampsScreen> {
 
   Future<void> _openUserSettings() async {
     final nameController = TextEditingController(text: _userName);
-    final emailController = TextEditingController(text: _userEmail);
 
     await showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
           title: const Text('User Settings'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                decoration:
-                    const InputDecoration(labelText: 'Your name (for logs)'),
-              ),
-              TextField(
-                controller: emailController,
-                decoration:
-                    const InputDecoration(labelText: 'Your email (for logs)'),
-                keyboardType: TextInputType.emailAddress,
-              ),
-            ],
+          content: TextField(
+            controller: nameController,
+            decoration:
+                const InputDecoration(labelText: 'Your name (for logs)'),
           ),
           actions: [
             TextButton(
@@ -2164,10 +2132,7 @@ class _RampsScreenState extends State<RampsScreen> {
               ),
               child: const Text('Save'),
               onPressed: () async {
-                await _saveUserPrefs(
-                  nameController.text.trim(),
-                  emailController.text.trim(),
-                );
+                await _saveUserPrefs(nameController.text.trim());
                 if (!context.mounted) return;
                 Navigator.of(context).pop();
               },
@@ -2690,11 +2655,11 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
       final user = await _loadUser();
       final userEmail = user['email'] ?? '';
       final userName = user['name'] ?? '';
-      if (userEmail.isEmpty || userName.isEmpty) {
+      if (userName.isEmpty) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text('Please set your name & email in the main screen.')),
+              content: Text('Please set your name in the main screen.')),
         );
         setState(() {
           _submitting = false;
@@ -2946,11 +2911,11 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
       final user = await _loadUser();
       final userEmail = user['email'] ?? '';
       final userName = user['name'] ?? '';
-      if (userEmail.isEmpty || userName.isEmpty) {
+      if (userName.isEmpty) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-              content: Text('Please set your name & email in the main screen.')),
+              content: Text('Please set your name in the main screen.')),
         );
         setState(() {
           _submitting = false;
@@ -3283,31 +3248,18 @@ class _LiftsScreenState extends State<LiftsScreen> {
   Future<void> _openUserSettings() async {
     final prefs = await SharedPreferences.getInstance();
     final userName = prefs.getString('user_name') ?? '';
-    final userEmail = prefs.getString('user_email') ?? '';
 
     final nameController = TextEditingController(text: userName);
-    final emailController = TextEditingController(text: userEmail);
 
     await showDialog(
       context: context,
       builder: (context) {
         return AlertDialog(
           title: const Text('User Settings'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: nameController,
-                decoration:
-                    const InputDecoration(labelText: 'Your name (for logs)'),
-              ),
-              TextField(
-                controller: emailController,
-                decoration:
-                    const InputDecoration(labelText: 'Your email (for logs)'),
-                keyboardType: TextInputType.emailAddress,
-              ),
-            ],
+          content: TextField(
+            controller: nameController,
+            decoration:
+                const InputDecoration(labelText: 'Your name (for logs)'),
           ),
           actions: [
             TextButton(
@@ -3322,7 +3274,6 @@ class _LiftsScreenState extends State<LiftsScreen> {
               child: const Text('Save'),
               onPressed: () async {
                 await prefs.setString('user_name', nameController.text.trim());
-                await prefs.setString('user_email', emailController.text.trim());
                 if (!context.mounted) return;
                 Navigator.of(context).pop();
               },
@@ -3898,11 +3849,11 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
       final userName = prefs.getString('user_name') ?? '';
       final userEmail = prefs.getString('user_email') ?? '';
 
-      if (userEmail.isEmpty || userName.isEmpty) {
+      if (userName.isEmpty) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Please set your name & email in settings'),
+            content: Text('Please set your name in settings'),
           ),
         );
         return;
@@ -3981,11 +3932,11 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
         final userName = prefs.getString('user_name') ?? '';
         final userEmail = prefs.getString('user_email') ?? '';
 
-        if (userEmail.isEmpty || userName.isEmpty) {
+        if (userName.isEmpty) {
           if (!mounted) return;
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Please set your name & email in settings'),
+              content: Text('Please set your name in settings'),
             ),
           );
           return;
@@ -4601,7 +4552,7 @@ class _ChangeHistoryScreenState extends State<ChangeHistoryScreen> {
                             ],
                             const SizedBox(height: 4),
                             Text(
-                              'By: ${first.userName} (${first.userEmail})',
+                              'By: ${first.userName}',
                               style: const TextStyle(fontSize: 12, color: Colors.black87),
                             ),
                           ],
@@ -5088,12 +5039,12 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
     final user = await _loadUser();
     final userEmail = user['email'] ?? '';
     final userName = user['name'] ?? '';
-    if (userEmail.isEmpty || userName.isEmpty) {
+    if (userName.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
             content:
-                Text('Please set your name & email from the main screens.')),
+                Text('Please set your name from the main screens.')),
       );
       return;
     }
@@ -5462,12 +5413,12 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
     final user = await _loadUser();
     final userEmail = user['email'] ?? '';
     final userName = user['name'] ?? '';
-    if (userEmail.isEmpty || userName.isEmpty) {
+    if (userName.isEmpty) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
             content:
-                Text('Please set your name & email from the main screens.')),
+                Text('Please set your name from the main screens.')),
       );
       return;
     }
