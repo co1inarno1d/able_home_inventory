@@ -35,6 +35,26 @@ String formatDate(DateTime? date) {
   return '${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}/${date.year}';
 }
 
+/// Normalize a stored date string to MM/DD/YYYY display format.
+/// Handles YYYY-MM-DD, ISO 8601, and already-formatted MM/DD/YYYY.
+String normalizeDateDisplay(String raw) {
+  if (raw.isEmpty) return raw;
+  // Already MM/DD/YYYY
+  if (RegExp(r'^\d{1,2}/\d{1,2}/\d{4}$').hasMatch(raw)) return raw;
+  // YYYY-MM-DD
+  final ymd = RegExp(r'^(\d{4})-(\d{2})-(\d{2})');
+  final m = ymd.firstMatch(raw);
+  if (m != null) {
+    return '${m.group(2)}/${m.group(3)}/${m.group(1)}';
+  }
+  // ISO 8601 — parse and reformat
+  try {
+    final dt = DateTime.parse(raw);
+    return '${dt.month.toString().padLeft(2, '0')}/${dt.day.toString().padLeft(2, '0')}/${dt.year}';
+  } catch (_) {}
+  return raw;
+}
+
 void main() {
   runApp(const AbleHomeInventoryApp());
 }
@@ -94,6 +114,7 @@ class StairliftItem {
     String normCondition(dynamic v) {
       final s = v?.toString().trim().toLowerCase() ?? '';
       if (s == 'used') return 'Used';
+      if (s == 'cut') return 'Cut';
       return 'New';
     }
 
@@ -869,6 +890,7 @@ Future<LiftRecord?> checkDuplicateSerial(String serialNumber) async {
 Future<void> upsertLift({
   required String userEmail,
   required String userName,
+  String? liftId,
   required String serialNumber,
   required String brand,
   required String series,
@@ -892,6 +914,7 @@ Future<void> upsertLift({
     'action': 'upsert_lift',
     'user_email': userEmail,
     'user_name': userName,
+    if (liftId != null && liftId.isNotEmpty) 'lift_id': liftId,
     'serial_number': serialNumber,
     'brand': brand,
     'series': series,
@@ -1028,6 +1051,23 @@ bool isLiftRecordFoldingRail(LiftRecord lift) {
   }
 
   return false;
+}
+
+/// Custom sort order for stairlift series names
+const _seriesOrder = [
+  'Elan 3050', 'Elan 3000', 'Elite', 'Outdoor Elite',
+  '120', '130', 'T700', 'Outdoor 130', 'Outdoor T700',
+  'SL300', 'SL600',
+];
+
+List<String> sortSeriesList(List<String> series) {
+  final ordered = <String>[];
+  for (final s in _seriesOrder) {
+    if (series.contains(s)) ordered.add(s);
+  }
+  // Any series not in the ordered list go at the end, alphabetically
+  final remaining = series.where((s) => !_seriesOrder.contains(s)).toList()..sort();
+  return [...ordered, ...remaining];
 }
 
 /// Get display title for a ramp, adding "(Low Prof)" suffix for low-profile EZ Access 3G platforms
@@ -2678,6 +2718,7 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
         if (raw == null || raw.isEmpty) continue;
         items.add({
           'item_id': item.itemId,
+          'brand': item.brand,
           'category': 'ramp',
           'new_qty': parseInt(raw),
           'condition': item.condition,
@@ -3331,13 +3372,8 @@ class _LiftsScreenState extends State<LiftsScreen> {
           // Filter out folding rail individual entries from lifts list
           final lifts = allLifts.where((l) => !isLiftRecordFoldingRail(l)).toList();
 
-          // Extract unique values for all filters
-          final statuses = (lifts
-                  .map((l) => l.status.trim())
-                  .where((s) => s.isNotEmpty)
-                  .toSet()
-                  .toList()
-                ..sort());
+          // Use a fixed status list so all options always appear
+          const statuses = ['In Stock', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
 
           final brands = (lifts
                   .map((l) => l.brand.trim())
@@ -3346,12 +3382,8 @@ class _LiftsScreenState extends State<LiftsScreen> {
                   .toList()
                 ..sort());
 
-          final allSeries = (lifts
-                  .map((l) => l.series.trim())
-                  .where((s) => s.isNotEmpty)
-                  .toSet()
-                  .toList()
-                ..sort());
+          final allSeries = sortSeriesList(
+              lifts.map((l) => l.series.trim()).where((s) => s.isNotEmpty).toSet().toList());
 
           final orientations = (lifts
                   .map((l) => l.orientation.trim())
@@ -3749,15 +3781,125 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
           final usedFoldingRails = allFoldingRails
               .where((item) => item.condition == 'Used')
               .toList();
+          final cutFoldingRails = allFoldingRails
+              .where((item) => item.condition == 'Cut')
+              .toList();
 
           return TabBarView(
             controller: _tabController,
             children: [
               _buildFoldingRailList(newFoldingRails, 'New'),
-              _buildFoldingRailList(usedFoldingRails, 'Used'),
+              _buildUsedFoldingRailTab(usedFoldingRails, cutFoldingRails),
             ],
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildUsedFoldingRailTab(
+      List<StairliftItem> usedRails, List<StairliftItem> cutRails) {
+    return RefreshIndicator(
+      onRefresh: () async {
+        setState(() {
+          _future = fetchInventory();
+        });
+        await _future;
+      },
+      child: ListView(
+        padding: const EdgeInsets.all(12.0),
+        children: [
+          // --- Used section ---
+          if (usedRails.isNotEmpty) ...[
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8.0),
+              child: Text(
+                'Used',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+            ),
+            ...usedRails.map((item) => _buildFoldingRailTile(item)),
+          ] else
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8.0),
+              child: Text('No used folding rails',
+                  style: TextStyle(color: Colors.grey)),
+            ),
+
+          const Divider(height: 24),
+
+          // --- Cut section ---
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8.0),
+            child: Text(
+              'Cut Folding Rails',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+          ),
+          if (cutRails.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 4.0),
+              child: Text('No cut folding rails',
+                  style: TextStyle(color: Colors.grey)),
+            )
+          else
+            ...cutRails.map((item) => _buildCutFoldingRailTile(item)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCutFoldingRailTile(StairliftItem item) {
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      color: Colors.orange.shade50,
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.content_cut, color: Colors.orange),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '${item.brand} ${item.series}',
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.remove_circle_outline),
+                      onPressed: item.currentQty > 0
+                          ? () => _adjustFoldingRailQuantity(item, -1)
+                          : null,
+                    ),
+                    Text(
+                      '${item.currentQty}',
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.bold),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.add_circle_outline),
+                      onPressed: () => _adjustFoldingRailQuantity(item, 1),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+            if (item.notes.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 4.0),
+                child: Text(
+                  'Notes: ${item.notes}',
+                  style: const TextStyle(fontSize: 13, color: Colors.black87),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -4317,20 +4459,23 @@ class _StairliftQuantitiesScreenState
           final lifts = snapshot.data![0] as List<LiftRecord>;
           final inventoryData = snapshot.data![1] as InventoryData;
 
-          // Calculate stairlift quantities from lifts with status "In Stock"
-          final inStockLifts = lifts.where((l) => l.status == 'In Stock').toList();
+          // Calculate stairlift quantities from lifts with status "In Stock",
+          // excluding folding rails (those are tracked separately).
+          final inStockLifts = lifts
+              .where((l) => l.status.trim() == 'In Stock' && !isLiftRecordFoldingRail(l))
+              .toList();
 
           // Group by brand + series + condition and count
           final Map<String, int> counts = {};
           for (final lift in inStockLifts) {
-            final key = '${lift.brand}|${lift.series}|${lift.orientation}|${lift.condition}';
+            final key = '${lift.brand.trim()}|${lift.series.trim()}|${lift.orientation.trim()}|${lift.condition.trim()}';
             counts[key] = (counts[key] ?? 0) + 1;
           }
 
           // Get min_qty values from the old inventory sheet
           final Map<String, int> minQtyMap = {};
           for (final s in inventoryData.stairlifts) {
-            final key = '${s.brand}|${s.series}|${s.orientation}|${s.condition}';
+            final key = '${s.brand.trim()}|${s.series.trim()}|${s.orientation.trim()}|${s.condition.trim()}';
             minQtyMap[key] = s.minQty;
           }
 
@@ -4716,8 +4861,8 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
       'Prepped status': lift.preppedStatus,
       'Current location': lift.currentLocation,
       'Current job': lift.currentJob,
-      'Date acquired': lift.dateAcquired,
-      'Install date': lift.installDate,
+      'Date acquired': normalizeDateDisplay(lift.dateAcquired),
+      'Install date': normalizeDateDisplay(lift.installDate),
       'Installer name': lift.installerName,
       'Last prep date': lift.lastPrepDate,
       'Notes': lift.notes,
@@ -5255,12 +5400,12 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
     if (existing != null) {
       _serialController.text = existing.serialNumber;
       _binNumberController.text = existing.binNumber;
-      _dateAcquiredController.text = existing.dateAcquired;
+      _dateAcquiredController.text = normalizeDateDisplay(existing.dateAcquired);
       _currentLocationController.text = existing.currentLocation;
       _currentJobController.text = existing.currentJob;
-      _installDateController.text = existing.installDate;
+      _installDateController.text = normalizeDateDisplay(existing.installDate);
       _installerNameController.text = existing.installerName;
-      _lastPrepDateController.text = existing.lastPrepDate;
+      _lastPrepDateController.text = normalizeDateDisplay(existing.lastPrepDate);
       _notesController.text = existing.notes;
 
       if (existing.condition.toLowerCase() == 'used') {
@@ -5304,7 +5449,14 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         final bsoKey = '${s.brand}||${s.series}||${s.orientation}';
         foldSets.putIfAbsent(bsoKey, () => <String>{});
         if (s.foldType.isNotEmpty) {
-          foldSets[bsoKey]!.add(s.foldType);
+          // Brooks/Acorn folds don't use handedness
+          final isAcornBrooks = s.brand.toLowerCase().contains('acorn') ||
+              s.brand.toLowerCase().contains('brooks');
+          final isHandedness = s.foldType.toLowerCase() == 'left' ||
+              s.foldType.toLowerCase() == 'right';
+          if (!(isAcornBrooks && isHandedness)) {
+            foldSets[bsoKey]!.add(s.foldType);
+          }
         }
       }
 
@@ -5314,8 +5466,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
       final foldByBrandSeriesOrientation = <String, List<String>>{};
 
       for (final entry in seriesSets.entries) {
-        final list = entry.value.toList()..sort();
-        seriesByBrand[entry.key] = list;
+        seriesByBrand[entry.key] = sortSeriesList(entry.value.toList());
       }
       for (final entry in orientationSets.entries) {
         final list = entry.value.toList()..sort();
@@ -5537,6 +5688,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
       await upsertLift(
         userEmail: userEmail,
         userName: userName,
+        liftId: widget.existing?.liftId,
         serialNumber: _serialController.text.trim(),
         brand: _selectedBrand!,
         series: _selectedSeries!,
@@ -5927,17 +6079,21 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
             TextFormField(
               controller: _dateAcquiredController,
               decoration: const InputDecoration(
-                labelText: 'Date acquired (YYYY-MM-DD)',
+                labelText: 'Date acquired (MM/DD/YYYY)',
+                hintText: 'MM/DD/YYYY',
                 border: OutlineInputBorder(),
               ),
+              keyboardType: TextInputType.datetime,
             ),
             const SizedBox(height: 12),
             TextFormField(
               controller: _installDateController,
               decoration: const InputDecoration(
-                labelText: 'Install date (YYYY-MM-DD)',
+                labelText: 'Install date (MM/DD/YYYY)',
+                hintText: 'MM/DD/YYYY',
                 border: OutlineInputBorder(),
               ),
+              keyboardType: TextInputType.datetime,
             ),
             const SizedBox(height: 12),
             TextFormField(
@@ -5951,9 +6107,11 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
             TextFormField(
               controller: _lastPrepDateController,
               decoration: const InputDecoration(
-                labelText: 'Last prep date (YYYY-MM-DD)',
+                labelText: 'Last prep date (MM/DD/YYYY)',
+                hintText: 'MM/DD/YYYY',
                 border: OutlineInputBorder(),
               ),
+              keyboardType: TextInputType.datetime,
             ),
             const SizedBox(height: 12),
             TextFormField(

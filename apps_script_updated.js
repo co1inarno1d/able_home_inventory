@@ -441,28 +441,45 @@ function apiFullCheck(params) {
   const stairliftsSheet = ss.getSheetByName(SHEET_STAIRLIFTS);
   const changesSheet    = ss.getSheetByName(SHEET_CHANGES);
 
-  // Build lookup maps: item_id|condition -> sheet row index (1-based)
-  function buildIndexMap(sheet, condColIndex, idColIndex) {
+  // Build lookup maps for stairlifts: item_id|condition -> sheet row index (1-based)
+  function buildStairliftIndexMap(sheet) {
     const rows = sheet.getDataRange().getValues().slice(1);
     const map = {};
     rows.forEach((r, i) => {
-      const id   = String(r[idColIndex]   || '').trim();
-      const cond = String(r[condColIndex] || '').trim();
+      const id   = String(r[0] || '').trim();
+      const cond = String(r[5] || '').trim();
       if (id) map[id + '|' + cond] = i + 2;
     });
     return map;
   }
 
-  // Ramps: col A=item_id(0), D=condition(3), E=current_qty(4)
-  const rampIndex  = buildIndexMap(rampsSheet,      3, 0);
-  // Stairlifts: col A=item_id(0), F=condition(5), H=current_qty(7)
-  const stairIndex = buildIndexMap(stairliftsSheet, 5, 0);
+  // Build lookup for ramps using item_id+brand+condition to handle EZ Access 2G/3G
+  function buildRampIndexMap(sheet) {
+    const rows = sheet.getDataRange().getValues().slice(1);
+    const map = {};
+    rows.forEach((r, i) => {
+      const id    = String(r[0] || '').trim();
+      const brand = String(r[1] || '').trim();
+      const cond  = String(r[3] || '').trim();
+      if (id) {
+        // Primary key includes brand for disambiguation (EZ Access 2G vs 3G)
+        map[id + '|' + brand + '|' + cond] = i + 2;
+        // Fallback key without brand (for rows where brand may not be sent)
+        if (!map[id + '|' + cond]) map[id + '|' + cond] = i + 2;
+      }
+    });
+    return map;
+  }
+
+  const rampIndex  = buildRampIndexMap(rampsSheet);
+  const stairIndex = buildStairliftIndexMap(stairliftsSheet);
 
   let updatedCount = 0;
   const now = new Date();
 
   items.forEach(it => {
     const itemId    = String(it.item_id   || '').trim();
+    const brand     = String(it.brand     || '').trim();
     const condition = String(it.condition || '').trim();
     const newQty    = toNumber(it.new_qty);
     const category  = String(it.category  || 'ramp').toLowerCase();
@@ -472,8 +489,14 @@ function apiFullCheck(params) {
     const indexMap    = isStairlift ? stairIndex : rampIndex;
     const qtyCol      = isStairlift ? 8 : 5; // H=8 for stairlifts, E=5 for ramps
 
-    const key      = itemId + '|' + condition;
-    const rowIndex = indexMap[key];
+    // For ramps: try brand-specific key first, then fall back to id|condition
+    let key = isStairlift
+      ? (itemId + '|' + condition)
+      : (brand ? itemId + '|' + brand + '|' + condition : itemId + '|' + condition);
+    let rowIndex = indexMap[key];
+    if (!rowIndex && !isStairlift && brand) {
+      rowIndex = indexMap[itemId + '|' + condition];
+    }
 
     if (!rowIndex) {
       Logger.log('Full Check: item not found for key: ' + key + ' (category: ' + category + ')');

@@ -107,6 +107,14 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
     super.dispose();
   }
 
+  void _checkAll(List<String> fields, bool value) {
+    setState(() {
+      for (final field in fields) {
+        _checklistItems[field] = value;
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -164,6 +172,31 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
                 child: ListView(
                   padding: const EdgeInsets.all(16.0),
                   children: [
+                    // Check All / Uncheck All
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8.0),
+                      child: Row(
+                        children: [
+                          ElevatedButton(
+                            onPressed: () => _checkAll(fields, true),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: kBrandGreen,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                            ),
+                            child: const Text('Check All'),
+                          ),
+                          const SizedBox(width: 12),
+                          OutlinedButton(
+                            onPressed: () => _checkAll(fields, false),
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                            ),
+                            child: const Text('Uncheck All'),
+                          ),
+                        ],
+                      ),
+                    ),
                     ...fields.map((field) {
                       return CheckboxListTile(
                         title: Text(_formatFieldName(field)),
