@@ -267,6 +267,7 @@ class LiftRecord {
   final String lastPrepDate;
   final String notes;
   final String binNumber; // Bin number for used lifts
+  final String cleanBatteriesStatus; // Needs Clean / Needs Batteries / Needs Clean & Batteries / Done
 
   LiftRecord({
     required this.liftId,
@@ -286,6 +287,7 @@ class LiftRecord {
     required this.lastPrepDate,
     required this.notes,
     required this.binNumber,
+    this.cleanBatteriesStatus = '',
   });
 
   factory LiftRecord.fromJson(Map<String, dynamic> json) {
@@ -309,6 +311,7 @@ class LiftRecord {
       preppedStatus: s(json['prepped_status']),
       lastPrepDate: s(json['last_prep_date']),
       notes: s(json['notes']),
+      cleanBatteriesStatus: s(json['clean_batteries_status']),
     );
   }
 }
@@ -907,6 +910,7 @@ Future<void> upsertLift({
   String? lastPrepDate,
   String? notes,
   String? binNumber,
+  String? cleanBatteriesStatus,
 }) async {
   final uri = Uri.parse(apiBaseUrl);
 
@@ -931,6 +935,7 @@ Future<void> upsertLift({
     if (lastPrepDate != null) 'last_prep_date': lastPrepDate,
     if (notes != null) 'notes': notes,
     if (binNumber != null && binNumber.isNotEmpty) 'bin_number': binNumber,
+    if (cleanBatteriesStatus != null) 'clean_batteries_status': cleanBatteriesStatus,
     if (apiKey != null) 'api_key': apiKey,
   };
 
@@ -4931,6 +4936,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
       'Condition': lift.condition,
       'Status': lift.status,
       'Prepped status': lift.preppedStatus,
+      'Clean/Batteries': lift.cleanBatteriesStatus,
       'Current location': lift.currentLocation,
       'Current job': lift.currentJob,
       'Date acquired': normalizeDateDisplay(lift.dateAcquired),
@@ -5449,6 +5455,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   String _condition = 'New';
   String _status = 'In Stock';
   String _preppedStatus = 'Needs prepping';
+  String _cleanBatteriesStatus = '';
 
   final _serialController = TextEditingController();
   final _binNumberController = TextEditingController();
@@ -5489,6 +5496,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
       _preppedStatus = existing.preppedStatus.isNotEmpty
           ? existing.preppedStatus
           : 'Needs prepping';
+      _cleanBatteriesStatus = existing.cleanBatteriesStatus;
     }
 
     _loadInventory();
@@ -5789,6 +5797,9 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         binNumber: _binNumberController.text.trim().isEmpty
             ? null
             : _binNumberController.text.trim(),
+        cleanBatteriesStatus: _cleanBatteriesStatus.isEmpty
+            ? null
+            : _cleanBatteriesStatus,
       );
 
       if (!mounted) return;
@@ -6107,6 +6118,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                     lastPrepDate: _lastPrepDateController.text.trim(),
                     notes: _notesController.text.trim(),
                     binNumber: widget.existing?.binNumber ?? '',
+                    cleanBatteriesStatus: _cleanBatteriesStatus,
                   );
 
                   // Open prep checklist form
@@ -6129,6 +6141,26 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                     _preppedStatus = value ?? 'Needs prepping';
                   });
                 }
+              },
+            ),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<String>(
+              value: _cleanBatteriesStatus.isEmpty ? null : _cleanBatteriesStatus,
+              items: const [
+                DropdownMenuItem<String>(value: 'Needs Clean', child: Text('Needs Clean')),
+                DropdownMenuItem<String>(value: 'Needs Batteries', child: Text('Needs Batteries')),
+                DropdownMenuItem<String>(value: 'Needs Clean & Batteries', child: Text('Needs Clean & Batteries')),
+                DropdownMenuItem<String>(value: 'Done', child: Text('Done')),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Clean/Batteries',
+                border: OutlineInputBorder(),
+                hintText: 'Optional',
+              ),
+              onChanged: (value) {
+                setState(() {
+                  _cleanBatteriesStatus = value ?? '';
+                });
               },
             ),
             const SizedBox(height: 12),

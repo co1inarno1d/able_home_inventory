@@ -290,10 +290,11 @@ function apiGetLifts() {
       current_job:     String(r[10] || ''),
       install_date:    String(r[11] || ''),
       installer_name:  String(r[12] || ''),
-      prepped_status:  String(r[13] || ''),
-      last_prep_date:  String(r[14] || ''),
-      notes:           String(r[15] || ''),
-      bin_number:      String(r[16] || '')
+      prepped_status:          String(r[13] || ''),
+      last_prep_date:          String(r[14] || ''),
+      notes:                   String(r[15] || ''),
+      bin_number:              String(r[16] || ''),
+      clean_batteries_status:  String(r[17] || '')
     }));
 
   return {
@@ -639,8 +640,9 @@ function apiUpsertLift(params) {
   const installDate    = (params.install_date || '').toString();
   const installerName  = (params.installer_name || '').toString();
   const lastPrepDate   = (params.last_prep_date || '').toString();
-  const notes          = (params.notes || '').toString();
-  const binNumber      = (params.bin_number || '').toString();
+  const notes                = (params.notes || '').toString();
+  const binNumber            = (params.bin_number || '').toString();
+  const cleanBatteriesStatus = (params.clean_batteries_status || '').toString();
 
   const ss = getSs();
   const masterSheet  = ss.getSheetByName(SHEET_LIFTS_MASTER);
@@ -716,7 +718,8 @@ function apiUpsertLift(params) {
     preppedStatus,
     lastPrepDate,
     notes,
-    binNumber
+    binNumber,
+    cleanBatteriesStatus
   ];
 
   if (rowIndex > 0) {
