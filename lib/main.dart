@@ -1021,20 +1021,33 @@ Future<String> uploadLiftPhoto({
   final bodyStr = json.encode(bodyMap);
   const headers = {'Content-Type': 'application/json'};
 
-  // Use IOClient so we can disable automatic redirect following.
-  // Apps Script 302-redirects POST→GET, stripping the body.
-  // We detect the redirect and re-POST to the Location URL manually.
+  if (kIsWeb) {
+    // On web, use the Netlify proxy which handles the Apps Script redirect
+    // transparently — no IOClient needed (and IOClient doesn't work on web).
+    final response = await http.post(
+      Uri.parse(_webApiBaseUrl),
+      headers: headers,
+      body: bodyStr,
+    );
+    if (response.statusCode != 200) {
+      throw Exception('Upload failed: ${response.statusCode}');
+    }
+    final data = json.decode(response.body);
+    if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Upload error');
+    return data['url'] as String;
+  }
+
+  // On native (iOS/Android): Apps Script 302-redirects POST→GET, stripping
+  // the body. Use IOClient with followRedirects=false and re-POST manually.
   final ioClient = http_io.IOClient();
-
   try {
-    Uri postUri = Uri.parse(apiBaseUrl);
+    Uri postUri = Uri.parse(_nativeApiBaseUrl);
 
-    // Up to 3 redirect hops (Apps Script typically needs just one)
     for (int i = 0; i < 3; i++) {
       final request = http.Request('POST', postUri)
         ..headers.addAll(headers)
         ..body = bodyStr
-        ..followRedirects = false; // key: don't auto-follow as GET
+        ..followRedirects = false;
 
       final streamed = await ioClient.send(request);
 
@@ -3641,12 +3654,14 @@ class _LiftsScreenState extends State<LiftsScreen> {
                             ? 'Job: N/A'
                             : 'Job: ${l.currentJob}';
 
-                        // Determine clean/batteries badge color
+                        // Determine clean/batteries text color
                         Color? cbColor;
                         if (l.cleanBatteriesStatus == 'Done') {
-                          cbColor = Colors.green;
+                          cbColor = Colors.green.shade700;
+                        } else if (l.cleanBatteriesStatus == 'Needs Clean & Batteries') {
+                          cbColor = Colors.red.shade700;
                         } else if (l.cleanBatteriesStatus.isNotEmpty) {
-                          cbColor = Colors.orange;
+                          cbColor = Colors.orange.shade800;
                         }
 
                         return Card(
@@ -3687,21 +3702,12 @@ class _LiftsScreenState extends State<LiftsScreen> {
                                 if (l.preppedStatus.isNotEmpty)
                                   Text('Prep: ${l.preppedStatus}'),
                                 if (l.cleanBatteriesStatus.isNotEmpty)
-                                  Container(
-                                    margin: const EdgeInsets.only(top: 4),
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: cbColor!.withValues(alpha: 0.15),
-                                      border: Border.all(color: cbColor),
-                                      borderRadius: BorderRadius.circular(12),
-                                    ),
-                                    child: Text(
-                                      l.cleanBatteriesStatus,
-                                      style: TextStyle(
-                                        fontSize: 12,
-                                        color: cbColor,
-                                        fontWeight: FontWeight.w600,
-                                      ),
+                                  Text(
+                                    l.cleanBatteriesStatus,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: cbColor,
+                                      fontWeight: FontWeight.w600,
                                     ),
                                   ),
                                 if (l.notes.isNotEmpty)
