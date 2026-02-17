@@ -45,5 +45,11 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Used to take photos of lifts for the inventory</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Used to attach photos from your library to lifts</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Used to save lift photos to your library</string>
 </dict>
 </plist>

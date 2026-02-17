@@ -123,6 +123,18 @@ function handleRequest(params) {
         result = apiUpdateStairliftNotes(params);
         break;
 
+      case 'upload_lift_photo':
+        result = apiUploadLiftPhoto(params);
+        break;
+
+      case 'delete_lift_photo':
+        result = apiDeleteLiftPhoto(params);
+        break;
+
+      case 'get_lift_photos':
+        result = apiGetLiftPhotos(params);
+        break;
+
       default:
         result = {
           status: 'error',
@@ -294,7 +306,8 @@ function apiGetLifts() {
       last_prep_date:          String(r[14] || ''),
       notes:                   String(r[15] || ''),
       bin_number:              String(r[16] || ''),
-      clean_batteries_status:  String(r[17] || '')
+      clean_batteries_status:  String(r[17] || ''),
+      photo_urls:              String(r[18] || '')
     }));
 
   return {
@@ -1460,4 +1473,121 @@ function apiUpdateStairliftNotes(params) {
     }
   }
   return { status: 'error', message: 'item not found: ' + itemId };
+}
+
+/**************************************
+ * LIFT PHOTOS (Google Drive)
+ **************************************/
+
+// Replace this with your actual Google Drive folder ID.
+// Create a folder in Drive, open it, copy the ID from the URL:
+// https://drive.google.com/drive/folders/FOLDER_ID_HERE
+const LIFT_PHOTOS_FOLDER_ID = '1KPtkALoMV4rWky7miJ0oeNV0vCVOsY1s';
+
+// Helper: find Lifts_Master row index by lift_id (1-based, including header)
+function findLiftRowById(sheet, liftId) {
+  const rows = sheet.getDataRange().getValues().slice(1);
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0] || '').trim() === liftId) {
+      return i + 2; // +2: 1 for header, 1 for 1-based
+    }
+  }
+  return -1;
+}
+
+// Upload a photo for a lift. Expects: lift_id, file_name, mime_type, base64_data
+function apiUploadLiftPhoto(params) {
+  const liftId   = (params.lift_id    || '').toString().trim();
+  const fileName = (params.file_name  || 'photo.jpg').toString();
+  const mimeType = (params.mime_type  || 'image/jpeg').toString();
+  const b64Data  = (params.base64_data || '').toString();
+
+  if (!liftId)   return { status: 'error', message: 'lift_id required' };
+  if (!b64Data)  return { status: 'error', message: 'base64_data required' };
+
+  try {
+    const folder = DriveApp.getFolderById(LIFT_PHOTOS_FOLDER_ID);
+
+    // Decode base64 and create file in Drive
+    const blob = Utilities.newBlob(
+      Utilities.base64Decode(b64Data),
+      mimeType,
+      fileName
+    );
+    const file = folder.createFile(blob);
+
+    // Make the file publicly readable so Image.network() works without auth
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
+    // Direct image URL that works in Flutter Image.network()
+    const fileId  = file.getId();
+    const viewUrl = 'https://drive.google.com/uc?export=view&id=' + fileId;
+
+    // Append this URL to the lift's photo_urls column (col S = index 19, 1-based)
+    const ss = getSs();
+    const masterSheet = ss.getSheetByName(SHEET_LIFTS_MASTER);
+    const rowIndex = findLiftRowById(masterSheet, liftId);
+    if (rowIndex < 0) return { status: 'error', message: 'lift not found: ' + liftId };
+
+    const existingUrls = String(masterSheet.getRange(rowIndex, 19).getValue() || '').trim();
+    const newUrls = existingUrls
+      ? existingUrls + ',' + viewUrl
+      : viewUrl;
+    masterSheet.getRange(rowIndex, 19).setValue(newUrls);
+
+    return { status: 'ok', file_id: fileId, url: viewUrl };
+  } catch (e) {
+    Logger.log('apiUploadLiftPhoto error: ' + e);
+    return { status: 'error', message: e.toString() };
+  }
+}
+
+// Delete a photo by file_id and remove its URL from the lift record
+function apiDeleteLiftPhoto(params) {
+  const liftId = (params.lift_id  || '').toString().trim();
+  const fileId = (params.file_id  || '').toString().trim();
+
+  if (!liftId) return { status: 'error', message: 'lift_id required' };
+  if (!fileId) return { status: 'error', message: 'file_id required' };
+
+  try {
+    // Delete from Drive
+    const file = DriveApp.getFileById(fileId);
+    file.setTrashed(true);
+
+    // Remove URL from the lift's photo_urls column
+    const ss = getSs();
+    const masterSheet = ss.getSheetByName(SHEET_LIFTS_MASTER);
+    const rowIndex = findLiftRowById(masterSheet, liftId);
+    if (rowIndex > 0) {
+      const existing = String(masterSheet.getRange(rowIndex, 19).getValue() || '');
+      const urlToRemove = 'https://drive.google.com/uc?export=view&id=' + fileId;
+      const updated = existing
+        .split(',')
+        .map(u => u.trim())
+        .filter(u => u !== urlToRemove)
+        .join(',');
+      masterSheet.getRange(rowIndex, 19).setValue(updated);
+    }
+
+    return { status: 'ok' };
+  } catch (e) {
+    Logger.log('apiDeleteLiftPhoto error: ' + e);
+    return { status: 'error', message: e.toString() };
+  }
+}
+
+// Get current photo URLs for a lift (for refresh after upload/delete)
+function apiGetLiftPhotos(params) {
+  const liftId = (params.lift_id || '').toString().trim();
+  if (!liftId) return { status: 'error', message: 'lift_id required' };
+
+  const ss = getSs();
+  const masterSheet = ss.getSheetByName(SHEET_LIFTS_MASTER);
+  const rowIndex = findLiftRowById(masterSheet, liftId);
+  if (rowIndex < 0) return { status: 'ok', photo_urls: [] };
+
+  const raw = String(masterSheet.getRange(rowIndex, 19).getValue() || '').trim();
+  const urls = raw ? raw.split(',').map(u => u.trim()).filter(u => u) : [];
+  return { status: 'ok', photo_urls: urls };
 }

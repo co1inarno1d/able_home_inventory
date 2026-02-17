@@ -3,7 +3,9 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'prep_checklist_form.dart';
@@ -268,6 +270,7 @@ class LiftRecord {
   final String notes;
   final String binNumber; // Bin number for used lifts
   final String cleanBatteriesStatus; // Needs Clean / Needs Batteries / Needs Clean & Batteries / Done
+  final List<String> photoUrls; // Google Drive direct-view URLs
 
   LiftRecord({
     required this.liftId,
@@ -288,6 +291,7 @@ class LiftRecord {
     required this.notes,
     required this.binNumber,
     this.cleanBatteriesStatus = '',
+    this.photoUrls = const [],
   });
 
   factory LiftRecord.fromJson(Map<String, dynamic> json) {
@@ -312,6 +316,9 @@ class LiftRecord {
       lastPrepDate: s(json['last_prep_date']),
       notes: s(json['notes']),
       cleanBatteriesStatus: s(json['clean_batteries_status']),
+      photoUrls: s(json['photo_urls']).isEmpty
+          ? []
+          : s(json['photo_urls']).split(',').map((u) => u.trim()).where((u) => u.isNotEmpty).toList(),
     );
   }
 }
@@ -960,6 +967,87 @@ Future<void> upsertLift({
     } catch (_) {
       // Non-JSON but 200: assume success
     }
+  }
+}
+
+/// Fetch the current photo URLs for a lift (refresh after upload/delete)
+Future<List<String>> fetchLiftPhotos({required String liftId}) async {
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
+    'action': 'get_lift_photos',
+    'lift_id': liftId,
+    if (apiKey != null) 'api_key': apiKey!,
+  });
+  final response = await http.get(uri);
+  if (response.statusCode != 200) return [];
+  try {
+    final data = json.decode(response.body);
+    if (data['status'] != 'ok') return [];
+    return List<String>.from(data['photo_urls'] ?? []);
+  } catch (_) {
+    return [];
+  }
+}
+
+/// Upload a photo for a lift. Compresses first, then base64-encodes and POSTs.
+Future<String> uploadLiftPhoto({
+  required String liftId,
+  required XFile imageFile,
+}) async {
+  // Compress to max 1200px wide, ~85% quality JPEG — keeps uploads well under 1MB
+  final compressed = await FlutterImageCompress.compressWithFile(
+    imageFile.path,
+    minWidth: 1200,
+    minHeight: 1200,
+    quality: 85,
+    format: CompressFormat.jpeg,
+    keepExif: false,
+  );
+  if (compressed == null) throw Exception('Image compression failed');
+
+  final b64 = base64Encode(compressed);
+  final fileName = 'lift_${liftId}_${DateTime.now().millisecondsSinceEpoch}.jpg';
+
+  final uri = Uri.parse(apiBaseUrl);
+  final body = {
+    'action': 'upload_lift_photo',
+    'lift_id': liftId,
+    'file_name': fileName,
+    'mime_type': 'image/jpeg',
+    'base64_data': b64,
+    if (apiKey != null) 'api_key': apiKey,
+  };
+
+  final response = await http.post(
+    uri,
+    headers: {'Content-Type': 'application/json'},
+    body: json.encode(body),
+  );
+
+  if (response.statusCode != 200 && response.statusCode != 302) {
+    throw Exception('Upload failed: ${response.statusCode}');
+  }
+  if (response.statusCode == 200) {
+    final data = json.decode(response.body);
+    if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Upload error');
+    return data['url'] as String;
+  }
+  return ''; // 302 redirect = success but no body
+}
+
+/// Delete a photo by file ID and remove it from the lift record.
+Future<void> deleteLiftPhoto({
+  required String liftId,
+  required String fileId,
+}) async {
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
+    'action': 'delete_lift_photo',
+    'lift_id': liftId,
+    'file_id': fileId,
+    if (apiKey != null) 'api_key': apiKey!,
+  });
+  final response = await http.get(uri);
+  if (response.statusCode != 200 && response.statusCode != 302) {
+    throw Exception('Delete failed: ${response.statusCode}');
   }
 }
 
@@ -4857,12 +4945,18 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
   late Future<List<LiftServiceRecord>> _serviceFuture;
   late Future<List<PrepChecklist>> _prepChecklistsFuture;
 
+  // Photos state — starts from the LiftRecord, refreshed after upload/delete
+  late List<String> _photoUrls;
+  bool _uploadingPhoto = false;
+
   String get _liftIdForApi => widget.lift.liftId;
   String get _serialForApi => widget.lift.serialNumber;
 
   @override
   void initState() {
     super.initState();
+
+    _photoUrls = List<String>.from(widget.lift.photoUrls);
 
     // History is now keyed purely by serial number
     _historyFuture = fetchLiftHistory(
@@ -4973,6 +5067,216 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
     if (result == true && mounted) {
       _refreshService();
     }
+  }
+
+  Future<void> _addPhoto() async {
+    if (_liftIdForApi.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Save the lift first before adding photos')),
+      );
+      return;
+    }
+
+    // Let user choose source
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('Take photo'),
+              onTap: () => Navigator.of(ctx).pop(ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Choose from library'),
+              onTap: () => Navigator.of(ctx).pop(ImageSource.gallery),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (source == null || !mounted) return;
+
+    final picker = ImagePicker();
+    final imageFile = await picker.pickImage(source: source, imageQuality: 90);
+    if (imageFile == null || !mounted) return;
+
+    setState(() => _uploadingPhoto = true);
+    try {
+      await uploadLiftPhoto(liftId: _liftIdForApi, imageFile: imageFile);
+      // Refresh photo list from server
+      final urls = await fetchLiftPhotos(liftId: _liftIdForApi);
+      if (mounted) {
+        setState(() {
+          _photoUrls = urls;
+          _uploadingPhoto = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Photo added')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _uploadingPhoto = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Upload failed: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _deletePhoto(String url) async {
+    // Extract Drive file ID from the URL: .../uc?export=view&id=FILE_ID
+    final uri = Uri.tryParse(url);
+    final fileId = uri?.queryParameters['id'] ?? '';
+    if (fileId.isEmpty) return;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete photo?'),
+        content: const Text('This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await deleteLiftPhoto(liftId: _liftIdForApi, fileId: fileId);
+      final urls = await fetchLiftPhotos(liftId: _liftIdForApi);
+      if (mounted) setState(() => _photoUrls = urls);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Delete failed: $e')),
+        );
+      }
+    }
+  }
+
+  void _viewPhoto(BuildContext context, String url) {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => _PhotoViewScreen(url: url),
+    ));
+  }
+
+  Widget _buildPhotosTab() {
+    return Column(
+      children: [
+        Expanded(
+          child: _photoUrls.isEmpty && !_uploadingPhoto
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.photo_library_outlined, size: 64, color: Colors.grey.shade400),
+                      const SizedBox(height: 12),
+                      const Text('No photos yet', style: TextStyle(color: Colors.black54)),
+                      const SizedBox(height: 8),
+                      ElevatedButton.icon(
+                        onPressed: _addPhoto,
+                        icon: const Icon(Icons.add_a_photo),
+                        label: const Text('Add photo'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: kBrandGreen,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : GridView.builder(
+                  padding: const EdgeInsets.all(8),
+                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: 2,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                  ),
+                  itemCount: _photoUrls.length + (_uploadingPhoto ? 1 : 0),
+                  itemBuilder: (context, index) {
+                    // Last tile while uploading = spinner placeholder
+                    if (_uploadingPhoto && index == _photoUrls.length) {
+                      return Container(
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade200,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Center(child: CircularProgressIndicator()),
+                      );
+                    }
+                    final url = _photoUrls[index];
+                    return GestureDetector(
+                      onTap: () => _viewPhoto(context, url),
+                      onLongPress: () => _deletePhoto(url),
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.network(
+                              url,
+                              fit: BoxFit.cover,
+                              loadingBuilder: (_, child, progress) => progress == null
+                                  ? child
+                                  : Container(
+                                      color: Colors.grey.shade200,
+                                      child: const Center(child: CircularProgressIndicator()),
+                                    ),
+                              errorBuilder: (_, __, e) => Container(
+                                color: Colors.grey.shade200,
+                                child: const Icon(Icons.broken_image, color: Colors.grey),
+                              ),
+                            ),
+                          ),
+                          // Delete button overlay
+                          Positioned(
+                            top: 4,
+                            right: 4,
+                            child: GestureDetector(
+                              onTap: () => _deletePhoto(url),
+                              child: Container(
+                                decoration: const BoxDecoration(
+                                  color: Colors.black54,
+                                  shape: BoxShape.circle,
+                                ),
+                                padding: const EdgeInsets.all(4),
+                                child: const Icon(Icons.close, color: Colors.white, size: 16),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+        ),
+        // Add photo button at the bottom when photos exist
+        if (_photoUrls.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.all(12.0),
+            child: ElevatedButton.icon(
+              onPressed: _uploadingPhoto ? null : _addPhoto,
+              icon: const Icon(Icons.add_a_photo),
+              label: const Text('Add photo'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: kBrandGreen,
+                foregroundColor: Colors.white,
+                minimumSize: const Size(double.infinity, 44),
+              ),
+            ),
+          ),
+      ],
+    );
   }
 
   Widget _buildDetailsTab() {
@@ -5212,7 +5516,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
         : 'Lift details';
 
     return DefaultTabController(
-      length: 4,
+      length: 5,
       child: Scaffold(
         appBar: AppBar(
           title: Text(title),
@@ -5234,6 +5538,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
               Tab(text: 'Locations'),
               Tab(text: 'Service'),
               Tab(text: 'Prep History'),
+              Tab(text: 'Photos'),
             ],
           ),
         ),
@@ -5243,6 +5548,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
             _buildHistoryTab(),
             _buildServiceTab(),
             _buildPrepHistoryTab(),
+            _buildPhotosTab(),
           ],
         ),
         floatingActionButton: FloatingActionButton.extended(
@@ -5251,6 +5557,43 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
           foregroundColor: Colors.white,
           icon: const Icon(Icons.build),
           label: const Text('Add Service'),
+        ),
+      ),
+    );
+  }
+}
+
+/// =======================
+/// PHOTO FULL-SCREEN VIEWER
+/// =======================
+
+class _PhotoViewScreen extends StatelessWidget {
+  final String url;
+  const _PhotoViewScreen({required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        elevation: 0,
+      ),
+      body: Center(
+        child: InteractiveViewer(
+          minScale: 0.5,
+          maxScale: 4.0,
+          child: Image.network(
+            url,
+            fit: BoxFit.contain,
+            loadingBuilder: (_, child, progress) => progress == null
+                ? child
+                : const Center(child: CircularProgressIndicator(color: Colors.white)),
+            errorBuilder: (_, __, e) => const Center(
+              child: Icon(Icons.broken_image, color: Colors.white, size: 64),
+            ),
+          ),
         ),
       ),
     );
