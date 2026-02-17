@@ -3388,64 +3388,80 @@ class _LiftsScreenState extends State<LiftsScreen> {
                   .toList()
                 ..sort());
 
+          // Series scoped to selected brand
+          final brandLifts = _brandFilter != null
+              ? lifts.where((l) => l.brand.trim().toLowerCase() == _brandFilter!.toLowerCase()).toList()
+              : lifts;
           final allSeries = sortSeriesList(
-              lifts.map((l) => l.series.trim()).where((s) => s.isNotEmpty).toSet().toList());
+              brandLifts.map((l) => l.series.trim()).where((s) => s.isNotEmpty).toSet().toList());
 
-          final orientations = (lifts
+          // Orientation scoped to selected brand+series
+          final brandSeriesLifts = _seriesFilter != null
+              ? brandLifts.where((l) => l.series.trim().toLowerCase() == _seriesFilter!.toLowerCase()).toList()
+              : brandLifts;
+          final orientations = (brandSeriesLifts
                   .map((l) => l.orientation.trim())
                   .where((o) => o.isNotEmpty)
                   .toSet()
                   .toList()
                 ..sort());
 
-          final prepStatuses = (lifts
-                  .map((l) => l.preppedStatus.trim())
-                  .where((p) => p.isNotEmpty)
-                  .toSet()
-                  .toList()
-                ..sort());
+          // Prep statuses from full list (all brands)
+          const prepStatuses = ['Needs prepping', 'Needs repair', 'Prepped'];
+
+          // Clamp dependent filters if their value no longer exists in the scoped list
+          if (_seriesFilter != null && !allSeries.contains(_seriesFilter)) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) setState(() { _seriesFilter = null; _orientationFilter = null; });
+            });
+          }
+          if (_orientationFilter != null && !orientations.contains(_orientationFilter)) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) setState(() { _orientationFilter = null; });
+            });
+          }
 
           // Single filtering pipeline with AND logic
           final filtered = lifts.where((l) {
-            // Condition filter (New / Used)
+            // Condition filter (New / Used) — case-insensitive
             if (_conditionFilter != null &&
                 _conditionFilter!.isNotEmpty &&
-                l.condition.trim() != _conditionFilter) {
+                l.condition.trim().toLowerCase() != _conditionFilter!.toLowerCase()) {
               return false;
             }
 
-            // Status filter
+            // Status filter — case-insensitive
             if (_statusFilter != null &&
                 _statusFilter!.isNotEmpty &&
-                l.status.trim() != _statusFilter) {
+                l.status.trim().toLowerCase() != _statusFilter!.toLowerCase()) {
               return false;
             }
 
-            // Brand filter
+            // Brand filter — case-insensitive
             if (_brandFilter != null &&
                 _brandFilter!.isNotEmpty &&
-                l.brand.trim() != _brandFilter) {
+                l.brand.trim().toLowerCase() != _brandFilter!.toLowerCase()) {
               return false;
             }
 
-            // Series filter
+            // Series filter — case-insensitive
             if (_seriesFilter != null &&
                 _seriesFilter!.isNotEmpty &&
-                l.series.trim() != _seriesFilter) {
+                l.series.trim().toLowerCase() != _seriesFilter!.toLowerCase()) {
               return false;
             }
 
-            // Orientation filter
+            // Orientation filter — case-insensitive
             if (_orientationFilter != null &&
                 _orientationFilter!.isNotEmpty &&
-                l.orientation.trim() != _orientationFilter) {
+                l.orientation.trim().toLowerCase() != _orientationFilter!.toLowerCase()) {
               return false;
             }
 
-            // Prep Status filter
+            // Prep Status filter — case-insensitive
             if (_prepStatusFilter != null &&
                 _prepStatusFilter!.isNotEmpty &&
-                l.preppedStatus.trim() != _prepStatusFilter) {
+                l.preppedStatus.trim().toLowerCase() != _prepStatusFilter!.toLowerCase()) {
               return false;
             }
 
@@ -3458,6 +3474,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 l.series,
                 l.currentLocation,
                 l.currentJob,
+                l.cleanBatteriesStatus,
               ].join(' ').toLowerCase();
               if (!haystack.contains(_search)) return false;
             }
@@ -3502,6 +3519,14 @@ class _LiftsScreenState extends State<LiftsScreen> {
                             ? 'Job: N/A'
                             : 'Job: ${l.currentJob}';
 
+                        // Determine clean/batteries badge color
+                        Color? cbColor;
+                        if (l.cleanBatteriesStatus == 'Done') {
+                          cbColor = Colors.green;
+                        } else if (l.cleanBatteriesStatus.isNotEmpty) {
+                          cbColor = Colors.orange;
+                        }
+
                         return Card(
                           margin: const EdgeInsets.symmetric(
                               horizontal: 8, vertical: 4),
@@ -3539,6 +3564,24 @@ class _LiftsScreenState extends State<LiftsScreen> {
                                 Text(job),
                                 if (l.preppedStatus.isNotEmpty)
                                   Text('Prep: ${l.preppedStatus}'),
+                                if (l.cleanBatteriesStatus.isNotEmpty)
+                                  Container(
+                                    margin: const EdgeInsets.only(top: 4),
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: cbColor!.withValues(alpha: 0.15),
+                                      border: Border.all(color: cbColor),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Text(
+                                      l.cleanBatteriesStatus,
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        color: cbColor,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
                                 if (l.notes.isNotEmpty)
                                   Text('Notes: ${l.notes}'),
                               ],
@@ -3612,16 +3655,23 @@ class _LiftsScreenState extends State<LiftsScreen> {
                       value: _brandFilter,
                       hint: 'Brand',
                       items: brands,
-                      onChanged: (value) => setState(() => _brandFilter = value),
+                      onChanged: (value) => setState(() {
+                        _brandFilter = value;
+                        _seriesFilter = null;
+                        _orientationFilter = null;
+                      }),
                     ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
                     child: _buildCompactDropdown(
-                      value: _seriesFilter,
+                      value: series.contains(_seriesFilter) ? _seriesFilter : null,
                       hint: 'Series',
                       items: series,
-                      onChanged: (value) => setState(() => _seriesFilter = value),
+                      onChanged: (value) => setState(() {
+                        _seriesFilter = value;
+                        _orientationFilter = null;
+                      }),
                     ),
                   ),
                 ],
@@ -3641,7 +3691,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: _buildCompactDropdown(
-                      value: _orientationFilter,
+                      value: orientations.contains(_orientationFilter) ? _orientationFilter : null,
                       hint: 'Orientation',
                       items: orientations,
                       onChanged: (value) => setState(() => _orientationFilter = value),
@@ -3650,7 +3700,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: _buildCompactDropdown(
-                      value: _prepStatusFilter,
+                      value: prepStatuses.contains(_prepStatusFilter) ? _prepStatusFilter : null,
                       hint: 'Prep',
                       items: prepStatuses,
                       onChanged: (value) => setState(() => _prepStatusFilter = value),
