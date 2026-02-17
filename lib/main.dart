@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart' as http_io;
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -989,11 +990,13 @@ Future<List<String>> fetchLiftPhotos({required String liftId}) async {
 }
 
 /// Upload a photo for a lift. Compresses first, then base64-encodes and POSTs.
+/// Apps Script redirects POST→GET via 302; we follow the redirect manually
+/// and re-POST to the final URL so the body isn't lost.
 Future<String> uploadLiftPhoto({
   required String liftId,
   required XFile imageFile,
 }) async {
-  // Compress to max 1200px wide, ~85% quality JPEG — keeps uploads well under 1MB
+  // Compress to max 1200px wide, 85% quality JPEG
   final compressed = await FlutterImageCompress.compressWithFile(
     imageFile.path,
     minWidth: 1200,
@@ -1007,8 +1010,7 @@ Future<String> uploadLiftPhoto({
   final b64 = base64Encode(compressed);
   final fileName = 'lift_${liftId}_${DateTime.now().millisecondsSinceEpoch}.jpg';
 
-  final uri = Uri.parse(apiBaseUrl);
-  final body = {
+  final bodyMap = {
     'action': 'upload_lift_photo',
     'lift_id': liftId,
     'file_name': fileName,
@@ -1016,22 +1018,54 @@ Future<String> uploadLiftPhoto({
     'base64_data': b64,
     if (apiKey != null) 'api_key': apiKey,
   };
+  final bodyStr = json.encode(bodyMap);
+  const headers = {'Content-Type': 'application/json'};
 
-  final response = await http.post(
-    uri,
-    headers: {'Content-Type': 'application/json'},
-    body: json.encode(body),
-  );
+  // Use IOClient so we can disable automatic redirect following.
+  // Apps Script 302-redirects POST→GET, stripping the body.
+  // We detect the redirect and re-POST to the Location URL manually.
+  final ioClient = http_io.IOClient();
 
-  if (response.statusCode != 200 && response.statusCode != 302) {
-    throw Exception('Upload failed: ${response.statusCode}');
+  try {
+    Uri postUri = Uri.parse(apiBaseUrl);
+
+    // Up to 3 redirect hops (Apps Script typically needs just one)
+    for (int i = 0; i < 3; i++) {
+      final request = http.Request('POST', postUri)
+        ..headers.addAll(headers)
+        ..body = bodyStr
+        ..followRedirects = false; // key: don't auto-follow as GET
+
+      final streamed = await ioClient.send(request);
+
+      if (streamed.statusCode == 200) {
+        final responseBody = await streamed.stream.bytesToString();
+        final data = json.decode(responseBody);
+        if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Upload error');
+        return data['url'] as String;
+      }
+
+      if (streamed.statusCode == 301 ||
+          streamed.statusCode == 302 ||
+          streamed.statusCode == 303 ||
+          streamed.statusCode == 307 ||
+          streamed.statusCode == 308) {
+        final location = streamed.headers['location'];
+        if (location == null || location.isEmpty) {
+          throw Exception('Redirect with no location header');
+        }
+        postUri = Uri.parse(location);
+        await streamed.stream.drain<void>();
+        continue;
+      }
+
+      throw Exception('Upload failed: ${streamed.statusCode}');
+    }
+
+    throw Exception('Too many redirects during upload');
+  } finally {
+    ioClient.close();
   }
-  if (response.statusCode == 200) {
-    final data = json.decode(response.body);
-    if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Upload error');
-    return data['url'] as String;
-  }
-  return ''; // 302 redirect = success but no body
 }
 
 /// Delete a photo by file ID and remove it from the lift record.
