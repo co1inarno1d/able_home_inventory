@@ -1044,17 +1044,21 @@ Future<String> uploadLiftPhoto({
     return data['url'] as String;
   }
 
-  // On native (iOS/Android): Apps Script 302-redirects POST→GET, stripping
-  // the body. Use IOClient with followRedirects=false and re-POST manually.
+  // On native (iOS/Android): Apps Script issues a 302 on POST /exec.
+  // The redirect target expects GET (the body was already processed on the
+  // first hop). Use IOClient with followRedirects=false, then follow the
+  // redirect as GET per standard HTTP behaviour for 301/302/303.
   final ioClient = http_io.IOClient();
   try {
-    Uri postUri = Uri.parse(_nativeApiBaseUrl);
+    Uri nextUri = Uri.parse(_nativeApiBaseUrl);
+    String nextMethod = 'POST';
+    String? nextBody = bodyStr;
 
     for (int i = 0; i < 3; i++) {
-      final request = http.Request('POST', postUri)
+      final request = http.Request(nextMethod, nextUri)
         ..headers.addAll(headers)
-        ..body = bodyStr
         ..followRedirects = false;
+      if (nextBody != null) request.body = nextBody;
 
       final streamed = await ioClient.send(request);
 
@@ -1074,8 +1078,15 @@ Future<String> uploadLiftPhoto({
         if (location == null || location.isEmpty) {
           throw Exception('Redirect with no location header');
         }
-        postUri = Uri.parse(location);
         await streamed.stream.drain<void>();
+        nextUri = Uri.parse(location);
+        // 307/308 preserve method+body; 301/302/303 switch to GET (no body)
+        if (streamed.statusCode == 307 || streamed.statusCode == 308) {
+          // keep nextMethod and nextBody as-is
+        } else {
+          nextMethod = 'GET';
+          nextBody = null;
+        }
         continue;
       }
 
