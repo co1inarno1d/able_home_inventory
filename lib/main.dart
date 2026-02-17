@@ -2719,6 +2719,7 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
         items.add({
           'item_id': item.itemId,
           'brand': item.brand,
+          'size': item.size,
           'category': 'ramp',
           'new_qty': parseInt(raw),
           'condition': item.condition,
@@ -3849,56 +3850,125 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
     );
   }
 
+  Future<void> _editCutRailNotes(StairliftItem item) async {
+    final controller = TextEditingController(text: item.notes);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('${item.brand} ${item.series}'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            labelText: 'Notes',
+            hintText: 'Enter details about this cut rail...',
+            border: OutlineInputBorder(),
+          ),
+          maxLines: 4,
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: kBrandGreen,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userName = prefs.getString('user_name') ?? '';
+      final userEmail = prefs.getString('user_email') ?? '';
+      // Save notes by calling upsertLift-style endpoint via submitJobAdjustment
+      // with a notes-only update. Since we only have the stairlift item we use
+      // a dedicated notes update call via the inventory sheet update mechanism.
+      final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
+        'action': 'update_stairlift_notes',
+        'item_id': item.itemId,
+        'notes': controller.text.trim(),
+        'user_name': userName,
+        'user_email': userEmail,
+        if (apiKey != null) 'api_key': apiKey!,
+      });
+      await http.get(uri);
+      _refresh();
+    } catch (_) {
+      // Best-effort — refresh anyway to show current state
+      _refresh();
+    }
+  }
+
   Widget _buildCutFoldingRailTile(StairliftItem item) {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       color: Colors.orange.shade50,
-      child: Padding(
-        padding: const EdgeInsets.all(12.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.content_cut, color: Colors.orange),
-                const SizedBox(width: 8),
-                Expanded(
+      child: InkWell(
+        onTap: () => _editCutRailNotes(item),
+        borderRadius: BorderRadius.circular(4),
+        child: Padding(
+          padding: const EdgeInsets.all(12.0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.content_cut, color: Colors.orange),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '${item.brand} ${item.series}',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.remove_circle_outline),
+                        onPressed: item.currentQty > 0
+                            ? () => _adjustFoldingRailQuantity(item, -1)
+                            : null,
+                      ),
+                      Text(
+                        '${item.currentQty}',
+                        style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.add_circle_outline),
+                        onPressed: () => _adjustFoldingRailQuantity(item, 1),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              if (item.notes.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4.0),
                   child: Text(
-                    '${item.brand} ${item.series}',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
+                    'Notes: ${item.notes}',
+                    style: const TextStyle(fontSize: 13, color: Colors.black87),
+                  ),
+                )
+              else
+                const Padding(
+                  padding: EdgeInsets.only(top: 4.0),
+                  child: Text(
+                    'Tap to add notes...',
+                    style: TextStyle(fontSize: 12, color: Colors.black38),
                   ),
                 ),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.remove_circle_outline),
-                      onPressed: item.currentQty > 0
-                          ? () => _adjustFoldingRailQuantity(item, -1)
-                          : null,
-                    ),
-                    Text(
-                      '${item.currentQty}',
-                      style: const TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.add_circle_outline),
-                      onPressed: () => _adjustFoldingRailQuantity(item, 1),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            if (item.notes.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(top: 4.0),
-                child: Text(
-                  'Notes: ${item.notes}',
-                  style: const TextStyle(fontSize: 13, color: Colors.black87),
-                ),
-              ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -4459,16 +4529,18 @@ class _StairliftQuantitiesScreenState
           final lifts = snapshot.data![0] as List<LiftRecord>;
           final inventoryData = snapshot.data![1] as InventoryData;
 
-          // Calculate stairlift quantities from lifts with status "In Stock",
-          // excluding folding rails (those are tracked separately).
-          final inStockLifts = lifts
-              .where((l) => l.status.trim() == 'In Stock' && !isLiftRecordFoldingRail(l))
-              .toList();
+          // Count all non-folding-rail lifts from master list.
+          // New: only In Stock. Used: all statuses (used units out in field still count).
+          final eligibleLifts = lifts.where((l) => !isLiftRecordFoldingRail(l)).toList();
 
           // Group by brand + series + condition and count
           final Map<String, int> counts = {};
-          for (final lift in inStockLifts) {
-            final key = '${lift.brand.trim()}|${lift.series.trim()}|${lift.orientation.trim()}|${lift.condition.trim()}';
+          for (final lift in eligibleLifts) {
+            final cond = lift.condition.trim();
+            final status = lift.status.trim();
+            // For New units, only count In Stock; for Used, count all statuses
+            if (cond == 'New' && status != 'In Stock') continue;
+            final key = '${lift.brand.trim()}|${lift.series.trim()}|${lift.orientation.trim()}|$cond';
             counts[key] = (counts[key] ?? 0) + 1;
           }
 

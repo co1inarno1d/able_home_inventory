@@ -119,6 +119,10 @@ function handleRequest(params) {
         result = apiCheckDuplicateSerial(params);
         break;
 
+      case 'update_stairlift_notes':
+        result = apiUpdateStairliftNotes(params);
+        break;
+
       default:
         result = {
           status: 'error',
@@ -453,20 +457,16 @@ function apiFullCheck(params) {
     return map;
   }
 
-  // Build lookup for ramps using item_id+brand+condition to handle EZ Access 2G/3G
+  // Build lookup for ramps using brand+size+condition (guaranteed unique per row)
   function buildRampIndexMap(sheet) {
     const rows = sheet.getDataRange().getValues().slice(1);
     const map = {};
     rows.forEach((r, i) => {
-      const id    = String(r[0] || '').trim();
       const brand = String(r[1] || '').trim();
+      const size  = String(r[2] || '').trim();
       const cond  = String(r[3] || '').trim();
-      if (id) {
-        // Primary key includes brand for disambiguation (EZ Access 2G vs 3G)
-        map[id + '|' + brand + '|' + cond] = i + 2;
-        // Fallback key without brand (for rows where brand may not be sent)
-        if (!map[id + '|' + cond]) map[id + '|' + cond] = i + 2;
-      }
+      const key   = brand + '|' + size + '|' + cond;
+      if (brand) map[key] = i + 2;
     });
     return map;
   }
@@ -480,6 +480,7 @@ function apiFullCheck(params) {
   items.forEach(it => {
     const itemId    = String(it.item_id   || '').trim();
     const brand     = String(it.brand     || '').trim();
+    const size      = String(it.size      || '').trim();
     const condition = String(it.condition || '').trim();
     const newQty    = toNumber(it.new_qty);
     const category  = String(it.category  || 'ramp').toLowerCase();
@@ -489,14 +490,11 @@ function apiFullCheck(params) {
     const indexMap    = isStairlift ? stairIndex : rampIndex;
     const qtyCol      = isStairlift ? 8 : 5; // H=8 for stairlifts, E=5 for ramps
 
-    // For ramps: try brand-specific key first, then fall back to id|condition
-    let key = isStairlift
+    // For ramps: look up by brand+size+condition; for stairlifts: by item_id+condition
+    const key      = isStairlift
       ? (itemId + '|' + condition)
-      : (brand ? itemId + '|' + brand + '|' + condition : itemId + '|' + condition);
+      : (brand + '|' + size + '|' + condition);
     let rowIndex = indexMap[key];
-    if (!rowIndex && !isStairlift && brand) {
-      rowIndex = indexMap[itemId + '|' + condition];
-    }
 
     if (!rowIndex) {
       Logger.log('Full Check: item not found for key: ' + key + ' (category: ' + category + ')');
@@ -1441,4 +1439,22 @@ function apiGetPrepChecklistTemplate(params) {
     Logger.log('apiGetPrepChecklistTemplate error: ' + e);
     return { status: 'error', message: 'internal: ' + e.message };
   }
+}
+
+function apiUpdateStairliftNotes(params) {
+  const itemId = (params.item_id || '').toString().trim();
+  const notes  = (params.notes   || '').toString();
+  if (!itemId) return { status: 'error', message: 'item_id required' };
+
+  const ss    = getSs();
+  const sheet = ss.getSheetByName(SHEET_STAIRLIFTS);
+  const rows  = sheet.getDataRange().getValues().slice(1);
+
+  for (let i = 0; i < rows.length; i++) {
+    if (String(rows[i][0] || '').trim() === itemId) {
+      sheet.getRange(i + 2, 10).setValue(notes); // col J = notes
+      return { status: 'ok' };
+    }
+  }
+  return { status: 'error', message: 'item not found: ' + itemId };
 }
