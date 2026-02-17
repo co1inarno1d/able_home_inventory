@@ -996,18 +996,25 @@ Future<String> uploadLiftPhoto({
   required String liftId,
   required XFile imageFile,
 }) async {
-  // Compress to max 1200px wide, 85% quality JPEG
-  final compressed = await FlutterImageCompress.compressWithFile(
-    imageFile.path,
-    minWidth: 1200,
-    minHeight: 1200,
-    quality: 85,
-    format: CompressFormat.jpeg,
-    keepExif: false,
-  );
-  if (compressed == null) throw Exception('Image compression failed');
+  // Compress on native; on web compressWithFile doesn't work (no file path),
+  // so read bytes directly from XFile instead.
+  final Uint8List imageBytes;
+  if (kIsWeb) {
+    imageBytes = await imageFile.readAsBytes();
+  } else {
+    final compressed = await FlutterImageCompress.compressWithFile(
+      imageFile.path,
+      minWidth: 1200,
+      minHeight: 1200,
+      quality: 85,
+      format: CompressFormat.jpeg,
+      keepExif: false,
+    );
+    if (compressed == null) throw Exception('Image compression failed');
+    imageBytes = compressed;
+  }
 
-  final b64 = base64Encode(compressed);
+  final b64 = base64Encode(imageBytes);
   final fileName = 'lift_${liftId}_${DateTime.now().millisecondsSinceEpoch}.jpg';
 
   final bodyMap = {
@@ -5117,28 +5124,34 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
       return;
     }
 
-    // Let user choose source
-    final source = await showModalBottomSheet<ImageSource>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.camera_alt),
-              title: const Text('Take photo'),
-              onTap: () => Navigator.of(ctx).pop(ImageSource.camera),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_library),
-              title: const Text('Choose from library'),
-              onTap: () => Navigator.of(ctx).pop(ImageSource.gallery),
-            ),
-          ],
+    // On web, only file picker is supported (no camera access via image_picker)
+    final ImageSource source;
+    if (kIsWeb) {
+      source = ImageSource.gallery;
+    } else {
+      final picked = await showModalBottomSheet<ImageSource>(
+        context: context,
+        builder: (ctx) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('Take photo'),
+                onTap: () => Navigator.of(ctx).pop(ImageSource.camera),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('Choose from library'),
+                onTap: () => Navigator.of(ctx).pop(ImageSource.gallery),
+              ),
+            ],
+          ),
         ),
-      ),
-    );
-    if (source == null || !mounted) return;
+      );
+      if (picked == null || !mounted) return;
+      source = picked;
+    }
 
     final picker = ImagePicker();
     final imageFile = await picker.pickImage(source: source, imageQuality: 90);
