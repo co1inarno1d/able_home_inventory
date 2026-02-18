@@ -71,7 +71,7 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
         'serial_number': widget.lift.serialNumber,
         'brand': widget.lift.brand,
         'series': widget.lift.series,
-        'prep_date': DateTime.now().toIso8601String(),
+        'prep_date': '${DateTime.now().month.toString().padLeft(2, '0')}/${DateTime.now().day.toString().padLeft(2, '0')}/${DateTime.now().year}',
         'prepped_by_name': userName,
         'prepped_by_email': userEmail,
         'notes': _notesController.text.trim(),

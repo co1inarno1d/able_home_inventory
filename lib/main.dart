@@ -739,16 +739,17 @@ Future<String> savePrepChecklist({
     throw Exception('Failed to save prep checklist: ${response.statusCode}');
   }
 
+  Map<String, dynamic>? data;
   try {
-    final data = json.decode(response.body);
-    if (data is Map && data['status'] != null && data['status'] != 'ok') {
-      throw Exception('API error: ${data['message']}');
-    }
-    return data['checklist_id']?.toString() ?? '';
+    data = json.decode(response.body) as Map<String, dynamic>;
   } catch (_) {
     // Non-JSON 200 response — treat as success
     return '';
   }
+  if (data['status'] != null && data['status'] != 'ok') {
+    throw Exception('API error: ${data['message']}');
+  }
+  return data['checklist_id']?.toString() ?? '';
 }
 
 Future<Map<String, dynamic>> getPrepChecklistTemplate({
@@ -1157,15 +1158,14 @@ Future<void> addLiftService({
   }
 
   if (response.statusCode == 200) {
+    Map<String, dynamic>? data;
     try {
-      final data = json.decode(response.body);
-      if (data is Map &&
-          data['status'] != null &&
-          data['status'].toString() != 'ok') {
-        throw Exception('API error: ${data['message']}');
-      }
+      data = json.decode(response.body) as Map<String, dynamic>;
     } catch (_) {
-      // Non-JSON but 200: assume success
+      return; // Non-JSON 200: assume success
+    }
+    if (data['status'] != null && data['status'].toString() != 'ok') {
+      throw Exception('API error: ${data['message']}');
     }
   }
 }
@@ -1214,9 +1214,17 @@ bool isLiftRecordFoldingRail(LiftRecord lift) {
 /// Custom sort order for stairlift series names
 const _seriesOrder = [
   'Elan 3050', 'Elan 3000', 'Elite', 'Outdoor Elite',
-  '120', '130', 'T700', 'Outdoor 130', 'Outdoor T700',
+  '120', '130', 'T700', 'Outdoor 120', 'Outdoor 130', 'Outdoor T700',
   'SL300', 'SL600',
 ];
+
+/// Hardcoded series per brand for the Lifts filter.
+const Map<String, List<String>> _seriesByBrandHardcoded = {
+  'Acorn': ['T700', '130', '120', 'Outdoor T700', 'Outdoor 130', 'Outdoor 120'],
+  'Brooks': ['T700', '130', 'Outdoor T700', 'Outdoor 130'],
+  'Bruno': ['Elan 3050', 'Elan 3000', 'Elite', 'Outdoor Elite'],
+  'Harmar': ['SL300', 'SL600'],
+};
 
 List<String> sortSeriesList(List<String> series) {
   final ordered = <String>[];
@@ -1657,8 +1665,8 @@ class _PrepHistoryScreenState extends State<PrepHistoryScreen> {
               itemBuilder: (context, index) {
                 final checklist = checklists[index];
                 final dateStr = checklist.timestamp != null
-                    ? '${checklist.timestamp!.year}-${checklist.timestamp!.month.toString().padLeft(2, '0')}-${checklist.timestamp!.day.toString().padLeft(2, '0')}'
-                    : checklist.prepDate;
+                    ? formatDate(checklist.timestamp)
+                    : normalizeDateDisplay(checklist.prepDate);
 
                 return Card(
                   margin: const EdgeInsets.symmetric(vertical: 4),
@@ -1711,8 +1719,8 @@ class PrepChecklistDetailScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final dateStr = checklist.timestamp != null
-        ? '${checklist.timestamp!.year}-${checklist.timestamp!.month.toString().padLeft(2, '0')}-${checklist.timestamp!.day.toString().padLeft(2, '0')}'
-        : checklist.prepDate;
+        ? formatDate(checklist.timestamp)
+        : normalizeDateDisplay(checklist.prepDate);
 
     // Sort checklist items alphabetically for consistent display
     final sortedItems = checklist.checklistItems.entries.toList()
@@ -3531,56 +3539,40 @@ class _LiftsScreenState extends State<LiftsScreen> {
           // Filter out folding rail individual entries from lifts list
           final lifts = allLifts.where((l) => !isLiftRecordFoldingRail(l)).toList();
 
-          // Use a fixed status list so all options always appear
+          // All filter lists are hardcoded so options always appear
           const statuses = ['In Stock', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
-
-          final brands = (lifts
-                  .map((l) => l.brand.trim())
-                  .where((b) => b.isNotEmpty)
-                  .toSet()
-                  .toList()
-                ..sort());
-
-          // Series scoped to selected brand
-          final brandLifts = _brandFilter != null
-              ? lifts.where((l) => l.brand.trim().toLowerCase() == _brandFilter!.toLowerCase()).toList()
-              : lifts;
-          final allSeries = sortSeriesList(
-              brandLifts.map((l) => l.series.trim()).where((s) => s.isNotEmpty).toSet().toList());
-
-          // Orientation scoped to selected brand+series
-          final brandSeriesLifts = _seriesFilter != null
-              ? brandLifts.where((l) => l.series.trim().toLowerCase() == _seriesFilter!.toLowerCase()).toList()
-              : brandLifts;
-          final orientations = (brandSeriesLifts
-                  .map((l) => l.orientation.trim())
-                  .where((o) => o.isNotEmpty)
-                  .toSet()
-                  .toList()
-                ..sort());
-
-          // Prep statuses from full list (all brands)
           const prepStatuses = ['Needs prepping', 'Needs repair', 'Prepped'];
+          const brands = ['Acorn', 'Brooks', 'Bruno', 'Harmar'];
+          const orientations = ['LH', 'RH', 'N/A'];
 
-          // Clamp dependent filters if their value no longer exists in the scoped list
+          // Series: hardcoded per brand when brand filter active, else all series
+          final List<String> allSeries;
+          if (_brandFilter != null && _seriesByBrandHardcoded.containsKey(_brandFilter)) {
+            allSeries = _seriesByBrandHardcoded[_brandFilter]!;
+          } else {
+            allSeries = sortSeriesList([
+              ..._seriesByBrandHardcoded.values.expand((s) => s).toSet(),
+            ]);
+          }
+
+          // Clamp series filter if it doesn't exist in the (possibly brand-scoped) series list
           if (_seriesFilter != null && !allSeries.contains(_seriesFilter)) {
             WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) setState(() { _seriesFilter = null; _orientationFilter = null; });
-            });
-          }
-          if (_orientationFilter != null && !orientations.contains(_orientationFilter)) {
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) setState(() { _orientationFilter = null; });
+              if (mounted) setState(() { _seriesFilter = null; });
             });
           }
 
           // Single filtering pipeline with AND logic
           final filtered = lifts.where((l) {
-            // Condition filter (New / Used) — case-insensitive
-            if (_conditionFilter != null &&
-                _conditionFilter!.isNotEmpty &&
-                l.condition.trim().toLowerCase() != _conditionFilter!.toLowerCase()) {
-              return false;
+            // Condition filter — 'Used' matches all used sub-conditions
+            if (_conditionFilter != null && _conditionFilter!.isNotEmpty) {
+              final lc = l.condition.trim().toLowerCase();
+              final fc = _conditionFilter!.toLowerCase();
+              if (fc == 'used') {
+                if (!lc.startsWith('used')) return false;
+              } else {
+                if (lc != fc) return false;
+              }
             }
 
             // Status filter — case-insensitive
@@ -3604,11 +3596,15 @@ class _LiftsScreenState extends State<LiftsScreen> {
               return false;
             }
 
-            // Orientation filter — case-insensitive
-            if (_orientationFilter != null &&
-                _orientationFilter!.isNotEmpty &&
-                l.orientation.trim().toLowerCase() != _orientationFilter!.toLowerCase()) {
-              return false;
+            // Orientation filter — LH/RH also shows N/A (non-handed) lifts
+            if (_orientationFilter != null && _orientationFilter!.isNotEmpty) {
+              final lo = l.orientation.trim().toLowerCase();
+              final fo = _orientationFilter!.toLowerCase();
+              final isNonHanded = lo == 'n/a' || lo.isEmpty;
+              final filterIsHanded = fo == 'lh' || fo == 'rh';
+              if (!isNonHanded || !filterIsHanded) {
+                if (lo != fo) return false;
+              }
             }
 
             // Prep Status filter — case-insensitive
@@ -3627,13 +3623,27 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 l.series,
                 l.currentLocation,
                 l.currentJob,
-                l.cleanBatteriesStatus,
               ].join(' ').toLowerCase();
               if (!haystack.contains(_search)) return false;
             }
 
             return true;
           }).toList();
+
+          // Search ranking: exact bin/serial matches float to top
+          if (_search.isNotEmpty) {
+            filtered.sort((a, b) {
+              int rank(LiftRecord r) {
+                final s = _search;
+                if (r.binNumber.toLowerCase() == s) return 0;
+                if (r.serialNumber.toLowerCase() == s) return 1;
+                if (r.binNumber.toLowerCase().startsWith(s)) return 2;
+                if (r.serialNumber.toLowerCase().startsWith(s)) return 3;
+                return 4;
+              }
+              return rank(a).compareTo(rank(b));
+            });
+          }
 
           return Column(
             children: [
@@ -3643,7 +3653,10 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 series: allSeries,
                 orientations: orientations,
                 prepStatuses: prepStatuses,
-                conditions: const ['New', 'Used'],
+                conditions: const [
+                  'New', 'Used',
+                  'Used - Like New', 'Used - Standard', 'Used - Not Great', 'Used - Shit',
+                ],
               ),
               if (filtered.isEmpty)
                 const Expanded(
@@ -3678,7 +3691,8 @@ class _LiftsScreenState extends State<LiftsScreen> {
                           cbColor = Colors.green.shade700;
                         } else if (l.cleanBatteriesStatus == 'Needs Clean & Batteries') {
                           cbColor = Colors.red.shade700;
-                        } else if (l.cleanBatteriesStatus.isNotEmpty) {
+                        } else if (l.cleanBatteriesStatus == 'Needs Clean' ||
+                            l.cleanBatteriesStatus == 'Needs Batteries') {
                           cbColor = Colors.orange.shade800;
                         }
 
@@ -3706,7 +3720,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text('SN: ${l.serialNumber.isNotEmpty ? l.serialNumber : 'N/A'}'),
-                                if (l.condition.trim() == 'Used' && l.binNumber.isNotEmpty)
+                                if (l.condition.trim().toLowerCase().startsWith('used') && l.binNumber.isNotEmpty)
                                   Text(
                                     'Bin: ${l.binNumber}',
                                     style: const TextStyle(
@@ -3721,7 +3735,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                                   Text('Prep: ${l.preppedStatus}'),
                                 if (l.cleanBatteriesStatus.isNotEmpty)
                                   Text(
-                                    l.cleanBatteriesStatus,
+                                    'Clean & Batteries',
                                     style: TextStyle(
                                       fontSize: 13,
                                       color: cbColor,
@@ -5360,7 +5374,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
       'Date acquired': normalizeDateDisplay(lift.dateAcquired),
       'Install date': normalizeDateDisplay(lift.installDate),
       'Installer name': lift.installerName,
-      'Last prep date': lift.lastPrepDate,
+      'Last prep date': normalizeDateDisplay(lift.lastPrepDate),
       'Notes': lift.notes,
     };
 
@@ -5944,11 +5958,10 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
       _lastPrepDateController.text = normalizeDateDisplay(existing.lastPrepDate);
       _notesController.text = existing.notes;
 
-      if (existing.condition.toLowerCase() == 'used') {
-        _condition = 'Used';
-      } else {
-        _condition = 'New';
-      }
+      const validConditions = [
+        'New', 'Used - Like New', 'Used - Standard', 'Used - Not Great', 'Used - Shit',
+      ];
+      _condition = validConditions.contains(existing.condition) ? existing.condition : 'New';
       _status = existing.status.isNotEmpty ? existing.status : 'In Stock';
       _preppedStatus = existing.preppedStatus.isNotEmpty
           ? existing.preppedStatus
@@ -6326,7 +6339,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
             Row(
               children: [
                 Expanded(
-                  flex: _condition == 'Used' ? 2 : 1,
+                  flex: _condition != 'New' ? 2 : 1,
                   child: TextFormField(
                     controller: _serialController,
                     decoration: const InputDecoration(
@@ -6341,7 +6354,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                     },
                   ),
                 ),
-                if (_condition == 'Used') ...[
+                if (_condition != 'New') ...[
                   const SizedBox(width: 12),
                   Expanded(
                     flex: 1,
@@ -6468,14 +6481,11 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
             DropdownButtonFormField<String>(
               value: _condition,
               items: const [
-                DropdownMenuItem<String>(
-                  value: 'New',
-                  child: Text('New'),
-                ),
-                DropdownMenuItem<String>(
-                  value: 'Used',
-                  child: Text('Used'),
-                ),
+                DropdownMenuItem<String>(value: 'New', child: Text('New')),
+                DropdownMenuItem<String>(value: 'Used - Like New', child: Text('Used - Like New')),
+                DropdownMenuItem<String>(value: 'Used - Standard', child: Text('Used - Standard')),
+                DropdownMenuItem<String>(value: 'Used - Not Great', child: Text('Used - Not Great')),
+                DropdownMenuItem<String>(value: 'Used - Shit', child: Text('Used - Shit')),
               ],
               decoration: const InputDecoration(
                 labelText: 'Condition',
@@ -6484,6 +6494,10 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
               onChanged: (value) {
                 setState(() {
                   _condition = value ?? 'New';
+                  // Auto-set clean/batteries when any used condition selected
+                  if (_condition != 'New' && _cleanBatteriesStatus.isEmpty) {
+                    _cleanBatteriesStatus = 'Needs Clean & Batteries';
+                  }
                 });
               },
             ),
@@ -6589,7 +6603,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                   if (result == true && mounted) {
                     setState(() {
                       _preppedStatus = 'Prepped';
-                      _lastPrepDateController.text = DateTime.now().toString().split(' ')[0];
+                      _lastPrepDateController.text = formatDate(DateTime.now());
                     });
                   }
                 } else {
@@ -6614,10 +6628,33 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                 border: OutlineInputBorder(),
                 hintText: 'Optional',
               ),
-              onChanged: (value) {
+              onChanged: (value) async {
+                final prev = _cleanBatteriesStatus;
                 setState(() {
                   _cleanBatteriesStatus = value ?? '';
                 });
+                // Log a service record when marked Done
+                if (value == 'Done' && prev != 'Done') {
+                  final user = await _loadUser();
+                  final serial = _serialController.text.trim();
+                  if (serial.isNotEmpty && user['name']!.isNotEmpty) {
+                    try {
+                      await addLiftService(
+                        userEmail: user['email'] ?? '',
+                        userName: user['name'] ?? '',
+                        serialNumber: serial,
+                        serviceDate: formatDate(DateTime.now()),
+                        serviceType: 'Clean & Batteries',
+                        description: 'Clean & batteries completed',
+                        invoiceNumber: '',
+                        jobRef: '',
+                        customerName: '',
+                      );
+                    } catch (_) {
+                      // Non-blocking — don't fail the form save over this
+                    }
+                  }
+                }
               },
             ),
             const SizedBox(height: 12),
