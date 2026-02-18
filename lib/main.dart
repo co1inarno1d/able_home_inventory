@@ -38,6 +38,23 @@ String formatDate(DateTime? date) {
   return '${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}/${date.year}';
 }
 
+/// Convert any Drive URL format to the thumbnail format that Flutter can load.
+/// The /uc?export=view endpoint no longer serves image bytes reliably.
+String normalizeDrivePhotoUrl(String url) {
+  // Already thumbnail format
+  if (url.contains('drive.google.com/thumbnail')) return url;
+  // Extract file ID from /uc?export=view&id=ID or /file/d/ID/...
+  final ucMatch = RegExp(r'[?&]id=([^&]+)').firstMatch(url);
+  if (ucMatch != null) {
+    return 'https://drive.google.com/thumbnail?id=${ucMatch.group(1)}&sz=w1200';
+  }
+  final fileMatch = RegExp(r'/file/d/([^/]+)').firstMatch(url);
+  if (fileMatch != null) {
+    return 'https://drive.google.com/thumbnail?id=${fileMatch.group(1)}&sz=w1200';
+  }
+  return url;
+}
+
 /// Normalize a stored date string to MM/DD/YYYY display format.
 /// Handles YYYY-MM-DD, ISO 8601, and already-formatted MM/DD/YYYY.
 String normalizeDateDisplay(String raw) {
@@ -319,7 +336,7 @@ class LiftRecord {
       cleanBatteriesStatus: s(json['clean_batteries_status']),
       photoUrls: s(json['photo_urls']).isEmpty
           ? []
-          : s(json['photo_urls']).split(',').map((u) => u.trim()).where((u) => u.isNotEmpty).toList(),
+          : s(json['photo_urls']).split(',').map((u) => u.trim()).where((u) => u.isNotEmpty).map(normalizeDrivePhotoUrl).toList(),
     );
   }
 }
@@ -984,7 +1001,7 @@ Future<List<String>> fetchLiftPhotos({required String liftId}) async {
   try {
     final data = json.decode(response.body);
     if (data['status'] != 'ok') return [];
-    return List<String>.from(data['photo_urls'] ?? []);
+    return List<String>.from(data['photo_urls'] ?? []).map(normalizeDrivePhotoUrl).toList();
   } catch (_) {
     return [];
   }

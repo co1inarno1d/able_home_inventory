@@ -1527,8 +1527,10 @@ function apiUploadLiftPhoto(params) {
     file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
 
     // Direct image URL that works in Flutter Image.network()
+    // The /thumbnail endpoint serves actual image bytes for publicly shared files
+    // (the /uc?export=view endpoint no longer reliably serves image content)
     const fileId  = file.getId();
-    const viewUrl = 'https://drive.google.com/uc?export=view&id=' + fileId;
+    const viewUrl = 'https://drive.google.com/thumbnail?id=' + fileId + '&sz=w1200';
 
     // Append this URL to the lift's photo_urls column (col S = index 19, 1-based)
     const ss = getSs();
