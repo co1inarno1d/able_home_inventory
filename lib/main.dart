@@ -943,7 +943,7 @@ Future<void> upsertLift({
     if (installerName != null) 'installer_name': installerName,
     if (lastPrepDate != null) 'last_prep_date': lastPrepDate,
     if (notes != null) 'notes': notes,
-    if (binNumber != null && binNumber.isNotEmpty) 'bin_number': binNumber,
+    if (binNumber != null) 'bin_number': binNumber,
     if (cleanBatteriesStatus != null) 'clean_batteries_status': cleanBatteriesStatus,
     if (apiKey != null) 'api_key': apiKey,
   };
@@ -3711,7 +3711,13 @@ class _LiftsScreenState extends State<LiftsScreen> {
                               if (deleted == true) _refresh();
                             },
                             title: Text(
-                              '${l.brand}${l.series.isNotEmpty ? ' – ${l.series}' : ''}',
+                              [
+                                l.brand,
+                                if (l.series.isNotEmpty) l.series,
+                                if (l.orientation.isNotEmpty &&
+                                    l.orientation.toLowerCase() != 'n/a')
+                                  l.orientation,
+                              ].join(' – '),
                               style: const TextStyle(
                                 fontWeight: FontWeight.w600,
                               ),
@@ -6533,6 +6539,10 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
               onChanged: (value) {
                 setState(() {
                   _status = value ?? 'In Stock';
+                  // Clear bin # when marking as Installed
+                  if (_status == 'Installed') {
+                    _binNumberController.clear();
+                  }
                 });
               },
             ),

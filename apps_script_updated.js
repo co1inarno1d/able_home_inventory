@@ -19,6 +19,13 @@ const SHEET_PREP_CHECKLISTS = 'Prep_Checklists';
  */
 function doGet(e) {
   const params = e && e.parameter ? e.parameter : {};
+  // Support a JSON-encoded 'payload' query param for large data passed via GET
+  if (params.payload) {
+    try {
+      const extra = JSON.parse(params.payload);
+      return handleRequest(Object.assign({}, params, extra));
+    } catch (err) {}
+  }
   return handleRequest(params);
 }
 

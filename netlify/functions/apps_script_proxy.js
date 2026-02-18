@@ -24,10 +24,11 @@ exports.handler = async (event, context) => {
       "Content-Type": event.headers["content-type"] || "application/json",
     };
 
-    // First request — disable automatic redirect following so we can
-    // re-POST the body to the redirect target. Apps Script responds to
-    // POST /exec with a 302 to the actual run URL; that URL must also
-    // receive the POST body so doPost(e) fires with the payload.
+    // POST to Apps Script /exec. Apps Script runs doPost() then returns a 302
+    // to the output URL. That output URL only accepts GET.
+    // We use redirect:"manual" to intercept the 302, then follow it as GET
+    // so we can read the response body (redirect:"follow" returns an opaque
+    // response in some environments where the body is unreadable).
     let res = await fetch(SCRIPT_URL + query, {
       method,
       headers,
@@ -35,18 +36,19 @@ exports.handler = async (event, context) => {
       redirect: "manual",
     });
 
-    // Apps Script redirects POST /exec → 302 → run URL.
-    // The run URL executes the script. We must re-POST the body to it so
-    // doPost(e) fires with the original payload. Follow all redirects as POST.
+    // Follow up to 3 redirects as GET (Apps Script output URL rejects POST)
     let hops = 0;
     while ((res.status === 301 || res.status === 302 || res.status === 303 ||
             res.status === 307 || res.status === 308) && hops < 3) {
       const location = res.headers.get("location");
       if (!location) break;
+      // 301/302/303: follow as GET (drop body). 307/308: preserve method.
+      const nextMethod = (res.status === 307 || res.status === 308) ? method : "GET";
+      const nextBody   = nextMethod !== "GET" ? body : undefined;
       res = await fetch(location, {
-        method,
+        method: nextMethod,
         headers,
-        body,
+        body: nextBody,
         redirect: "manual",
       });
       hops++;
