@@ -5429,10 +5429,77 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
           );
         }
 
+        final allEvents = snapshot.data ?? [];
+
+        // Only show rows where status, location, or jobRef changed
+        final filtered = <LiftHistoryEvent>[];
+        String prevStatus = '';
+        String prevLocation = '';
+        String prevJobRef = '';
+        for (final e in allEvents) {
+          if (e.status != prevStatus ||
+              e.location != prevLocation ||
+              e.jobRef != prevJobRef) {
+            filtered.add(e);
+            prevStatus = e.status;
+            prevLocation = e.location;
+            prevJobRef = e.jobRef;
+          }
+        }
+
+        if (filtered.isEmpty) {
+          return const Center(
+            child: Text('No movement history recorded for this lift yet.'),
+          );
+        }
+
+        return ListView.builder(
+          padding: const EdgeInsets.all(12.0),
+          itemCount: filtered.length,
+          itemBuilder: (context, index) {
+            final e = filtered[index];
+            final ts = formatDate(e.timestamp);
+            return Card(
+              margin: const EdgeInsets.symmetric(vertical: 4),
+              child: ListTile(
+                title: Text(e.status.isEmpty ? 'Status change' : e.status),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(ts),
+                    if (e.location.isNotEmpty) Text('Location: ${e.location}'),
+                    if (e.jobRef.isNotEmpty) Text('Job: ${e.jobRef}'),
+                    if (e.note.isNotEmpty) Text('Note: ${e.note}'),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildChangeHistoryTab() {
+    return FutureBuilder<List<LiftHistoryEvent>>(
+      future: _historyFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(
+            child: Text(
+              'Error loading history:\n${snapshot.error}',
+              textAlign: TextAlign.center,
+            ),
+          );
+        }
+
         final events = snapshot.data ?? [];
         if (events.isEmpty) {
           return const Center(
-            child: Text('No movement history recorded for this lift yet.'),
+            child: Text('No change history recorded for this lift yet.'),
           );
         }
 
@@ -5445,7 +5512,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
             return Card(
               margin: const EdgeInsets.symmetric(vertical: 4),
               child: ListTile(
-                title: Text(e.status.isEmpty ? 'Status change' : e.status),
+                title: Text(e.status.isEmpty ? '(no status)' : e.status),
                 subtitle: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -5600,7 +5667,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
         : 'Lift details';
 
     return DefaultTabController(
-      length: 5,
+      length: 6,
       child: Scaffold(
         appBar: AppBar(
           title: Text(title),
@@ -5617,12 +5684,14 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
             ),
           ],
           bottom: const TabBar(
+            isScrollable: true,
             tabs: [
               Tab(text: 'Details'),
               Tab(text: 'Locations'),
               Tab(text: 'Service'),
               Tab(text: 'Prep History'),
               Tab(text: 'Photos'),
+              Tab(text: 'All Changes'),
             ],
           ),
         ),
@@ -5633,6 +5702,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
             _buildServiceTab(),
             _buildPrepHistoryTab(),
             _buildPhotosTab(),
+            _buildChangeHistoryTab(),
           ],
         ),
         floatingActionButton: FloatingActionButton.extended(
