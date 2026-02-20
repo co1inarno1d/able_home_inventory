@@ -3619,12 +3619,9 @@ class _LiftsScreenState extends State<LiftsScreen> {
               final fo = _orientationFilter!.toLowerCase();
               final isNonHanded = lo == 'n/a' || lo.isEmpty;
               final filterIsHanded = fo == 'lh' || fo == 'rh';
-              // Non-handed lifts pass through when filter is LH/RH
-              if (isNonHanded && filterIsHanded) {
-                // pass
-              } else if (lo != fo) {
-                return false;
-              }
+              // Pass if: exact match OR (non-handed lift AND filter is LH/RH)
+              final passesFilter = lo == fo || (isNonHanded && filterIsHanded);
+              if (!passesFilter) return false;
             }
 
             // Prep Status filter — case-insensitive
