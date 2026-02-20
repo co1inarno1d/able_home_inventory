@@ -287,7 +287,7 @@ class LiftRecord {
   final String lastPrepDate;
   final String notes;
   final String binNumber; // Bin number for used lifts
-  final String cleanBatteriesStatus; // Needs Clean / Needs Batteries / Needs Clean & Batteries / Done
+  final String cleanBatteriesStatus; // 'Needs Cleaning' or 'Clean'
   final List<String> photoUrls; // Google Drive direct-view URLs
 
   LiftRecord({
@@ -3619,8 +3619,11 @@ class _LiftsScreenState extends State<LiftsScreen> {
               final fo = _orientationFilter!.toLowerCase();
               final isNonHanded = lo == 'n/a' || lo.isEmpty;
               final filterIsHanded = fo == 'lh' || fo == 'rh';
-              if (!isNonHanded || !filterIsHanded) {
-                if (lo != fo) return false;
+              // Non-handed lifts pass through when filter is LH/RH
+              if (isNonHanded && filterIsHanded) {
+                // pass
+              } else if (lo != fo) {
+                return false;
               }
             }
 
@@ -3702,15 +3705,12 @@ class _LiftsScreenState extends State<LiftsScreen> {
                             ? 'Job: N/A'
                             : 'Job: ${l.currentJob}';
 
-                        // Determine clean/batteries text color
+                        // Determine clean status text color
                         Color? cbColor;
-                        if (l.cleanBatteriesStatus == 'Done') {
+                        if (l.cleanBatteriesStatus == 'Clean') {
                           cbColor = Colors.green.shade700;
-                        } else if (l.cleanBatteriesStatus == 'Needs Clean & Batteries') {
+                        } else if (l.cleanBatteriesStatus == 'Needs Cleaning') {
                           cbColor = Colors.red.shade700;
-                        } else if (l.cleanBatteriesStatus == 'Needs Clean' ||
-                            l.cleanBatteriesStatus == 'Needs Batteries') {
-                          cbColor = Colors.orange.shade800;
                         }
 
                         return Card(
@@ -3755,10 +3755,23 @@ class _LiftsScreenState extends State<LiftsScreen> {
                                 Text(loc),
                                 Text(job),
                                 if (l.preppedStatus.isNotEmpty)
-                                  Text('Prep: ${l.preppedStatus}'),
+                                  Text(
+                                    'Prep: ${l.preppedStatus}',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: l.preppedStatus == 'Needs repair'
+                                          ? Colors.red.shade700
+                                          : l.preppedStatus == 'Needs prepping'
+                                              ? Colors.orange.shade700
+                                              : l.preppedStatus == 'Prepped'
+                                                  ? Colors.green.shade700
+                                                  : null,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
                                 if (l.cleanBatteriesStatus.isNotEmpty)
                                   Text(
-                                    'Clean & Batteries',
+                                    'Clean',
                                     style: TextStyle(
                                       fontSize: 13,
                                       color: cbColor,
@@ -6108,8 +6121,14 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
       final orientationByBrandSeries = <String, List<String>>{};
       final foldByBrandSeriesOrientation = <String, List<String>>{};
 
-      for (final entry in seriesSets.entries) {
-        seriesByBrand[entry.key] = sortSeriesList(entry.value.toList());
+      // Use hardcoded series lists instead of inventory-derived (ensures all series appear)
+      for (final brand in brandsSet) {
+        if (_seriesByBrandHardcoded.containsKey(brand)) {
+          seriesByBrand[brand] = _seriesByBrandHardcoded[brand]!;
+        } else {
+          // Fallback to inventory-derived if brand not in hardcoded map
+          seriesByBrand[brand] = sortSeriesList((seriesSets[brand] ?? <String>{}).toList());
+        }
       }
       for (final entry in orientationSets.entries) {
         final list = entry.value.toList()..sort();
@@ -6587,9 +6606,9 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
               onChanged: (value) {
                 setState(() {
                   _condition = value ?? 'New';
-                  // Auto-set clean/batteries when any used condition selected
+                  // Auto-set clean status when any used condition selected
                   if (_condition != 'New' && _cleanBatteriesStatus.isEmpty) {
-                    _cleanBatteriesStatus = 'Needs Clean & Batteries';
+                    _cleanBatteriesStatus = 'Needs Cleaning';
                   }
                 });
               },
@@ -6715,10 +6734,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
             DropdownButtonFormField<String>(
               value: _cleanBatteriesStatus.isEmpty ? null : _cleanBatteriesStatus,
               items: const [
-                DropdownMenuItem<String>(value: 'Needs Clean', child: Text('Needs Clean')),
-                DropdownMenuItem<String>(value: 'Needs Batteries', child: Text('Needs Batteries')),
-                DropdownMenuItem<String>(value: 'Needs Clean & Batteries', child: Text('Needs Clean & Batteries')),
-                DropdownMenuItem<String>(value: 'Done', child: Text('Done')),
+                DropdownMenuItem<String>(value: 'Needs Cleaning', child: Text('Needs Cleaning')),
+                DropdownMenuItem<String>(value: 'Clean', child: Text('Clean')),
               ],
               decoration: const InputDecoration(
                 labelText: 'Clean/Batteries',
@@ -6730,8 +6747,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                 setState(() {
                   _cleanBatteriesStatus = value ?? '';
                 });
-                // Log a service record when marked Done
-                if (value == 'Done' && prev != 'Done') {
+                // Log a service record when marked Clean
+                if (value == 'Clean' && prev != 'Clean') {
                   final user = await _loadUser();
                   final serial = _serialController.text.trim();
                   if (serial.isNotEmpty && user['name']!.isNotEmpty) {
@@ -6741,8 +6758,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                         userName: user['name'] ?? '',
                         serialNumber: serial,
                         serviceDate: formatDate(DateTime.now()),
-                        serviceType: 'Clean & Batteries',
-                        description: 'Clean & batteries completed',
+                        serviceType: 'Clean',
+                        description: 'Cleaning completed',
                         invoiceNumber: '',
                         jobRef: '',
                         customerName: '',
