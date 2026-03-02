@@ -478,16 +478,14 @@ function apiFullCheck(params) {
     return map;
   }
 
-  // Build lookup for ramps using brand+size+condition (guaranteed unique per row)
+  // Build lookup for ramps using item_id+condition (same as job adjustment)
   function buildRampIndexMap(sheet) {
     const rows = sheet.getDataRange().getValues().slice(1);
     const map = {};
     rows.forEach((r, i) => {
-      const brand = String(r[1] || '').trim();
-      const size  = String(r[2] || '').trim();
-      const cond  = String(r[3] || '').trim();
-      const key   = brand + '|' + size + '|' + cond;
-      if (brand) map[key] = i + 2;
+      const id   = String(r[0] || '').trim();
+      const cond = String(r[3] || '').trim();
+      if (id) map[id + '|' + cond] = i + 2;
     });
     return map;
   }
@@ -500,8 +498,6 @@ function apiFullCheck(params) {
 
   items.forEach(it => {
     const itemId    = String(it.item_id   || '').trim();
-    const brand     = String(it.brand     || '').trim();
-    const size      = String(it.size      || '').trim();
     const condition = String(it.condition || '').trim();
     const newQty    = toNumber(it.new_qty);
     const category  = String(it.category  || 'ramp').toLowerCase();
@@ -511,10 +507,8 @@ function apiFullCheck(params) {
     const indexMap    = isStairlift ? stairIndex : rampIndex;
     const qtyCol      = isStairlift ? 8 : 5; // H=8 for stairlifts, E=5 for ramps
 
-    // For ramps: look up by brand+size+condition; for stairlifts: by item_id+condition
-    const key      = isStairlift
-      ? (itemId + '|' + condition)
-      : (brand + '|' + size + '|' + condition);
+    // Look up by item_id+condition for both ramps and stairlifts
+    const key = itemId + '|' + condition;
     let rowIndex = indexMap[key];
 
     if (!rowIndex) {

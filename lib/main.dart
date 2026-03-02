@@ -3560,7 +3560,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
           const statuses = ['In Stock', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
           const prepStatuses = ['Needs prepping', 'Needs repair', 'Prepped'];
           const brands = ['Acorn', 'Brooks', 'Bruno', 'Harmar'];
-          const orientations = ['LH', 'RH', 'N/A'];
+          const orientations = ['Left', 'Right', 'N/A'];
 
           // Series: hardcoded per brand when brand filter active, else all series
           final List<String> allSeries;
@@ -3618,7 +3618,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
               final lo = l.orientation.trim().toLowerCase();
               final fo = _orientationFilter!.toLowerCase();
               final isNonHanded = lo == 'n/a' || lo.isEmpty;
-              final filterIsHanded = fo == 'lh' || fo == 'rh';
+              final filterIsHanded = fo == 'left' || fo == 'right';
               // Pass if: exact match OR (non-handed lift AND filter is LH/RH)
               final passesFilter = lo == fo || (isNonHanded && filterIsHanded);
               if (!passesFilter) return false;
@@ -6015,10 +6015,9 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   bool _loadingInventory = true;
   String? _inventoryError;
 
-  // Brand/series/orientation/fold maps derived from stairlift inventory sheet.
+  // Brand/series/fold maps derived from stairlift inventory sheet.
   List<String> _brands = [];
   Map<String, List<String>> _seriesByBrand = {};
-  Map<String, List<String>> _orientationByBrandSeries = {};
   Map<String, List<String>> _foldByBrandSeriesOrientation = {};
 
   String? _selectedBrand;
@@ -6152,9 +6151,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
           selectedSeries = e.series;
         }
 
-        final keyBS = '${e.brand}||${e.series}';
-        final orientList = orientationByBrandSeries[keyBS] ?? [];
-        if (orientList.contains(e.orientation)) {
+        // Orientation is always LH / RH / N/A — restore directly
+        if (['LH', 'RH', 'N/A'].contains(e.orientation)) {
           selectedOrientation = e.orientation;
         }
 
@@ -6168,7 +6166,6 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
       setState(() {
         _brands = brands;
         _seriesByBrand = seriesByBrand;
-        _orientationByBrandSeries = orientationByBrandSeries;
         _foldByBrandSeriesOrientation = foldByBrandSeriesOrientation;
 
         _selectedBrand =
@@ -6178,10 +6175,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
           final seriesList = _seriesByBrand[_selectedBrand!] ?? [];
           _selectedSeries =
               selectedSeries ?? (seriesList.isNotEmpty ? seriesList.first : null);
-          final keyBS = '${_selectedBrand}||${_selectedSeries ?? ''}';
-          final orientList = _orientationByBrandSeries[keyBS] ?? [];
-          _selectedOrientation = selectedOrientation ??
-              (orientList.isNotEmpty ? orientList.first : null);
+          // Orientation is always LH / RH / N/A
+          _selectedOrientation = selectedOrientation ?? 'LH';
           final keyFull =
               '${_selectedBrand}||${_selectedSeries ?? ''}||${_selectedOrientation ?? ''}';
           final foldList = _foldByBrandSeriesOrientation[keyFull] ?? [];
@@ -6531,13 +6526,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
               value: _selectedOrientation,
-              items: (() {
-                if (_selectedBrand == null || _selectedSeries == null) {
-                  return <String>[];
-                }
-                final key = '${_selectedBrand}||${_selectedSeries}';
-                return _orientationByBrandSeries[key] ?? [];
-              })()
+              items: const ['LH', 'RH', 'N/A']
                   .map((o) => DropdownMenuItem<String>(
                         value: o,
                         child: Text(o),
