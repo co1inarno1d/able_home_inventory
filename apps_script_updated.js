@@ -13,6 +13,8 @@ const SHEET_LIFT_HISTORY    = 'Lift_History';
 const SHEET_LIFT_SERVICE    = 'Lifts_Service';
 const SHEET_PICKUP_LIST     = 'PickupList';
 const SHEET_PREP_CHECKLISTS = 'Prep_Checklists';
+const SHEET_ANNUALS         = 'Annuals';
+const SHEET_ANNUALS_HISTORY = 'Annuals_History';
 
 /**
  * Main entry points – ALWAYS return JSON, never HTML.
@@ -140,6 +142,27 @@ function handleRequest(params) {
 
       case 'get_lift_photos':
         result = apiGetLiftPhotos(params);
+        break;
+
+      // === Annuals API ===
+      case 'get_annuals':
+        result = apiGetAnnuals();
+        break;
+
+      case 'upsert_annual':
+        result = apiUpsertAnnual(params);
+        break;
+
+      case 'mark_annual_scheduled':
+        result = apiMarkAnnualScheduled(params);
+        break;
+
+      case 'delete_annual':
+        result = apiDeleteAnnual(params);
+        break;
+
+      case 'get_annual_history':
+        result = apiGetAnnualHistory(params);
         break;
 
       default:
@@ -1593,4 +1616,157 @@ function apiGetLiftPhotos(params) {
   const raw = String(masterSheet.getRange(rowIndex, 19).getValue() || '').trim();
   const urls = raw ? raw.split(',').map(u => u.trim()).filter(u => u) : [];
   return { status: 'ok', photo_urls: urls };
+}
+
+// ===================================================
+// ANNUALS API
+// Sheet columns:
+//   Annuals:         A=annual_id, B=customer_name, C=address, D=phone,
+//                    E=lift_type, F=last_service_date, G=date_requested,
+//                    H=notes, I=scheduled
+//   Annuals_History: A=timestamp, B=annual_id, C=customer_name,
+//                    D=event, E=note, F=user_name
+// ===================================================
+
+function apiGetAnnuals() {
+  const ss = getSs();
+  const sheet = ss.getSheetByName(SHEET_ANNUALS);
+  if (!sheet) return { status: 'error', message: 'Annuals sheet not found' };
+
+  const rows = sheet.getDataRange().getValues().slice(1); // skip header
+  const annuals = rows
+    .filter(r => String(r[0] || '').trim() !== '')
+    .map(r => ({
+      annual_id:         String(r[0] || ''),
+      customer_name:     String(r[1] || ''),
+      address:           String(r[2] || ''),
+      phone:             String(r[3] || ''),
+      lift_type:         String(r[4] || ''),
+      last_service_date: String(r[5] || ''),
+      date_requested:    String(r[6] || ''),
+      notes:             String(r[7] || ''),
+      scheduled:         String(r[8] || '').toLowerCase() === 'true',
+    }));
+
+  return { status: 'ok', annuals: annuals };
+}
+
+function apiUpsertAnnual(params) {
+  const annualId    = (params.annual_id      || '').toString().trim();
+  const customerName = (params.customer_name || '').toString().trim();
+  const address     = (params.address        || '').toString().trim();
+  const phone       = (params.phone          || '').toString().trim();
+  const liftType    = (params.lift_type      || '').toString().trim();
+  const lastService = (params.last_service_date || '').toString().trim();
+  const dateReq     = (params.date_requested || '').toString().trim();
+  const notes       = (params.notes          || '').toString().trim();
+
+  if (!customerName) return { status: 'error', message: 'customer_name required' };
+
+  const ss = getSs();
+  const sheet = ss.getSheetByName(SHEET_ANNUALS);
+  if (!sheet) return { status: 'error', message: 'Annuals sheet not found' };
+
+  const rows = sheet.getDataRange().getValues();
+
+  if (annualId) {
+    // Update existing row
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][0] || '').trim() === annualId) {
+        const row = i + 1;
+        sheet.getRange(row, 2).setValue(customerName);
+        sheet.getRange(row, 3).setValue(address);
+        sheet.getRange(row, 4).setValue(phone);
+        sheet.getRange(row, 5).setValue(liftType);
+        sheet.getRange(row, 6).setValue(lastService);
+        sheet.getRange(row, 7).setValue(dateReq);
+        sheet.getRange(row, 8).setValue(notes);
+        // Don't touch scheduled flag (col I) on plain edit
+        return { status: 'ok', annual_id: annualId };
+      }
+    }
+    return { status: 'error', message: 'annual not found: ' + annualId };
+  }
+
+  // Create new row
+  const newId = 'ann_' + new Date().getTime();
+  sheet.appendRow([newId, customerName, address, phone, liftType, lastService, dateReq, notes, 'false']);
+  return { status: 'ok', annual_id: newId };
+}
+
+function apiMarkAnnualScheduled(params) {
+  const annualId = (params.annual_id  || '').toString().trim();
+  const userName  = (params.user_name || '').toString().trim();
+
+  if (!annualId) return { status: 'error', message: 'annual_id required' };
+
+  const ss = getSs();
+  const sheet = ss.getSheetByName(SHEET_ANNUALS);
+  const histSheet = ss.getSheetByName(SHEET_ANNUALS_HISTORY);
+  if (!sheet) return { status: 'error', message: 'Annuals sheet not found' };
+
+  const rows = sheet.getDataRange().getValues();
+  for (let i = 1; i < rows.length; i++) {
+    if (String(rows[i][0] || '').trim() === annualId) {
+      const rowNum = i + 1;
+      // Mark scheduled
+      sheet.getRange(rowNum, 9).setValue('true');
+
+      // Log to history
+      if (histSheet) {
+        histSheet.appendRow([
+          new Date(),
+          annualId,
+          String(rows[i][1] || ''),
+          'Scheduled',
+          '',
+          userName,
+        ]);
+      }
+      return { status: 'ok' };
+    }
+  }
+  return { status: 'error', message: 'annual not found: ' + annualId };
+}
+
+function apiDeleteAnnual(params) {
+  const annualId = (params.annual_id || '').toString().trim();
+  if (!annualId) return { status: 'error', message: 'annual_id required' };
+
+  const ss = getSs();
+  const sheet = ss.getSheetByName(SHEET_ANNUALS);
+  if (!sheet) return { status: 'error', message: 'Annuals sheet not found' };
+
+  const rows = sheet.getDataRange().getValues();
+  for (let i = 1; i < rows.length; i++) {
+    if (String(rows[i][0] || '').trim() === annualId) {
+      sheet.deleteRow(i + 1);
+      return { status: 'ok' };
+    }
+  }
+  return { status: 'error', message: 'annual not found: ' + annualId };
+}
+
+function apiGetAnnualHistory(params) {
+  const annualId = (params.annual_id || '').toString().trim();
+  if (!annualId) return { status: 'error', message: 'annual_id required' };
+
+  const ss = getSs();
+  const sheet = ss.getSheetByName(SHEET_ANNUALS_HISTORY);
+  if (!sheet) return { status: 'ok', history: [] };
+
+  const rows = sheet.getDataRange().getValues().slice(1);
+  const history = rows
+    .filter(r => String(r[1] || '').trim() === annualId)
+    .map(r => ({
+      timestamp:     r[0] ? new Date(r[0]).toISOString() : '',
+      annual_id:     String(r[1] || ''),
+      customer_name: String(r[2] || ''),
+      event:         String(r[3] || ''),
+      note:          String(r[4] || ''),
+      user_name:     String(r[5] || ''),
+    }))
+    .reverse(); // most recent first
+
+  return { status: 'ok', history: history };
 }

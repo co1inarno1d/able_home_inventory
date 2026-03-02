@@ -1831,6 +1831,904 @@ class PrepChecklistDetailScreen extends StatelessWidget {
   }
 }
 
+// =======================
+// ANNUALS MODEL + API
+// =======================
+
+class AnnualRecord {
+  final String annualId;
+  final String customerName;
+  final String address;
+  final String phone;
+  final String liftType;
+  final String lastServiceDate;
+  final String dateRequested;
+  final String notes;
+  final bool scheduled;
+
+  AnnualRecord({
+    required this.annualId,
+    required this.customerName,
+    required this.address,
+    required this.phone,
+    required this.liftType,
+    required this.lastServiceDate,
+    required this.dateRequested,
+    required this.notes,
+    required this.scheduled,
+  });
+
+  factory AnnualRecord.fromJson(Map<String, dynamic> json) {
+    String s(dynamic v) => v?.toString() ?? '';
+    final sched = s(json['scheduled']).toLowerCase();
+    return AnnualRecord(
+      annualId: s(json['annual_id']),
+      customerName: s(json['customer_name']),
+      address: s(json['address']),
+      phone: s(json['phone']),
+      liftType: s(json['lift_type']),
+      lastServiceDate: s(json['last_service_date']),
+      dateRequested: s(json['date_requested']),
+      notes: s(json['notes']),
+      scheduled: sched == 'true' || sched == 'yes' || sched == '1',
+    );
+  }
+}
+
+Future<List<AnnualRecord>> fetchAnnuals() async {
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
+    'action': 'get_annuals',
+    if (apiKey != null) 'api_key': apiKey!,
+  });
+  final response = await http.get(uri);
+  if (response.statusCode != 200) throw Exception('Failed to load annuals');
+  final data = json.decode(response.body);
+  if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Error');
+  return (data['annuals'] as List)
+      .map((e) => AnnualRecord.fromJson(e as Map<String, dynamic>))
+      .toList();
+}
+
+Future<void> upsertAnnual({
+  required String userEmail,
+  required String userName,
+  String? annualId,
+  required String customerName,
+  required String address,
+  required String phone,
+  required String liftType,
+  required String lastServiceDate,
+  required String dateRequested,
+  required String notes,
+}) async {
+  final body = {
+    'action': 'upsert_annual',
+    'user_email': userEmail,
+    'user_name': userName,
+    if (annualId != null) 'annual_id': annualId,
+    'customer_name': customerName,
+    'address': address,
+    'phone': phone,
+    'lift_type': liftType,
+    'last_service_date': lastServiceDate,
+    'date_requested': dateRequested,
+    'notes': notes,
+    if (apiKey != null) 'api_key': apiKey!,
+  };
+  final response = await http.post(
+    Uri.parse(apiBaseUrl),
+    headers: {'Content-Type': 'application/json'},
+    body: json.encode(body),
+  );
+  if (response.statusCode != 200 && response.statusCode != 302) {
+    throw Exception('Failed to save annual: ${response.statusCode}');
+  }
+}
+
+Future<void> markAnnualScheduled({
+  required String annualId,
+  required String userName,
+  required String userEmail,
+}) async {
+  final body = {
+    'action': 'mark_annual_scheduled',
+    'annual_id': annualId,
+    'user_name': userName,
+    'user_email': userEmail,
+    if (apiKey != null) 'api_key': apiKey!,
+  };
+  final response = await http.post(
+    Uri.parse(apiBaseUrl),
+    headers: {'Content-Type': 'application/json'},
+    body: json.encode(body),
+  );
+  if (response.statusCode != 200 && response.statusCode != 302) {
+    throw Exception('Failed to mark scheduled: ${response.statusCode}');
+  }
+}
+
+Future<void> deleteAnnual({
+  required String annualId,
+}) async {
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
+    'action': 'delete_annual',
+    'annual_id': annualId,
+    if (apiKey != null) 'api_key': apiKey!,
+  });
+  await http.get(uri);
+}
+
+Future<List<Map<String, dynamic>>> fetchAnnualHistory({
+  required String annualId,
+}) async {
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
+    'action': 'get_annual_history',
+    'annual_id': annualId,
+    if (apiKey != null) 'api_key': apiKey!,
+  });
+  final response = await http.get(uri);
+  if (response.statusCode != 200) return [];
+  try {
+    final data = json.decode(response.body);
+    if (data['status'] != 'ok') return [];
+    return List<Map<String, dynamic>>.from(
+        (data['history'] as List).map((e) => Map<String, dynamic>.from(e as Map)));
+  } catch (_) {
+    return [];
+  }
+}
+
+// =======================
+// ANNUALS SCREEN
+// =======================
+
+class AnnualsScreen extends StatefulWidget {
+  const AnnualsScreen({super.key});
+
+  @override
+  State<AnnualsScreen> createState() => _AnnualsScreenState();
+}
+
+class _AnnualsScreenState extends State<AnnualsScreen> {
+  late Future<List<AnnualRecord>> _future;
+  String _search = '';
+  String? _scheduledFilter; // null=all, 'pending'=not scheduled, 'scheduled'=scheduled
+
+  @override
+  void initState() {
+    super.initState();
+    _future = fetchAnnuals();
+  }
+
+  void _refresh() => setState(() => _future = fetchAnnuals());
+
+  Future<Map<String, String>> _loadUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    return {
+      'name': prefs.getString('user_name') ?? '',
+      'email': prefs.getString('user_email') ?? '',
+    };
+  }
+
+  Future<void> _openForm({AnnualRecord? existing}) async {
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => AnnualFormScreen(existing: existing)),
+    );
+    if (result == true) _refresh();
+  }
+
+  Future<void> _markScheduled(AnnualRecord record) async {
+    final user = await _loadUser();
+    if (user['name']!.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please set your name in the main screen.')),
+      );
+      return;
+    }
+    try {
+      await markAnnualScheduled(
+        annualId: record.annualId,
+        userName: user['name']!,
+        userEmail: user['email'] ?? '',
+      );
+      _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e')),
+      );
+    }
+  }
+
+  Future<void> _delete(AnnualRecord record) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete record?'),
+        content: Text('Remove ${record.customerName} from annuals?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    try {
+      await deleteAnnual(annualId: record.annualId);
+      _refresh();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  void _openDetail(AnnualRecord record) {
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => AnnualDetailScreen(record: record, onChanged: _refresh)),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Annuals'),
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _refresh,
+          ),
+        ],
+      ),
+      body: FutureBuilder<List<AnnualRecord>>(
+        future: _future,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(child: Text('Error: ${snapshot.error}'));
+          }
+
+          final all = snapshot.data ?? [];
+
+          // Filter
+          var filtered = all.where((r) {
+            if (_search.isNotEmpty) {
+              final q = _search.toLowerCase();
+              if (!r.customerName.toLowerCase().contains(q) &&
+                  !r.address.toLowerCase().contains(q) &&
+                  !r.phone.toLowerCase().contains(q) &&
+                  !r.liftType.toLowerCase().contains(q)) {
+                return false;
+              }
+            }
+            if (_scheduledFilter == 'pending' && r.scheduled) return false;
+            if (_scheduledFilter == 'scheduled' && !r.scheduled) return false;
+            return true;
+          }).toList();
+
+          // Sort: unscheduled first, then by date requested oldest first
+          filtered.sort((a, b) {
+            if (a.scheduled != b.scheduled) return a.scheduled ? 1 : -1;
+            if (a.dateRequested.isNotEmpty && b.dateRequested.isNotEmpty) {
+              return a.dateRequested.compareTo(b.dateRequested);
+            }
+            return a.customerName.compareTo(b.customerName);
+          });
+
+          return Column(
+            children: [
+              // Search bar
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+                child: TextField(
+                  decoration: InputDecoration(
+                    hintText: 'Search customers...',
+                    prefixIcon: const Icon(Icons.search),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    isDense: true,
+                    suffixIcon: _search.isNotEmpty
+                        ? IconButton(
+                            icon: const Icon(Icons.clear),
+                            onPressed: () => setState(() => _search = ''),
+                          )
+                        : null,
+                  ),
+                  onChanged: (v) => setState(() => _search = v.trim()),
+                ),
+              ),
+              // Filter chips
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                child: Row(
+                  children: [
+                    _filterChip('All', null),
+                    const SizedBox(width: 8),
+                    _filterChip('Needs scheduling', 'pending'),
+                    const SizedBox(width: 8),
+                    _filterChip('Scheduled', 'scheduled'),
+                  ],
+                ),
+              ),
+              const Divider(height: 1),
+              // Count
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                child: Row(
+                  children: [
+                    Text('${filtered.length} record${filtered.length == 1 ? '' : 's'}',
+                        style: const TextStyle(color: Colors.black54, fontSize: 13)),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: filtered.isEmpty
+                    ? const Center(child: Text('No records found.'))
+                    : RefreshIndicator(
+                        onRefresh: () async => _refresh(),
+                        child: ListView.builder(
+                          padding: const EdgeInsets.fromLTRB(8, 0, 8, 80),
+                          itemCount: filtered.length,
+                          itemBuilder: (context, index) =>
+                              _buildCard(filtered[index]),
+                        ),
+                      ),
+              ),
+            ],
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _openForm(),
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+        icon: const Icon(Icons.add),
+        label: const Text('Add Annual'),
+      ),
+    );
+  }
+
+  Widget _filterChip(String label, String? value) {
+    final selected = _scheduledFilter == value;
+    return ChoiceChip(
+      label: Text(label),
+      selected: selected,
+      selectedColor: kBrandGreen.withOpacity(0.2),
+      onSelected: (_) => setState(() => _scheduledFilter = value),
+    );
+  }
+
+  Widget _buildCard(AnnualRecord r) {
+    final Color statusColor = r.scheduled
+        ? Colors.green.shade700
+        : Colors.orange.shade700;
+    final String statusLabel = r.scheduled ? 'Scheduled' : 'Needs scheduling';
+
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: InkWell(
+        onTap: () => _openDetail(r),
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      r.customerName,
+                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: statusColor.withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: statusColor.withOpacity(0.4)),
+                    ),
+                    child: Text(statusLabel,
+                        style: TextStyle(
+                            color: statusColor,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600)),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              if (r.address.isNotEmpty)
+                Row(children: [
+                  const Icon(Icons.location_on_outlined, size: 14, color: Colors.black45),
+                  const SizedBox(width: 4),
+                  Expanded(child: Text(r.address, style: const TextStyle(fontSize: 13))),
+                ]),
+              if (r.phone.isNotEmpty)
+                Row(children: [
+                  const Icon(Icons.phone_outlined, size: 14, color: Colors.black45),
+                  const SizedBox(width: 4),
+                  Text(r.phone, style: const TextStyle(fontSize: 13)),
+                ]),
+              if (r.liftType.isNotEmpty)
+                Row(children: [
+                  const Icon(Icons.stairs, size: 14, color: Colors.black45),
+                  const SizedBox(width: 4),
+                  Text(r.liftType, style: const TextStyle(fontSize: 13)),
+                ]),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  if (r.lastServiceDate.isNotEmpty)
+                    Text('Last service: ${normalizeDateDisplay(r.lastServiceDate)}',
+                        style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                  if (r.lastServiceDate.isNotEmpty && r.dateRequested.isNotEmpty)
+                    const Text('  ·  ', style: TextStyle(color: Colors.black38)),
+                  if (r.dateRequested.isNotEmpty)
+                    Text('Requested: ${normalizeDateDisplay(r.dateRequested)}',
+                        style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                ],
+              ),
+              if (r.notes.isNotEmpty) ...[
+                const SizedBox(height: 4),
+                Text(r.notes,
+                    style: const TextStyle(fontSize: 12, color: Colors.black45),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis),
+              ],
+              // Action buttons
+              if (!r.scheduled) ...[
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton.icon(
+                      onPressed: () => _markScheduled(r),
+                      icon: const Icon(Icons.check_circle_outline, size: 16),
+                      label: const Text('Mark Scheduled'),
+                      style: TextButton.styleFrom(foregroundColor: kBrandGreen),
+                    ),
+                    const SizedBox(width: 4),
+                    TextButton.icon(
+                      onPressed: () => _openForm(existing: r),
+                      icon: const Icon(Icons.edit_outlined, size: 16),
+                      label: const Text('Edit'),
+                      style: TextButton.styleFrom(foregroundColor: Colors.black54),
+                    ),
+                    TextButton.icon(
+                      onPressed: () => _delete(r),
+                      icon: const Icon(Icons.delete_outline, size: 16),
+                      label: const Text('Delete'),
+                      style: TextButton.styleFrom(foregroundColor: Colors.red),
+                    ),
+                  ],
+                ),
+              ] else ...[
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton.icon(
+                      onPressed: () => _openForm(existing: r),
+                      icon: const Icon(Icons.edit_outlined, size: 16),
+                      label: const Text('Edit'),
+                      style: TextButton.styleFrom(foregroundColor: Colors.black54),
+                    ),
+                    TextButton.icon(
+                      onPressed: () => _delete(r),
+                      icon: const Icon(Icons.delete_outline, size: 16),
+                      label: const Text('Delete'),
+                      style: TextButton.styleFrom(foregroundColor: Colors.red),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// =======================
+// ANNUAL DETAIL SCREEN
+// =======================
+
+class AnnualDetailScreen extends StatefulWidget {
+  final AnnualRecord record;
+  final VoidCallback onChanged;
+  const AnnualDetailScreen({super.key, required this.record, required this.onChanged});
+
+  @override
+  State<AnnualDetailScreen> createState() => _AnnualDetailScreenState();
+}
+
+class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
+  late Future<List<Map<String, dynamic>>> _historyFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _historyFuture = fetchAnnualHistory(annualId: widget.record.annualId);
+  }
+
+  Future<Map<String, String>> _loadUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    return {
+      'name': prefs.getString('user_name') ?? '',
+      'email': prefs.getString('user_email') ?? '',
+    };
+  }
+
+  Future<void> _markScheduled() async {
+    final user = await _loadUser();
+    if (user['name']!.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please set your name in the main screen.')),
+      );
+      return;
+    }
+    try {
+      await markAnnualScheduled(
+        annualId: widget.record.annualId,
+        userName: user['name']!,
+        userEmail: user['email'] ?? '',
+      );
+      widget.onChanged();
+      if (!mounted) return;
+      Navigator.of(context).pop();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final r = widget.record;
+    final statusColor = r.scheduled ? Colors.green.shade700 : Colors.orange.shade700;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(r.customerName),
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.edit),
+            onPressed: () async {
+              final result = await Navigator.of(context).push<bool>(
+                MaterialPageRoute(builder: (_) => AnnualFormScreen(existing: r)),
+              );
+              if (result == true) {
+                widget.onChanged();
+                if (mounted) Navigator.of(context).pop();
+              }
+            },
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Status badge
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: statusColor.withOpacity(0.12),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: statusColor.withOpacity(0.4)),
+              ),
+              child: Text(
+                r.scheduled ? 'Scheduled' : 'Needs scheduling',
+                style: TextStyle(color: statusColor, fontWeight: FontWeight.w600),
+              ),
+            ),
+            const SizedBox(height: 16),
+            _detailRow(Icons.person_outline, 'Customer', r.customerName),
+            if (r.address.isNotEmpty) _detailRow(Icons.location_on_outlined, 'Address', r.address),
+            if (r.phone.isNotEmpty) _detailRow(Icons.phone_outlined, 'Phone', r.phone),
+            if (r.liftType.isNotEmpty) _detailRow(Icons.stairs, 'Lift type', r.liftType),
+            if (r.lastServiceDate.isNotEmpty)
+              _detailRow(Icons.history, 'Last service', normalizeDateDisplay(r.lastServiceDate)),
+            if (r.dateRequested.isNotEmpty)
+              _detailRow(Icons.calendar_today_outlined, 'Date requested', normalizeDateDisplay(r.dateRequested)),
+            if (r.notes.isNotEmpty) _detailRow(Icons.notes_outlined, 'Notes', r.notes),
+            const SizedBox(height: 24),
+            // Mark scheduled button
+            if (!r.scheduled)
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _markScheduled,
+                  icon: const Icon(Icons.check_circle_outline),
+                  label: const Text('Mark Scheduled'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: kBrandGreen,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 24),
+            // History
+            const Text('History',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            FutureBuilder<List<Map<String, dynamic>>>(
+              future: _historyFuture,
+              builder: (context, snap) {
+                if (snap.connectionState == ConnectionState.waiting) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+                final history = snap.data ?? [];
+                if (history.isEmpty) {
+                  return const Text('No history yet.',
+                      style: TextStyle(color: Colors.black45));
+                }
+                return Column(
+                  children: history.map((h) {
+                    final ts = normalizeDateDisplay(h['timestamp']?.toString() ?? '');
+                    final event = h['event']?.toString() ?? '';
+                    final user = h['user_name']?.toString() ?? '';
+                    final note = h['note']?.toString() ?? '';
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      child: ListTile(
+                        leading: const Icon(Icons.check_circle, color: kBrandGreen),
+                        title: Text(event, style: const TextStyle(fontWeight: FontWeight.w600)),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(ts),
+                            if (user.isNotEmpty) Text('By: $user'),
+                            if (note.isNotEmpty) Text(note),
+                          ],
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                );
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _detailRow(IconData icon, String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 18, color: Colors.black45),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label,
+                    style: const TextStyle(fontSize: 11, color: Colors.black45)),
+                Text(value, style: const TextStyle(fontSize: 15)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =======================
+// ANNUAL FORM SCREEN
+// =======================
+
+class AnnualFormScreen extends StatefulWidget {
+  final AnnualRecord? existing;
+  const AnnualFormScreen({super.key, this.existing});
+
+  @override
+  State<AnnualFormScreen> createState() => _AnnualFormScreenState();
+}
+
+class _AnnualFormScreenState extends State<AnnualFormScreen> {
+  final _formKey = GlobalKey<FormState>();
+  bool _saving = false;
+
+  late final TextEditingController _nameController;
+  late final TextEditingController _addressController;
+  late final TextEditingController _phoneController;
+  late final TextEditingController _liftTypeController;
+  late final TextEditingController _lastServiceController;
+  late final TextEditingController _dateRequestedController;
+  late final TextEditingController _notesController;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existing;
+    _nameController = TextEditingController(text: e?.customerName ?? '');
+    _addressController = TextEditingController(text: e?.address ?? '');
+    _phoneController = TextEditingController(text: e?.phone ?? '');
+    _liftTypeController = TextEditingController(text: e?.liftType ?? '');
+    _lastServiceController = TextEditingController(
+        text: e != null ? normalizeDateDisplay(e.lastServiceDate) : '');
+    _dateRequestedController = TextEditingController(
+        text: e != null ? normalizeDateDisplay(e.dateRequested) : '');
+    _notesController = TextEditingController(text: e?.notes ?? '');
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _addressController.dispose();
+    _phoneController.dispose();
+    _liftTypeController.dispose();
+    _lastServiceController.dispose();
+    _dateRequestedController.dispose();
+    _notesController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickDate(TextEditingController controller) async {
+    final now = DateTime.now();
+    DateTime initial = now;
+    // Try to parse existing value
+    if (controller.text.isNotEmpty) {
+      try {
+        final parts = controller.text.split('/');
+        if (parts.length == 3) {
+          initial = DateTime(int.parse(parts[2]), int.parse(parts[0]), int.parse(parts[1]));
+        }
+      } catch (_) {}
+    }
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked != null) {
+      controller.text = formatDate(picked);
+    }
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() => _saving = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final userName = prefs.getString('user_name') ?? '';
+      final userEmail = prefs.getString('user_email') ?? '';
+
+      await upsertAnnual(
+        userEmail: userEmail,
+        userName: userName,
+        annualId: widget.existing?.annualId,
+        customerName: _nameController.text.trim(),
+        address: _addressController.text.trim(),
+        phone: _phoneController.text.trim(),
+        liftType: _liftTypeController.text.trim(),
+        lastServiceDate: _lastServiceController.text.trim(),
+        dateRequested: _dateRequestedController.text.trim(),
+        notes: _notesController.text.trim(),
+      );
+
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Widget _dateField(String label, TextEditingController controller) {
+    return TextFormField(
+      controller: controller,
+      readOnly: true,
+      decoration: InputDecoration(
+        labelText: label,
+        border: const OutlineInputBorder(),
+        suffixIcon: const Icon(Icons.calendar_today_outlined),
+      ),
+      onTap: () => _pickDate(controller),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isEditing = widget.existing != null;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isEditing ? 'Edit Annual' : 'Add Annual'),
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+      ),
+      body: Form(
+        key: _formKey,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              TextFormField(
+                controller: _nameController,
+                decoration: const InputDecoration(
+                    labelText: 'Customer name *', border: OutlineInputBorder()),
+                validator: (v) =>
+                    v == null || v.trim().isEmpty ? 'Required' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _addressController,
+                decoration: const InputDecoration(
+                    labelText: 'Address', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _phoneController,
+                decoration: const InputDecoration(
+                    labelText: 'Phone', border: OutlineInputBorder()),
+                keyboardType: TextInputType.phone,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _liftTypeController,
+                decoration: const InputDecoration(
+                    labelText: 'Lift type', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              _dateField('Last service date', _lastServiceController),
+              const SizedBox(height: 12),
+              _dateField('Date requested', _dateRequestedController),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _notesController,
+                decoration: const InputDecoration(
+                    labelText: 'Notes', border: OutlineInputBorder()),
+                maxLines: 3,
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _saving ? null : _save,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: kBrandGreen,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: _saving
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : Text(isEditing ? 'Save changes' : 'Add annual'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Minimal PickupListScreen placeholder. If you already have a full
 /// implementation elsewhere, remove this small placeholder and point
 /// _pages to your existing PickupListScreen instead.
@@ -2224,6 +3122,7 @@ class _HomeShellState extends State<HomeShell> {
     const RampsScreen(),
     const PrepScreen(),
     const PickupListScreen(),
+    const AnnualsScreen(),
   ];
 
   void _onItemTapped(int index) {
@@ -2273,6 +3172,10 @@ class _HomeShellState extends State<HomeShell> {
           BottomNavigationBarItem(
             icon: Icon(Icons.check_box),
             label: 'Pickup',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.calendar_month),
+            label: 'Annuals',
           ),
         ],
       ),
