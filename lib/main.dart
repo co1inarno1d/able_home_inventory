@@ -1909,7 +1909,7 @@ Future<void> upsertAnnual({
   String? liftId,
   String? serialNumber,
 }) async {
-  final body = {
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
     'action': 'upsert_annual',
     'user_email': userEmail,
     'user_name': userName,
@@ -1924,15 +1924,13 @@ Future<void> upsertAnnual({
     if (liftId != null && liftId.isNotEmpty) 'lift_id': liftId,
     if (serialNumber != null && serialNumber.isNotEmpty) 'serial_number': serialNumber,
     if (apiKey != null) 'api_key': apiKey!,
-  };
-  final response = await http.post(
-    Uri.parse(apiBaseUrl),
-    headers: {'Content-Type': 'application/json'},
-    body: json.encode(body),
-  );
-  if (response.statusCode != 200 && response.statusCode != 302) {
+  });
+  final response = await http.get(uri);
+  if (response.statusCode != 200) {
     throw Exception('Failed to save annual: ${response.statusCode}');
   }
+  final data = json.decode(response.body);
+  if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Error');
 }
 
 Future<void> markAnnualScheduled({
@@ -1940,21 +1938,19 @@ Future<void> markAnnualScheduled({
   required String userName,
   required String userEmail,
 }) async {
-  final body = {
+  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
     'action': 'mark_annual_scheduled',
     'annual_id': annualId,
     'user_name': userName,
     'user_email': userEmail,
     if (apiKey != null) 'api_key': apiKey!,
-  };
-  final response = await http.post(
-    Uri.parse(apiBaseUrl),
-    headers: {'Content-Type': 'application/json'},
-    body: json.encode(body),
-  );
-  if (response.statusCode != 200 && response.statusCode != 302) {
+  });
+  final response = await http.get(uri);
+  if (response.statusCode != 200) {
     throw Exception('Failed to mark scheduled: ${response.statusCode}');
   }
+  final data = json.decode(response.body);
+  if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Error');
 }
 
 Future<void> deleteAnnual({
