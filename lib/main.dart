@@ -17,7 +17,7 @@ import 'prep_checklist_form.dart';
 
 // Direct Apps Script URL (used on iOS/Android)
 const String _nativeApiBaseUrl =
-    'https://script.google.com/macros/s/AKfycbxfBAlm90vMrh0I1xiIh3fJtbesTmxcfHBHxcwpYmKunCIu270_xgQUE0WFbM9XdMagCg/exec';
+    'https://script.google.com/macros/s/AKfycbymieOKTKDX5bT-_iYKOOQiwQWLOW67HCc9pAEWG0eR--msBxbTg1GEDgydSuQhcs927A/exec';
 
 // Netlify proxy URL (used on Web).
 const String _webApiBaseUrl =

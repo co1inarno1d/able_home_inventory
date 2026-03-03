@@ -1,7 +1,7 @@
 // netlify/functions/apps_script_proxy.js
 
 // Your existing Google Apps Script web app URL:
-const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxfBAlm90vMrh0I1xiIh3fJtbesTmxcfHBHxcwpYmKunCIu270_xgQUE0WFbM9XdMagCg/exec";
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbymieOKTKDX5bT-_iYKOOQiwQWLOW67HCc9pAEWG0eR--msBxbTg1GEDgydSuQhcs927A/exec";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
