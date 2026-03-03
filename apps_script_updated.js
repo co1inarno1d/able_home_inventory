@@ -201,6 +201,17 @@ function toNumber(v) {
   return isNaN(n) ? 0 : n;
 }
 
+function formatSheetDate(v) {
+  if (v === '' || v === null || v === undefined) return '';
+  if (v instanceof Date) {
+    const m = (v.getMonth() + 1).toString().padStart(2, '0');
+    const d = v.getDate().toString().padStart(2, '0');
+    const y = v.getFullYear();
+    return m + '/' + d + '/' + y;
+  }
+  return String(v);
+}
+
 /**************************************
  * GET INVENTORY
  **************************************/
@@ -1642,10 +1653,12 @@ function apiGetAnnuals() {
       address:           String(r[2] || ''),
       phone:             String(r[3] || ''),
       lift_type:         String(r[4] || ''),
-      last_service_date: String(r[5] || ''),
-      date_requested:    String(r[6] || ''),
+      last_service_date: formatSheetDate(r[5]),
+      date_requested:    formatSheetDate(r[6]),
       notes:             String(r[7] || ''),
       scheduled:         String(r[8] || '').toLowerCase() === 'true',
+      lift_id:           String(r[9] || ''),
+      serial_number:     String(r[10] || ''),
     }));
 
   return { status: 'ok', annuals: annuals };
@@ -1660,6 +1673,8 @@ function apiUpsertAnnual(params) {
   const lastService = (params.last_service_date || '').toString().trim();
   const dateReq     = (params.date_requested || '').toString().trim();
   const notes       = (params.notes          || '').toString().trim();
+  const liftId      = (params.lift_id        || '').toString().trim();
+  const serialNum   = (params.serial_number  || '').toString().trim();
 
   if (!customerName) return { status: 'error', message: 'customer_name required' };
 
@@ -1682,6 +1697,8 @@ function apiUpsertAnnual(params) {
         sheet.getRange(row, 7).setValue(dateReq);
         sheet.getRange(row, 8).setValue(notes);
         // Don't touch scheduled flag (col I) on plain edit
+        sheet.getRange(row, 10).setValue(liftId);
+        sheet.getRange(row, 11).setValue(serialNum);
         return { status: 'ok', annual_id: annualId };
       }
     }
@@ -1690,7 +1707,7 @@ function apiUpsertAnnual(params) {
 
   // Create new row
   const newId = 'ann_' + new Date().getTime();
-  sheet.appendRow([newId, customerName, address, phone, liftType, lastService, dateReq, notes, 'false']);
+  sheet.appendRow([newId, customerName, address, phone, liftType, lastService, dateReq, notes, 'false', liftId, serialNum]);
   return { status: 'ok', annual_id: newId };
 }
 

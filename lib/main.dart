@@ -1845,6 +1845,8 @@ class AnnualRecord {
   final String dateRequested;
   final String notes;
   final bool scheduled;
+  final String liftId;
+  final String serialNumber;
 
   AnnualRecord({
     required this.annualId,
@@ -1856,6 +1858,8 @@ class AnnualRecord {
     required this.dateRequested,
     required this.notes,
     required this.scheduled,
+    this.liftId = '',
+    this.serialNumber = '',
   });
 
   factory AnnualRecord.fromJson(Map<String, dynamic> json) {
@@ -1871,6 +1875,8 @@ class AnnualRecord {
       dateRequested: s(json['date_requested']),
       notes: s(json['notes']),
       scheduled: sched == 'true' || sched == 'yes' || sched == '1',
+      liftId: s(json['lift_id']),
+      serialNumber: s(json['serial_number']),
     );
   }
 }
@@ -1900,6 +1906,8 @@ Future<void> upsertAnnual({
   required String lastServiceDate,
   required String dateRequested,
   required String notes,
+  String? liftId,
+  String? serialNumber,
 }) async {
   final body = {
     'action': 'upsert_annual',
@@ -1913,6 +1921,8 @@ Future<void> upsertAnnual({
     'last_service_date': lastServiceDate,
     'date_requested': dateRequested,
     'notes': notes,
+    if (liftId != null && liftId.isNotEmpty) 'lift_id': liftId,
+    if (serialNumber != null && serialNumber.isNotEmpty) 'serial_number': serialNumber,
     if (apiKey != null) 'api_key': apiKey!,
   };
   final response = await http.post(
@@ -2262,7 +2272,12 @@ class _AnnualsScreenState extends State<AnnualsScreen> {
                 Row(children: [
                   const Icon(Icons.stairs, size: 14, color: Colors.black45),
                   const SizedBox(width: 4),
-                  Text(r.liftType, style: const TextStyle(fontSize: 13)),
+                  Expanded(child: Text(r.liftType, style: const TextStyle(fontSize: 13))),
+                  if (r.liftId.isNotEmpty)
+                    const Tooltip(
+                      message: 'Linked to lift in system',
+                      child: Icon(Icons.link, size: 14, color: kBrandGreen),
+                    ),
                 ]),
               const SizedBox(height: 6),
               Row(
@@ -2386,6 +2401,52 @@ class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
       );
       widget.onChanged();
       if (!mounted) return;
+
+      // If a lift is linked, offer to log a service record
+      final r = widget.record;
+      if (r.liftId.isNotEmpty) {
+        final logService = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Log service record?'),
+            content: Text(
+                'Would you like to log an annual service record for ${r.liftType.isNotEmpty ? r.liftType : "SN: ${r.serialNumber}"}?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Skip'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                child: const Text('Log Service'),
+              ),
+            ],
+          ),
+        );
+        if (logService == true && mounted) {
+          // Find the linked lift record
+          LiftRecord? linkedLift;
+          try {
+            final lifts = await fetchLifts();
+            linkedLift = lifts.where((l) => l.liftId == r.liftId).firstOrNull;
+          } catch (_) {}
+          if (linkedLift != null && mounted) {
+            await Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => LiftServiceFormScreen(
+                  lift: linkedLift!,
+                  prefillServiceType: 'Annual Service',
+                  prefillCustomerName: r.customerName,
+                  prefillDate: formatDate(DateTime.now()),
+                ),
+              ),
+            );
+          }
+        }
+      }
+
+      if (!mounted) return;
       Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;
@@ -2441,6 +2502,42 @@ class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
             if (r.address.isNotEmpty) _detailRow(Icons.location_on_outlined, 'Address', r.address),
             if (r.phone.isNotEmpty) _detailRow(Icons.phone_outlined, 'Phone', r.phone),
             if (r.liftType.isNotEmpty) _detailRow(Icons.stairs, 'Lift type', r.liftType),
+            if (r.liftId.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: InkWell(
+                  onTap: () async {
+                    final nav = Navigator.of(context);
+                    try {
+                      final lifts = await fetchLifts();
+                      final linked = lifts.where((l) => l.liftId == r.liftId).firstOrNull;
+                      if (linked != null) {
+                        nav.push(MaterialPageRoute(
+                          builder: (_) => LiftDetailScreen(lift: linked),
+                        ));
+                      }
+                    } catch (_) {}
+                  },
+                  child: Row(
+                    children: [
+                      const Icon(Icons.link, size: 18, color: kBrandGreen),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('Linked lift',
+                                style: TextStyle(fontSize: 11, color: Colors.black45)),
+                            Text('Tap to view lift details',
+                                style: TextStyle(fontSize: 15, color: kBrandGreen)),
+                          ],
+                        ),
+                      ),
+                      const Icon(Icons.chevron_right, color: kBrandGreen),
+                    ],
+                  ),
+                ),
+              ),
             if (r.lastServiceDate.isNotEmpty)
               _detailRow(Icons.history, 'Last service', normalizeDateDisplay(r.lastServiceDate)),
             if (r.dateRequested.isNotEmpty)
@@ -2534,6 +2631,180 @@ class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
 }
 
 // =======================
+// LIFT PICKER DIALOG
+// =======================
+
+class _LiftPickerDialog extends StatefulWidget {
+  const _LiftPickerDialog();
+
+  @override
+  State<_LiftPickerDialog> createState() => _LiftPickerDialogState();
+}
+
+class _LiftPickerDialogState extends State<_LiftPickerDialog> {
+  final _searchController = TextEditingController();
+  List<LiftRecord> _all = [];
+  List<LiftRecord> _filtered = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+    _searchController.addListener(_filter);
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    try {
+      final lifts = await fetchLifts();
+      if (mounted) {
+        setState(() {
+          _all = lifts;
+          _filtered = lifts;
+          _loading = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _filter() {
+    final q = _searchController.text.toLowerCase();
+    setState(() {
+      _filtered = q.isEmpty
+          ? _all
+          : _all.where((l) {
+              return l.serialNumber.toLowerCase().contains(q) ||
+                  l.brand.toLowerCase().contains(q) ||
+                  l.series.toLowerCase().contains(q) ||
+                  l.currentLocation.toLowerCase().contains(q) ||
+                  l.liftId.toLowerCase().contains(q);
+            }).toList();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 40),
+      child: Column(
+        children: [
+          // Header
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: const BoxDecoration(
+              color: kBrandGreen,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.search, color: Colors.white),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text('Select a lift',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600)),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white),
+                  onPressed: () => Navigator.of(context).pop(),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+              ],
+            ),
+          ),
+          // Search box
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: TextField(
+              controller: _searchController,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: 'Search by serial, brand, series, location...',
+                prefixIcon: Icon(Icons.search),
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ),
+          // List
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _filtered.isEmpty
+                    ? Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Text('No lifts found.',
+                              style: TextStyle(color: Colors.black45)),
+                          const SizedBox(height: 16),
+                          TextButton.icon(
+                            onPressed: () async {
+                              Navigator.of(context).pop();
+                              // Caller will handle opening LiftFormScreen
+                            },
+                            icon: const Icon(Icons.add),
+                            label: const Text('Add new lift'),
+                          ),
+                        ],
+                      )
+                    : ListView.builder(
+                        itemCount: _filtered.length,
+                        itemBuilder: (context, i) {
+                          final l = _filtered[i];
+                          final title = [l.brand, l.series, l.orientation]
+                              .where((s) => s.isNotEmpty)
+                              .join(' ');
+                          return ListTile(
+                            leading: const Icon(Icons.stairs, color: kBrandGreen),
+                            title: Text(title,
+                                style: const TextStyle(fontWeight: FontWeight.w500)),
+                            subtitle: Text([
+                              if (l.serialNumber.isNotEmpty) 'SN: ${l.serialNumber}',
+                              if (l.currentLocation.isNotEmpty) l.currentLocation,
+                              l.status,
+                            ].where((s) => s.isNotEmpty).join(' · ')),
+                            onTap: () => Navigator.of(context).pop(l),
+                          );
+                        },
+                      ),
+          ),
+          // Add new lift button (always visible at bottom)
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).pop(const _AddNewLiftSentinel()),
+              icon: const Icon(Icons.add),
+              label: const Text('Lift not in system — add it now'),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(double.infinity, 44),
+                foregroundColor: kBrandGreen,
+                side: const BorderSide(color: kBrandGreen),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Sentinel return value from _LiftPickerDialog meaning "add a new lift".
+class _AddNewLiftSentinel {
+  const _AddNewLiftSentinel();
+}
+
+// =======================
 // ANNUAL FORM SCREEN
 // =======================
 
@@ -2557,6 +2828,11 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
   late final TextEditingController _dateRequestedController;
   late final TextEditingController _notesController;
 
+  // Linked lift state
+  String? _linkedLiftId;
+  String? _linkedSerialNumber;
+  String? _linkedLiftLabel; // display string, e.g. "Bruno Elan 3000 LH — SN: 12345"
+
   @override
   void initState() {
     super.initState();
@@ -2570,6 +2846,12 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
     _dateRequestedController = TextEditingController(
         text: e != null ? normalizeDateDisplay(e.dateRequested) : '');
     _notesController = TextEditingController(text: e?.notes ?? '');
+    // Restore linked lift if editing
+    if (e != null && e.liftId.isNotEmpty) {
+      _linkedLiftId = e.liftId;
+      _linkedSerialNumber = e.serialNumber;
+      _linkedLiftLabel = e.liftType.isNotEmpty ? e.liftType : 'SN: ${e.serialNumber}';
+    }
   }
 
   @override
@@ -2582,6 +2864,52 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
     _dateRequestedController.dispose();
     _notesController.dispose();
     super.dispose();
+  }
+
+  void _linkLift(LiftRecord lift) {
+    final label = [
+      lift.brand,
+      lift.series,
+      if (lift.orientation.isNotEmpty && lift.orientation != 'N/A') lift.orientation,
+    ].where((s) => s.isNotEmpty).join(' ') + (lift.serialNumber.isNotEmpty ? ' — SN: ${lift.serialNumber}' : '');
+    setState(() {
+      _linkedLiftId = lift.liftId;
+      _linkedSerialNumber = lift.serialNumber;
+      _linkedLiftLabel = label;
+      _liftTypeController.text = label;
+    });
+  }
+
+  void _unlinkLift() {
+    setState(() {
+      _linkedLiftId = null;
+      _linkedSerialNumber = null;
+      _linkedLiftLabel = null;
+      _liftTypeController.clear();
+    });
+  }
+
+  Future<void> _openLiftPicker() async {
+    final result = await showDialog(
+      context: context,
+      builder: (_) => const _LiftPickerDialog(),
+    );
+    if (result is LiftRecord) {
+      _linkLift(result);
+    } else if (result is _AddNewLiftSentinel) {
+      if (!mounted) return;
+      // Open add-lift form; on success, reload and try to auto-link by serial
+      final saved = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(builder: (_) => const LiftFormScreen()),
+      );
+      if (saved == true) {
+        // Fetch lifts again and pick the most recently added one
+        try {
+          final lifts = await fetchLifts();
+          if (lifts.isNotEmpty) _linkLift(lifts.last);
+        } catch (_) {}
+      }
+    }
   }
 
   Future<void> _pickDate(TextEditingController controller) async {
@@ -2626,6 +2954,8 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
         lastServiceDate: _lastServiceController.text.trim(),
         dateRequested: _dateRequestedController.text.trim(),
         notes: _notesController.text.trim(),
+        liftId: _linkedLiftId,
+        serialNumber: _linkedSerialNumber,
       );
 
       if (mounted) Navigator.of(context).pop(true);
@@ -2686,11 +3016,52 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
                 keyboardType: TextInputType.phone,
               ),
               const SizedBox(height: 12),
-              TextFormField(
-                controller: _liftTypeController,
-                decoration: const InputDecoration(
-                    labelText: 'Lift type', border: OutlineInputBorder()),
-              ),
+              // Lift picker / manual entry
+              if (_linkedLiftLabel != null) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: kBrandGreen),
+                    borderRadius: BorderRadius.circular(8),
+                    color: kBrandGreen.withOpacity(0.05),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.stairs, color: kBrandGreen, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(_linkedLiftLabel!,
+                            style: const TextStyle(fontWeight: FontWeight.w500)),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        tooltip: 'Unlink lift',
+                        onPressed: _unlinkLift,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else ...[
+                OutlinedButton.icon(
+                  onPressed: _openLiftPicker,
+                  icon: const Icon(Icons.link),
+                  label: const Text('Link a lift from system'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 48),
+                    foregroundColor: kBrandGreen,
+                    side: const BorderSide(color: kBrandGreen),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _liftTypeController,
+                  decoration: const InputDecoration(
+                      labelText: 'Or type lift description manually',
+                      border: OutlineInputBorder()),
+                ),
+              ],
               const SizedBox(height: 12),
               _dateField('Last service date', _lastServiceController),
               const SizedBox(height: 12),
@@ -6690,8 +7061,17 @@ class _PhotoViewScreen extends StatelessWidget {
 
 class LiftServiceFormScreen extends StatefulWidget {
   final LiftRecord lift;
+  final String? prefillServiceType;
+  final String? prefillCustomerName;
+  final String? prefillDate;
 
-  const LiftServiceFormScreen({super.key, required this.lift});
+  const LiftServiceFormScreen({
+    super.key,
+    required this.lift,
+    this.prefillServiceType,
+    this.prefillCustomerName,
+    this.prefillDate,
+  });
 
   @override
   State<LiftServiceFormScreen> createState() => _LiftServiceFormScreenState();
@@ -6712,6 +7092,14 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
 
   String get _liftIdForApi => widget.lift.liftId;
   String get _serialForApi => widget.lift.serialNumber;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.prefillServiceType != null) _typeController.text = widget.prefillServiceType!;
+    if (widget.prefillCustomerName != null) _customerController.text = widget.prefillCustomerName!;
+    if (widget.prefillDate != null) _dateController.text = widget.prefillDate!;
+  }
 
   @override
   void dispose() {
