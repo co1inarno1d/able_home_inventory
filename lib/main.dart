@@ -7737,12 +7737,6 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                       labelText: 'Serial number',
                       border: OutlineInputBorder(),
                     ),
-                    validator: (v) {
-                      if (v == null || v.trim().isEmpty) {
-                        return 'Serial number is required';
-                      }
-                      return null;
-                    },
                   ),
                 ),
                 if (_condition != 'New') ...[
@@ -7782,8 +7776,6 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                   _selectedFoldType = null;
                 });
               },
-              validator: (v) =>
-                  v == null || v.isEmpty ? 'Select a brand' : null,
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
@@ -7807,8 +7799,6 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                   _selectedFoldType = null;
                 });
               },
-              validator: (v) =>
-                  v == null || v.isEmpty ? 'Select a series' : null,
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
@@ -7829,8 +7819,6 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                   _selectedFoldType = null;
                 });
               },
-              validator: (v) =>
-                  v == null || v.isEmpty ? 'Select an orientation' : null,
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
@@ -7859,8 +7847,6 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                   _selectedFoldType = value;
                 });
               },
-              validator: (v) =>
-                  v == null || v.isEmpty ? 'Select a fold type' : null,
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
