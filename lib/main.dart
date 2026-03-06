@@ -7823,21 +7823,12 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
               value: _selectedFoldType,
-              items: (() {
-                if (_selectedBrand == null ||
-                    _selectedSeries == null ||
-                    _selectedOrientation == null) {
-                  return <String>[];
-                }
-                final key =
-                    '${_selectedBrand}||${_selectedSeries}||${_selectedOrientation}';
-                return _foldByBrandSeriesOrientation[key] ?? [];
-              })()
-                  .map((f) => DropdownMenuItem<String>(
-                        value: f,
-                        child: Text(f),
-                      ))
-                  .toList(),
+              items: const [
+                DropdownMenuItem<String>(value: 'Folding', child: Text('Folding')),
+                DropdownMenuItem<String>(value: 'Non-Folding', child: Text('Non-Folding')),
+                DropdownMenuItem<String>(value: 'Perch', child: Text('Perch')),
+                DropdownMenuItem<String>(value: 'N/A', child: Text('N/A')),
+              ],
               decoration: const InputDecoration(
                 labelText: 'Fold type',
                 border: OutlineInputBorder(),
