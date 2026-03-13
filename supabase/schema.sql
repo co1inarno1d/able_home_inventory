@@ -163,6 +163,43 @@ create table if not exists pickup_list (
 );
 
 -- ---------------------------------------------------------------
+-- ANNUALS (service scheduling)
+-- ---------------------------------------------------------------
+create table if not exists annuals (
+  id                bigserial primary key,
+  annual_id         text unique not null,
+  customer_name     text,
+  address           text,
+  phone             text,
+  lift_type         text,
+  last_service_date text,
+  date_requested    text,
+  notes             text,
+  scheduled         boolean default false,
+  lift_id           text default '',
+  serial_number     text default '',
+  created_at        timestamptz default now(),
+  updated_at        timestamptz default now()
+);
+
+create index if not exists annuals_scheduled_idx on annuals(scheduled);
+
+-- ---------------------------------------------------------------
+-- ANNUALS HISTORY
+-- ---------------------------------------------------------------
+create table if not exists annuals_history (
+  id               bigserial primary key,
+  timestamp        timestamptz default now(),
+  annual_id        text,
+  event_type       text,
+  changed_by_email text,
+  changed_by_name  text,
+  note             text
+);
+
+create index if not exists annuals_history_annual_id_idx on annuals_history(annual_id);
+
+-- ---------------------------------------------------------------
 -- ROW LEVEL SECURITY
 -- Allow full access via anon key (internal tool, no auth needed)
 -- ---------------------------------------------------------------
@@ -174,6 +211,8 @@ alter table inventory_stairlifts enable row level security;
 alter table inventory_ramps      enable row level security;
 alter table inventory_changes    enable row level security;
 alter table pickup_list          enable row level security;
+alter table annuals              enable row level security;
+alter table annuals_history      enable row level security;
 
 -- Allow all operations for anonymous users (internal tool)
 create policy "allow_all" on lifts                for all using (true) with check (true);
@@ -184,3 +223,5 @@ create policy "allow_all" on inventory_stairlifts for all using (true) with chec
 create policy "allow_all" on inventory_ramps      for all using (true) with check (true);
 create policy "allow_all" on inventory_changes    for all using (true) with check (true);
 create policy "allow_all" on pickup_list          for all using (true) with check (true);
+create policy "allow_all" on annuals              for all using (true) with check (true);
+create policy "allow_all" on annuals_history      for all using (true) with check (true);

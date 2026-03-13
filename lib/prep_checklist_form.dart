@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'main.dart';
+import 'supabase_api.dart';
 
 /// =======================
 /// PREP CHECKLIST FORM SCREEN
@@ -40,7 +41,7 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
   }
 
   Future<Map<String, dynamic>> _loadTemplate() async {
-    return await getPrepChecklistTemplate(
+    return sbGetPrepChecklistTemplate(
       brand: widget.lift.brand,
       series: widget.lift.series,
     );
@@ -78,7 +79,7 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
         ..._checklistItems,
       };
 
-      await savePrepChecklist(checklistData: checklistData);
+      await sbSavePrepChecklist(checklistData: checklistData);
 
       if (!mounted) return;
 

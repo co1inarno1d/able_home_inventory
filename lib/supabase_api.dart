@@ -17,6 +17,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'main.dart'
     show
+        AnnualRecord,
         InventoryChange,
         InventoryData,
         LiftHistoryEvent,
@@ -683,4 +684,234 @@ Future<void> sbUpdatePickupItem({
 
 Future<void> sbDeletePickupItem({required String id}) async {
   await _sb.from('pickup_list').delete().eq('id', id);
+}
+
+// ---------------------------------------------------------------------------
+// ANNUALS
+// ---------------------------------------------------------------------------
+
+Future<List<AnnualRecord>> sbFetchAnnuals() async {
+  final raw = await _sb
+      .from('annuals')
+      .select()
+      .order('date_requested', ascending: false);
+
+  return (raw as List)
+      .map((r) => AnnualRecord.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+Future<void> sbUpsertAnnual({
+  required String userEmail,
+  required String userName,
+  String? annualId,
+  required String customerName,
+  required String address,
+  required String phone,
+  required String liftType,
+  required String lastServiceDate,
+  required String dateRequested,
+  required String notes,
+  String liftId = '',
+  String serialNumber = '',
+}) async {
+  final resolvedId = (annualId != null && annualId.isNotEmpty)
+      ? annualId
+      : 'annual_${DateTime.now().millisecondsSinceEpoch}';
+
+  final data = <String, dynamic>{
+    'annual_id': resolvedId,
+    'customer_name': customerName,
+    'address': address,
+    'phone': phone,
+    'lift_type': liftType,
+    'last_service_date': lastServiceDate,
+    'date_requested': dateRequested,
+    'notes': notes,
+    'lift_id': liftId,
+    'serial_number': serialNumber,
+    'updated_at': DateTime.now().toIso8601String(),
+  };
+
+  final isNew = annualId == null || annualId.isEmpty;
+  if (isNew) {
+    data['scheduled'] = false;
+    data['created_at'] = DateTime.now().toIso8601String();
+    await _sb.from('annuals').insert(data);
+  } else {
+    await _sb.from('annuals').update(data).eq('annual_id', annualId);
+  }
+
+  await _sb.from('annuals_history').insert({
+    'timestamp': DateTime.now().toIso8601String(),
+    'annual_id': resolvedId,
+    'event_type': isNew ? 'Created' : 'Updated',
+    'changed_by_email': userEmail,
+    'changed_by_name': userName,
+    'note': notes,
+  });
+}
+
+Future<void> sbMarkAnnualScheduled({
+  required String annualId,
+  required String userEmail,
+  required String userName,
+  String note = '',
+}) async {
+  await _sb
+      .from('annuals')
+      .update({'scheduled': true, 'updated_at': DateTime.now().toIso8601String()})
+      .eq('annual_id', annualId);
+
+  await _sb.from('annuals_history').insert({
+    'timestamp': DateTime.now().toIso8601String(),
+    'annual_id': annualId,
+    'event_type': 'Scheduled',
+    'changed_by_email': userEmail,
+    'changed_by_name': userName,
+    'note': note,
+  });
+}
+
+Future<void> sbDeleteAnnual({
+  required String annualId,
+  required String userEmail,
+  required String userName,
+}) async {
+  await _sb.from('annuals').delete().eq('annual_id', annualId);
+
+  await _sb.from('annuals_history').insert({
+    'timestamp': DateTime.now().toIso8601String(),
+    'annual_id': annualId,
+    'event_type': 'Deleted',
+    'changed_by_email': userEmail,
+    'changed_by_name': userName,
+    'note': '',
+  });
+}
+
+Future<List<Map<String, dynamic>>> sbFetchAnnualHistory({
+  required String annualId,
+}) async {
+  final raw = await _sb
+      .from('annuals_history')
+      .select()
+      .eq('annual_id', annualId)
+      .order('timestamp', ascending: true);
+
+  return (raw as List).map((r) => r as Map<String, dynamic>).toList();
+}
+
+// ---------------------------------------------------------------------------
+// PREP CHECKLIST TEMPLATES (hardcoded — rarely changes)
+// ---------------------------------------------------------------------------
+
+const Map<String, List<String>> _prepChecklistTemplates = {
+  'bruno_elan': [
+    'seat_hardware',
+    'carriage',
+    'seatbelt',
+    'footplate_hardware',
+    'track_measurement',
+    'double_check_track_measurement',
+    'top_final_limit_cam',
+    'charge_strips',
+    'end_plates_hardware',
+    'charge_contact',
+    'joint_kit_screws',
+    'rail_stand_feet_t_nuts',
+    'charger_power_cord',
+    'remotes_cradles',
+    'seat_post_nylon_washers_retaining_clip',
+    'gear_rack_for_length_of_track',
+    'soft_stops_if_needed',
+    'extension_brackets_if_needed',
+    'folding_rail_yes_no',
+    'folding_rail_bottom_foot',
+    'spacer_end_plate',
+    'check_seat_armrests_stay_up',
+    'check_wires_in_arm',
+    'paperwork',
+    'owners_manual',
+  ],
+  'bruno_elite': [
+    'seat_hardware',
+    'carriage',
+    'seatbelt',
+    'footplate_hardware',
+    'track_measurement',
+    'double_check_track_measurement',
+    'top_final_limit_cam',
+    'charge_strips',
+    'end_plates_hardware',
+    'charge_contact',
+    'joint_kit_screws',
+    'rail_stand_feet_t_nuts',
+    'charger_power_cord',
+    'remotes_cradles',
+    'seat_post_nylon_washers_retaining_clip',
+    'gear_rack_for_length_of_track',
+    'soft_stops_if_needed',
+    'extension_brackets_if_needed',
+    'rear_seat_support_bracket',
+    'spacer_end_plate',
+    'check_seat_armrests_stay_up',
+    'check_wires_in_arm',
+    'paperwork',
+    'owners_manual',
+  ],
+  'brooks_acorn': [
+    'rh_unit_or_lh_unit',
+    'correct_handed_carriage',
+    'correct_handed_seat',
+    'charger_type_130_black_t700_white',
+    'correct_num_feet_brackets_hardware_lags',
+    'end_plate_covers_top_bottom',
+    'remotes_hanging_hooks',
+    'key_if_needed',
+    'seat_swivel_switch_actuator',
+    'two_seat_cushions',
+    'seat_post_retaining_plug',
+    'extension_brackets_if_needed',
+    'top_final_limit_cam',
+    'rack_end_stop_if_needed',
+    'charge_stations',
+    'hole_in_rail_for_charging_wire',
+    'seat_index_plate_cover',
+    'hand_winding_wheel',
+    'check_seat_armrests_stay_up',
+    'folding_rail_yes_no',
+    't130_remove_h_cam_from_track',
+    't700_make_sure_h_cam_installed',
+    'outdoor_yes_no',
+    'outdoor_box_for_charger',
+    'outlet_cover',
+    'paperwork',
+    'owners_manual',
+  ],
+};
+
+Map<String, dynamic> sbGetPrepChecklistTemplate({
+  required String brand,
+  required String series,
+}) {
+  final b = brand.toLowerCase();
+  final s = series.toLowerCase();
+
+  String checklistType;
+  if (b.contains('bruno') && s.contains('elan')) {
+    checklistType = 'bruno_elan';
+  } else if (b.contains('bruno') && s.contains('elite')) {
+    checklistType = 'bruno_elite';
+  } else if (b.contains('acorn') || b.contains('brooks')) {
+    checklistType = 'brooks_acorn';
+  } else {
+    // Return empty template for unknown types rather than throwing
+    return {'checklist_type': '', 'fields': <String>[]};
+  }
+
+  return {
+    'checklist_type': checklistType,
+    'fields': _prepChecklistTemplates[checklistType]!,
+  };
 }

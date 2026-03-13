@@ -1,33 +1,15 @@
 
-import 'dart:convert';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_image_compress/flutter_image_compress.dart';
-import 'package:http/http.dart' as http;
-import 'package:http/io_client.dart' as http_io;
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'prep_checklist_form.dart';
+import 'supabase_api.dart';
 
 /// =======================
 /// CONFIG
 /// =======================
-
-// Direct Apps Script URL (used on iOS/Android)
-const String _nativeApiBaseUrl =
-    'https://script.google.com/macros/s/AKfycbymieOKTKDX5bT-_iYKOOQiwQWLOW67HCc9pAEWG0eR--msBxbTg1GEDgydSuQhcs927A/exec';
-
-// Netlify proxy URL (used on Web).
-const String _webApiBaseUrl =
-    'https://inventory.ableha.com/.netlify/functions/apps_script_proxy';
-
-/// Use Netlify proxy on Web, direct Apps Script on native.
-String get apiBaseUrl => kIsWeb ? _webApiBaseUrl : _nativeApiBaseUrl;
-
-/// If you set an API_KEY in Apps Script, put it here. Otherwise leave as null.
-const String? apiKey = null;
 
 /// Brand color
 const Color kBrandGreen = Color(0xFF2F7D46);
@@ -75,7 +57,9 @@ String normalizeDateDisplay(String raw) {
   return raw;
 }
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await initSupabase();
   runApp(const AbleHomeInventoryApp());
 }
 
@@ -500,696 +484,37 @@ class InventoryData {
 }
 
 /// =======================
-/// API HELPERS
-/// =======================
-
-Future<InventoryData> fetchInventory() async {
-  final query = {
-    'action': 'get_inventory',
-    if (apiKey != null) 'api_key': apiKey!,
-  };
-
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: query);
-  final response = await http.get(uri);
-
-  if (response.statusCode != 200) {
-    throw Exception('Failed to load inventory: ${response.statusCode}');
-  }
-
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-
-  final stairliftsJson = (data['stairlifts'] as List<dynamic>? ?? []);
-  final rampsJson = (data['ramps'] as List<dynamic>? ?? []);
-
-  final stairlifts = stairliftsJson
-      .map((e) => StairliftItem.fromJson(e as Map<String, dynamic>))
-      .toList();
-  final ramps = rampsJson
-      .map((e) => RampItem.fromJson(e as Map<String, dynamic>))
-      .toList();
-
-  return InventoryData(stairlifts: stairlifts, ramps: ramps);
-}
-
-Future<List<InventoryChange>> fetchChanges({int limit = 200}) async {
-  final query = {
-    'action': 'get_changes',
-    'limit': limit.toString(),
-    if (apiKey != null) 'api_key': apiKey!,
-  };
-
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: query);
-  final response = await http.get(uri);
-
-  if (response.statusCode != 200) {
-    throw Exception('Failed to load changes: ${response.statusCode}');
-  }
-
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-
-  final changesJson = (data['changes'] as List<dynamic>? ?? []);
-  return changesJson
-      .map((e) => InventoryChange.fromJson(e as Map<String, dynamic>))
-      .toList();
-}
-
-Future<List<LiftRecord>> fetchLifts() async {
-  final query = {
-    'action': 'get_lifts',
-    if (apiKey != null) 'api_key': apiKey!,
-  };
-
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: query);
-  final response = await http.get(uri);
-
-  if (response.statusCode != 200) {
-    throw Exception('Failed to load lifts: ${response.statusCode}');
-  }
-
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-
-  final liftsJson = (data['lifts'] as List<dynamic>? ?? []);
-  return liftsJson
-      .map((e) => LiftRecord.fromJson(e as Map<String, dynamic>))
-      .toList();
-}
-
-Future<List<LiftHistoryEvent>> fetchLiftHistory({
-  required String serialNumber,
-}) async {
-  final queryParams = {
-    'action': 'get_lift_history',
-    'serial_number': serialNumber,
-    if (apiKey != null) 'api_key': apiKey!,
-  };
-
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
-
-  debugPrint('Fetching history for serial: $serialNumber');
-  debugPrint('History request URI: $uri');
-
-  final response = await http.get(uri);
-
-  debugPrint('History response status: ${response.statusCode}');
-  debugPrint('History response body: ${response.body}');
-
-  // Apps Script sometimes returns 302 for redirects with no JSON.
-  if (response.statusCode == 302) {
-    return [];
-  }
-
-  if (response.statusCode != 200) {
-    throw Exception('Failed to load lift history: ${response.statusCode}');
-  }
-
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-
-  final histJson = (data['history'] as List<dynamic>? ?? []);
-  debugPrint('Found ${histJson.length} history records');
-  return histJson
-      .map((e) => LiftHistoryEvent.fromJson(e as Map<String, dynamic>))
-      .toList();
-}
-
-Future<List<LiftServiceRecord>> fetchLiftService({
-  required String serialNumber,
-}) async {
-  final queryParams = {
-    'action': 'get_lift_service',
-    'serial_number': serialNumber,
-    if (apiKey != null) 'api_key': apiKey!,
-  };
-
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
-
-  debugPrint('Fetching service records for serial: $serialNumber');
-  debugPrint('Service request URI: $uri');
-
-  final response = await http.get(uri);
-
-  debugPrint('Service response status: ${response.statusCode}');
-  debugPrint('Service response body: ${response.body}');
-
-  // Treat 302 (redirect) as "no service records" instead of an error.
-  if (response.statusCode == 302) {
-    return [];
-  }
-
-  if (response.statusCode != 200) {
-    throw Exception('Failed to load lift service: ${response.statusCode}');
-  }
-
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-
-  final svcJson = (data['service'] as List<dynamic>? ?? []);
-  debugPrint('Found ${svcJson.length} service records');
-  return svcJson
-      .map((e) => LiftServiceRecord.fromJson(e as Map<String, dynamic>))
-      .toList();
-}
-
-/// Fetch all prep checklists for all lifts
-Future<List<PrepChecklist>> fetchAllPrepChecklists() async {
-  final queryParams = {
-    'action': 'get_all_prep_checklists',
-    if (apiKey != null) 'api_key': apiKey!,
-  };
-
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
-
-  debugPrint('Fetching all prep checklists');
-
-  final response = await http.get(uri);
-
-  debugPrint('All prep checklists response status: ${response.statusCode}');
-
-  if (response.statusCode != 200) {
-    throw Exception('Failed to load prep checklists: ${response.statusCode}');
-  }
-
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-
-  final checklistsJson = (data['checklists'] as List<dynamic>? ?? []);
-  debugPrint('Found ${checklistsJson.length} prep checklists');
-  return checklistsJson
-      .map((e) => PrepChecklist.fromJson(e as Map<String, dynamic>))
-      .toList();
-}
-
-/// Fetch prep checklists for a specific lift by serial number
-Future<List<PrepChecklist>> fetchPrepChecklists({
-  required String serialNumber,
-}) async {
-  final queryParams = {
-    'action': 'get_prep_checklists',
-    'serial_number': serialNumber,
-    if (apiKey != null) 'api_key': apiKey!,
-  };
-
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
-
-  debugPrint('Fetching prep checklists for serial: $serialNumber');
-
-  final response = await http.get(uri);
-
-  debugPrint('Prep checklists response status: ${response.statusCode}');
-
-  if (response.statusCode != 200) {
-    throw Exception('Failed to load prep checklists: ${response.statusCode}');
-  }
-
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-
-  final checklistsJson = (data['checklists'] as List<dynamic>? ?? []);
-  debugPrint('Found ${checklistsJson.length} prep checklists');
-  return checklistsJson
-      .map((e) => PrepChecklist.fromJson(e as Map<String, dynamic>))
-      .toList();
-}
-
-Future<String> savePrepChecklist({
-  required Map<String, dynamic> checklistData,
-}) async {
-  final uri = Uri.parse(apiBaseUrl);
-
-  debugPrint('Saving prep checklist');
-
-  final response = await http.post(
-    uri,
-    headers: {'Content-Type': 'application/json'},
-    body: json.encode({
-      'action': 'save_prep_checklist',
-      ...checklistData,
-      if (apiKey != null) 'api_key': apiKey,
-    }),
-  );
-
-  debugPrint('Save prep checklist response: ${response.statusCode}');
-
-  if (response.statusCode == 302) {
-    // Apps Script redirects POST requests — treat as success
-    return '';
-  }
-
-  if (response.statusCode != 200) {
-    throw Exception('Failed to save prep checklist: ${response.statusCode}');
-  }
-
-  Map<String, dynamic>? data;
-  try {
-    data = json.decode(response.body) as Map<String, dynamic>;
-  } catch (_) {
-    // Non-JSON 200 response — treat as success
-    return '';
-  }
-  if (data['status'] != null && data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-  return data['checklist_id']?.toString() ?? '';
-}
-
-Future<Map<String, dynamic>> getPrepChecklistTemplate({
-  required String brand,
-  required String series,
-}) async {
-  final queryParams = {
-    'action': 'get_prep_checklist_template',
-    'brand': brand,
-    'series': series,
-    if (apiKey != null) 'api_key': apiKey!,
-  };
-
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
-
-  debugPrint('Fetching prep checklist template for: $brand $series');
-
-  final response = await http.get(uri);
-
-  if (response.statusCode != 200) {
-    throw Exception(
-        'Failed to load prep checklist template: ${response.statusCode}');
-  }
-
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-
-  return {
-    'checklist_type': data['checklist_type'],
-    'fields': List<String>.from(data['fields'] ?? []),
-  };
-}
-
-Future<void> submitFullCheck({
-  required String userEmail,
-  required String userName,
-  required List<Map<String, dynamic>> items,
-}) async {
-  if (items.isEmpty) return;
-
-  final uri = Uri.parse(apiBaseUrl);
-  final body = {
-    'action': 'full_check',
-    'user_email': userEmail,
-    'user_name': userName,
-    'items': items,
-    if (apiKey != null) 'api_key': apiKey,
-  };
-
-  final response = await http.post(
-    uri,
-    headers: {'Content-Type': 'application/json'},
-    body: json.encode(body),
-  );
-
-  if (response.statusCode == 200) {
-    try {
-      final data = json.decode(response.body);
-      if (data is Map &&
-          data['status'] != null &&
-          data['status'].toString() != 'ok') {
-        throw Exception('API error: ${data['message']}');
-      }
-    } catch (_) {
-      // Non-JSON but 200: assume success
-    }
-  } else if (response.statusCode == 302) {
-    return;
-  } else {
-    throw Exception('Failed to submit full check: ${response.statusCode}');
-  }
-}
-
-Future<void> submitJobAdjustment({
-  required String userEmail,
-  required String userName,
-  required String jobRef,
-  required List<Map<String, dynamic>> items,
-}) async {
-  if (items.isEmpty) return;
-
-  final uri = Uri.parse(apiBaseUrl);
-  final body = {
-    'action': 'job_adjustment',
-    'user_email': userEmail,
-    'user_name': userName,
-    'job_ref': jobRef,
-    'items': items,
-    if (apiKey != null) 'api_key': apiKey,
-  };
-
-  final response = await http.post(
-    uri,
-    headers: {'Content-Type': 'application/json'},
-    body: json.encode(body),
-  );
-
-  if (response.statusCode == 200) {
-    try {
-      final data = json.decode(response.body);
-      if (data is Map &&
-          data['status'] != null &&
-          data['status'].toString() != 'ok') {
-        throw Exception('API error: ${data['message']}');
-      }
-    } catch (_) {
-      // Non-JSON but 200: assume success
-    }
-  } else if (response.statusCode == 302) {
-    return;
-  } else {
-    throw Exception('Failed to submit job adjustment: ${response.statusCode}');
-  }
-}
-
-/// Check if a serial number already exists in Lifts_Master
-Future<LiftRecord?> checkDuplicateSerial(String serialNumber) async {
-  if (serialNumber.trim().isEmpty) {
-    return null; // Empty serial numbers are allowed (e.g., folding rail lifts)
-  }
-
-  final queryParams = {
-    'action': 'check_duplicate_serial',
-    'serial_number': serialNumber.trim(),
-    if (apiKey != null) 'api_key': apiKey!,
-  };
-
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
-  final response = await http.get(uri);
-
-  if (response.statusCode != 200) {
-    throw Exception('Failed to check duplicate serial: ${response.statusCode}');
-  }
-
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') {
-    throw Exception('API error: ${data['message']}');
-  }
-
-  if (data['exists'] == true && data['lift'] != null) {
-    return LiftRecord.fromJson(data['lift']);
-  }
-
-  return null;
-}
-
-/// Create or update a lift row in Lifts_Master
-Future<void> upsertLift({
-  required String userEmail,
-  required String userName,
-  String? liftId,
-  required String serialNumber,
-  required String brand,
-  required String series,
-  required String orientation,
-  required String foldType,
-  required String condition,
-  required String status,
-  required String preppedStatus,
-  required String currentLocation,
-  required String currentJob,
-  String? dateAcquired,
-  String? installDate,
-  String? installerName,
-  String? lastPrepDate,
-  String? notes,
-  String? binNumber,
-  String? cleanBatteriesStatus,
-}) async {
-  final uri = Uri.parse(apiBaseUrl);
-
-  final body = {
-    'action': 'upsert_lift',
-    'user_email': userEmail,
-    'user_name': userName,
-    if (liftId != null && liftId.isNotEmpty) 'lift_id': liftId,
-    'serial_number': serialNumber,
-    'brand': brand,
-    'series': series,
-    'orientation': orientation,
-    'fold_type': foldType,
-    'condition': condition,
-    'status': status,
-    'prepped_status': preppedStatus,
-    'current_location': currentLocation,
-    'current_job': currentJob,
-    if (dateAcquired != null) 'date_acquired': dateAcquired,
-    if (installDate != null) 'install_date': installDate,
-    if (installerName != null) 'installer_name': installerName,
-    if (lastPrepDate != null) 'last_prep_date': lastPrepDate,
-    if (notes != null) 'notes': notes,
-    if (binNumber != null) 'bin_number': binNumber,
-    if (cleanBatteriesStatus != null) 'clean_batteries_status': cleanBatteriesStatus,
-    if (apiKey != null) 'api_key': apiKey,
-  };
-
-  final response = await http.post(
-    uri,
-    headers: {'Content-Type': 'application/json'},
-    body: json.encode(body),
-  );
-
-  if (response.statusCode != 200 && response.statusCode != 302) {
-    throw Exception('Failed to save lift: ${response.statusCode}');
-  }
-
-  if (response.statusCode == 200) {
-    try {
-      final data = json.decode(response.body);
-      if (data is Map &&
-          data['status'] != null &&
-          data['status'].toString() != 'ok') {
-        throw Exception('API error: ${data['message']}');
-      }
-    } catch (_) {
-      // Non-JSON but 200: assume success
-    }
-  }
-}
-
-/// Fetch the current photo URLs for a lift (refresh after upload/delete)
-Future<List<String>> fetchLiftPhotos({required String liftId}) async {
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-    'action': 'get_lift_photos',
-    'lift_id': liftId,
-    if (apiKey != null) 'api_key': apiKey!,
-  });
-  final response = await http.get(uri);
-  if (response.statusCode != 200) return [];
-  try {
-    final data = json.decode(response.body);
-    if (data['status'] != 'ok') return [];
-    return List<String>.from(data['photo_urls'] ?? []).map(normalizeDrivePhotoUrl).toList();
-  } catch (_) {
-    return [];
-  }
-}
-
-/// Upload a photo for a lift. Compresses first, then base64-encodes and POSTs.
-/// Apps Script redirects POST→GET via 302; we follow the redirect manually
-/// and re-POST to the final URL so the body isn't lost.
-Future<String> uploadLiftPhoto({
-  required String liftId,
-  required XFile imageFile,
-}) async {
-  // Compress on native; on web compressWithFile doesn't work (no file path),
-  // so read bytes directly from XFile instead.
-  final Uint8List imageBytes;
-  if (kIsWeb) {
-    imageBytes = await imageFile.readAsBytes();
-  } else {
-    final compressed = await FlutterImageCompress.compressWithFile(
-      imageFile.path,
-      minWidth: 1200,
-      minHeight: 1200,
-      quality: 85,
-      format: CompressFormat.jpeg,
-      keepExif: false,
-    );
-    if (compressed == null) throw Exception('Image compression failed');
-    imageBytes = compressed;
-  }
-
-  final b64 = base64Encode(imageBytes);
-  final fileName = 'lift_${liftId}_${DateTime.now().millisecondsSinceEpoch}.jpg';
-
-  final bodyMap = {
-    'action': 'upload_lift_photo',
-    'lift_id': liftId,
-    'file_name': fileName,
-    'mime_type': 'image/jpeg',
-    'base64_data': b64,
-    if (apiKey != null) 'api_key': apiKey,
-  };
-  final bodyStr = json.encode(bodyMap);
-  const headers = {'Content-Type': 'application/json'};
-
-  if (kIsWeb) {
-    // On web, use the Netlify proxy which handles the Apps Script redirect
-    // transparently — no IOClient needed (and IOClient doesn't work on web).
-    final response = await http.post(
-      Uri.parse(_webApiBaseUrl),
-      headers: headers,
-      body: bodyStr,
-    );
-    if (response.statusCode != 200) {
-      throw Exception('Upload failed: ${response.statusCode}');
-    }
-    final data = json.decode(response.body);
-    if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Upload error');
-    return data['url'] as String;
-  }
-
-  // On native (iOS/Android): Apps Script issues a 302 on POST /exec.
-  // The redirect target expects GET (the body was already processed on the
-  // first hop). Use IOClient with followRedirects=false, then follow the
-  // redirect as GET per standard HTTP behaviour for 301/302/303.
-  final ioClient = http_io.IOClient();
-  try {
-    Uri nextUri = Uri.parse(_nativeApiBaseUrl);
-    String nextMethod = 'POST';
-    String? nextBody = bodyStr;
-
-    for (int i = 0; i < 3; i++) {
-      final request = http.Request(nextMethod, nextUri)
-        ..headers.addAll(headers)
-        ..followRedirects = false;
-      if (nextBody != null) request.body = nextBody;
-
-      final streamed = await ioClient.send(request);
-
-      if (streamed.statusCode == 200) {
-        final responseBody = await streamed.stream.bytesToString();
-        final data = json.decode(responseBody);
-        if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Upload error');
-        return data['url'] as String;
-      }
-
-      if (streamed.statusCode == 301 ||
-          streamed.statusCode == 302 ||
-          streamed.statusCode == 303 ||
-          streamed.statusCode == 307 ||
-          streamed.statusCode == 308) {
-        final location = streamed.headers['location'];
-        if (location == null || location.isEmpty) {
-          throw Exception('Redirect with no location header');
-        }
-        await streamed.stream.drain<void>();
-        nextUri = Uri.parse(location);
-        // 307/308 preserve method+body; 301/302/303 switch to GET (no body)
-        if (streamed.statusCode == 307 || streamed.statusCode == 308) {
-          // keep nextMethod and nextBody as-is
-        } else {
-          nextMethod = 'GET';
-          nextBody = null;
-        }
-        continue;
-      }
-
-      throw Exception('Upload failed: ${streamed.statusCode}');
-    }
-
-    throw Exception('Too many redirects during upload');
-  } finally {
-    ioClient.close();
-  }
-}
-
-/// Delete a photo by file ID and remove it from the lift record.
-Future<void> deleteLiftPhoto({
-  required String liftId,
-  required String fileId,
-}) async {
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-    'action': 'delete_lift_photo',
-    'lift_id': liftId,
-    'file_id': fileId,
-    if (apiKey != null) 'api_key': apiKey!,
-  });
-  final response = await http.get(uri);
-  if (response.statusCode != 200 && response.statusCode != 302) {
-    throw Exception('Delete failed: ${response.statusCode}');
-  }
-}
-
-/// Add a service entry for a specific lift
-Future<void> addLiftService({
-  required String userEmail,
-  required String userName,
-  required String serialNumber,
-  required String serviceDate,
-  required String serviceType,
-  required String description,
-  required String invoiceNumber,
-  required String jobRef,
-  required String customerName,
-  String? notes,
-}) async {
-  final uri = Uri.parse(apiBaseUrl);
-
-  final body = {
-    'action': 'add_lift_service',
-    'user_email': userEmail,
-    'user_name': userName,
-    'serial_number': serialNumber,
-    'service_date': serviceDate,
-    'service_type': serviceType,
-    'description': description,
-    'invoice_number': invoiceNumber,
-    'job_ref': jobRef,
-    'customer_name': customerName,
-    if (notes != null) 'notes': notes,
-    if (apiKey != null) 'api_key': apiKey,
-  };
-
-  final response = await http.post(
-    uri,
-    headers: {'Content-Type': 'application/json'},
-    body: json.encode(body),
-  );
-
-  if (response.statusCode != 200 && response.statusCode != 302) {
-    throw Exception('Failed to add service record: ${response.statusCode}');
-  }
-
-  if (response.statusCode == 200) {
-    Map<String, dynamic>? data;
-    try {
-      data = json.decode(response.body) as Map<String, dynamic>;
-    } catch (_) {
-      return; // Non-JSON 200: assume success
-    }
-    if (data['status'] != null && data['status'].toString() != 'ok') {
-      throw Exception('API error: ${data['message']}');
-    }
-  }
-}
-
-/// =======================
 /// UTILITY FUNCTIONS
 /// =======================
+
+/// Reusable confirmation dialog. Returns true if user taps the confirm button.
+Future<bool> showConfirmDialog(
+  BuildContext context, {
+  required String title,
+  required String content,
+  String confirmLabel = 'Delete',
+  Color confirmColor = Colors.red,
+}) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(title),
+      content: Text(content),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: confirmColor),
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: Text(confirmLabel),
+        ),
+      ],
+    ),
+  );
+  return result == true;
+}
 
 /// Check if a stairlift item is a folding rail type (quantity-based, no serial numbers)
 bool isFoldingRail(StairliftItem item) {
@@ -1303,12 +628,12 @@ class _PrepScreenState extends State<PrepScreen> {
   @override
   void initState() {
     super.initState();
-    _liftsFuture = fetchLifts();
+    _liftsFuture = sbFetchLifts();
   }
 
   void _refresh() {
     setState(() {
-      _liftsFuture = fetchLifts();
+      _liftsFuture = sbFetchLifts();
     });
   }
 
@@ -1402,7 +727,7 @@ class _PrepScreenState extends State<PrepScreen> {
           return RefreshIndicator(
             onRefresh: () async {
               setState(() {
-                _liftsFuture = fetchLifts();
+                _liftsFuture = sbFetchLifts();
               });
               await _liftsFuture;
             },
@@ -1549,12 +874,12 @@ class _PrepHistoryScreenState extends State<PrepHistoryScreen> {
   @override
   void initState() {
     super.initState();
-    _future = fetchAllPrepChecklists();
+    _future = sbFetchAllPrepChecklists();
   }
 
   void _refresh() {
     setState(() {
-      _future = fetchAllPrepChecklists();
+      _future = sbFetchAllPrepChecklists();
     });
   }
 
@@ -1673,7 +998,7 @@ class _PrepHistoryScreenState extends State<PrepHistoryScreen> {
               Expanded(
                 child: RefreshIndicator(
                   onRefresh: () async {
-                    setState(() { _future = fetchAllPrepChecklists(); });
+                    setState(() { _future = sbFetchAllPrepChecklists(); });
                     await _future;
                   },
                   child: ListView.builder(
@@ -1881,109 +1206,6 @@ class AnnualRecord {
   }
 }
 
-Future<List<AnnualRecord>> fetchAnnuals() async {
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-    'action': 'get_annuals',
-    if (apiKey != null) 'api_key': apiKey!,
-  });
-  final response = await http.get(uri);
-  if (response.statusCode != 200) throw Exception('Failed to load annuals');
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Error');
-  return (data['annuals'] as List)
-      .map((e) => AnnualRecord.fromJson(e as Map<String, dynamic>))
-      .toList();
-}
-
-Future<void> upsertAnnual({
-  required String userEmail,
-  required String userName,
-  String? annualId,
-  required String customerName,
-  required String address,
-  required String phone,
-  required String liftType,
-  required String lastServiceDate,
-  required String dateRequested,
-  required String notes,
-  String? liftId,
-  String? serialNumber,
-}) async {
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-    'action': 'upsert_annual',
-    'user_email': userEmail,
-    'user_name': userName,
-    if (annualId != null) 'annual_id': annualId,
-    'customer_name': customerName,
-    'address': address,
-    'phone': phone,
-    'lift_type': liftType,
-    'last_service_date': lastServiceDate,
-    'date_requested': dateRequested,
-    'notes': notes,
-    if (liftId != null && liftId.isNotEmpty) 'lift_id': liftId,
-    if (serialNumber != null && serialNumber.isNotEmpty) 'serial_number': serialNumber,
-    if (apiKey != null) 'api_key': apiKey!,
-  });
-  final response = await http.get(uri);
-  if (response.statusCode != 200) {
-    throw Exception('Failed to save annual: ${response.statusCode}');
-  }
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Error');
-}
-
-Future<void> markAnnualScheduled({
-  required String annualId,
-  required String userName,
-  required String userEmail,
-}) async {
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-    'action': 'mark_annual_scheduled',
-    'annual_id': annualId,
-    'user_name': userName,
-    'user_email': userEmail,
-    if (apiKey != null) 'api_key': apiKey!,
-  });
-  final response = await http.get(uri);
-  if (response.statusCode != 200) {
-    throw Exception('Failed to mark scheduled: ${response.statusCode}');
-  }
-  final data = json.decode(response.body);
-  if (data['status'] != 'ok') throw Exception(data['message'] ?? 'Error');
-}
-
-Future<void> deleteAnnual({
-  required String annualId,
-}) async {
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-    'action': 'delete_annual',
-    'annual_id': annualId,
-    if (apiKey != null) 'api_key': apiKey!,
-  });
-  await http.get(uri);
-}
-
-Future<List<Map<String, dynamic>>> fetchAnnualHistory({
-  required String annualId,
-}) async {
-  final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-    'action': 'get_annual_history',
-    'annual_id': annualId,
-    if (apiKey != null) 'api_key': apiKey!,
-  });
-  final response = await http.get(uri);
-  if (response.statusCode != 200) return [];
-  try {
-    final data = json.decode(response.body);
-    if (data['status'] != 'ok') return [];
-    return List<Map<String, dynamic>>.from(
-        (data['history'] as List).map((e) => Map<String, dynamic>.from(e as Map)));
-  } catch (_) {
-    return [];
-  }
-}
-
 // =======================
 // ANNUALS SCREEN
 // =======================
@@ -2003,10 +1225,10 @@ class _AnnualsScreenState extends State<AnnualsScreen> {
   @override
   void initState() {
     super.initState();
-    _future = fetchAnnuals();
+    _future = sbFetchAnnuals();
   }
 
-  void _refresh() => setState(() => _future = fetchAnnuals());
+  void _refresh() => setState(() => _future = sbFetchAnnuals());
 
   Future<Map<String, String>> _loadUser() async {
     final prefs = await SharedPreferences.getInstance();
@@ -2033,7 +1255,7 @@ class _AnnualsScreenState extends State<AnnualsScreen> {
       return;
     }
     try {
-      await markAnnualScheduled(
+      await sbMarkAnnualScheduled(
         annualId: record.annualId,
         userName: user['name']!,
         userEmail: user['email'] ?? '',
@@ -2048,23 +1270,19 @@ class _AnnualsScreenState extends State<AnnualsScreen> {
   }
 
   Future<void> _delete(AnnualRecord record) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete record?'),
-        content: Text('Remove ${record.customerName} from annuals?'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Delete', style: TextStyle(color: Colors.red)),
-          ),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Delete record?',
+      content: 'Remove ${record.customerName} from annuals?',
     );
-    if (confirmed != true) return;
+    if (!confirmed) return;
     try {
-      await deleteAnnual(annualId: record.annualId);
+      final prefs = await SharedPreferences.getInstance();
+      await sbDeleteAnnual(
+        annualId: record.annualId,
+        userEmail: prefs.getString('user_email') ?? '',
+        userName: prefs.getString('user_name') ?? '',
+      );
       _refresh();
     } catch (e) {
       if (!mounted) return;
@@ -2369,7 +1587,7 @@ class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
   @override
   void initState() {
     super.initState();
-    _historyFuture = fetchAnnualHistory(annualId: widget.record.annualId);
+    _historyFuture = sbFetchAnnualHistory(annualId: widget.record.annualId);
   }
 
   Future<Map<String, String>> _loadUser() async {
@@ -2390,7 +1608,7 @@ class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
       return;
     }
     try {
-      await markAnnualScheduled(
+      await sbMarkAnnualScheduled(
         annualId: widget.record.annualId,
         userName: user['name']!,
         userEmail: user['email'] ?? '',
@@ -2424,7 +1642,7 @@ class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
           // Find the linked lift record
           LiftRecord? linkedLift;
           try {
-            final lifts = await fetchLifts();
+            final lifts = await sbFetchLifts();
             linkedLift = lifts.where((l) => l.liftId == r.liftId).firstOrNull;
           } catch (_) {}
           if (linkedLift != null && mounted) {
@@ -2505,7 +1723,7 @@ class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
                   onTap: () async {
                     final nav = Navigator.of(context);
                     try {
-                      final lifts = await fetchLifts();
+                      final lifts = await sbFetchLifts();
                       final linked = lifts.where((l) => l.liftId == r.liftId).firstOrNull;
                       if (linked != null) {
                         nav.push(MaterialPageRoute(
@@ -2658,7 +1876,7 @@ class _LiftPickerDialogState extends State<_LiftPickerDialog> {
 
   Future<void> _load() async {
     try {
-      final lifts = await fetchLifts();
+      final lifts = await sbFetchLifts();
       if (mounted) {
         setState(() {
           _all = lifts;
@@ -2901,7 +2119,7 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
       if (saved == true) {
         // Fetch lifts again and pick the most recently added one
         try {
-          final lifts = await fetchLifts();
+          final lifts = await sbFetchLifts();
           if (lifts.isNotEmpty) _linkLift(lifts.last);
         } catch (_) {}
       }
@@ -2939,7 +2157,7 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
       final userName = prefs.getString('user_name') ?? '';
       final userEmail = prefs.getString('user_email') ?? '';
 
-      await upsertAnnual(
+      await sbUpsertAnnual(
         userEmail: userEmail,
         userName: userName,
         annualId: widget.existing?.annualId,
@@ -2950,8 +2168,8 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
         lastServiceDate: _lastServiceController.text.trim(),
         dateRequested: _dateRequestedController.text.trim(),
         notes: _notesController.text.trim(),
-        liftId: _linkedLiftId,
-        serialNumber: _linkedSerialNumber,
+        liftId: _linkedLiftId ?? '',
+        serialNumber: _linkedSerialNumber ?? '',
       );
 
       if (mounted) Navigator.of(context).pop(true);
@@ -3119,34 +2337,14 @@ class _PickupListScreenState extends State<PickupListScreen> {
   }
 
   Future<void> _fetchItems() async {
-    setState(() {
-      _loading = true;
-    });
-
+    setState(() => _loading = true);
     try {
-      final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-        'action': 'get_pickup_list',
-        if (apiKey != null) 'api_key': apiKey!,
-      });
-
-      final resp = await http.get(uri);
-      if (resp.statusCode == 200) {
-        final data = json.decode(resp.body);
-        if (data is Map && data['status'] == 'ok') {
-          final list = (data['items'] as List<dynamic>? ?? [])
-              .map((e) => Map<String, dynamic>.from(e as Map))
-              .toList();
-          setState(() {
-            _items = list;
-          });
-        }
-      }
+      final list = await sbGetPickupList();
+      if (mounted) setState(() => _items = list);
     } catch (e) {
-      debugPrint('Failed to load pickup list: \$e');
+      debugPrint('Failed to load pickup list: $e');
     } finally {
-      if (mounted) setState(() {
-        _loading = false;
-      });
+      if (mounted) setState(() => _loading = false);
     }
   }
 
@@ -3157,8 +2355,8 @@ class _PickupListScreenState extends State<PickupListScreen> {
     final prefs = await SharedPreferences.getInstance();
     final addedBy = prefs.getString('user_name') ?? 'Unknown';
 
-    // Optimistic UI: add locally first with temporary id
-    final tempId = DateTime.now().millisecondsSinceEpoch.toString();
+    // Optimistic UI: add locally first
+    final tempId = 'item_${DateTime.now().millisecondsSinceEpoch}';
     final newItem = {
       'id': tempId,
       'item': text,
@@ -3175,35 +2373,12 @@ class _PickupListScreenState extends State<PickupListScreen> {
     });
 
     try {
-      final uri = Uri.parse(apiBaseUrl);
-      final body = {
-        'action': 'add_pickup_item',
-        'item': text,
-        'added_by': addedBy,
-        if (apiKey != null) 'api_key': apiKey,
-      };
-
-      final resp = await http.post(
-        uri,
-        headers: {'Content-Type': 'application/json'},
-        body: json.encode(body),
-      );
-
-      if (resp.statusCode == 200) {
-        final data = json.decode(resp.body);
-        if (data is Map && data['status'] == 'ok' && data['id'] != null) {
-          // Replace temp id with real id returned by server
-          final serverId = data['id'].toString();
-          setState(() {
-            final idx = _items.indexWhere((i) => i['id'] == tempId);
-            if (idx >= 0) {
-              _items[idx]['id'] = serverId;
-            }
-          });
-        }
-      }
+      await sbAddPickupItem(item: text, addedBy: addedBy);
+      // Refresh to get the server-assigned id
+      final list = await sbGetPickupList();
+      if (mounted) setState(() => _items = list);
     } catch (e) {
-      debugPrint('Failed to add pickup item: \$e');
+      debugPrint('Failed to add pickup item: $e');
       // keep optimistic item; user can retry via refresh
     }
   }
@@ -3223,39 +2398,14 @@ class _PickupListScreenState extends State<PickupListScreen> {
     });
 
     try {
-      final queryParams = {
-        'action': 'update_pickup_item',
-        'id': id,
-        'completed': value ? 'TRUE' : 'FALSE',
-        'completed_by': value ? user : '',
-        if (apiKey != null) 'api_key': apiKey!,
-      };
-
-      final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
-
-      debugPrint('Sending update request for id: $id, completed: ${value ? 'TRUE' : 'FALSE'}');
-      debugPrint('Request URI: $uri');
-
-      final resp = await http.get(uri);
-
-      debugPrint('Response status: ${resp.statusCode}');
-      debugPrint('Response body: ${resp.body}');
-
-      if (resp.statusCode != 200) {
-        throw Exception('Server error: ${resp.statusCode}');
-      }
-
-      final data = json.decode(resp.body);
-      if (data is Map && data['status'] != 'ok') {
-        throw Exception('API error: ${data['message'] ?? 'unknown'}');
-      }
+      await sbUpdatePickupItem(id: id, completed: value, completedBy: user);
     } catch (e) {
       debugPrint('Failed to update pickup item: $e');
       // Revert optimistic update on failure
       setState(() {
         item['completed'] = !value;
-        item['completed_by'] = item['completed'] ? (prefs.getString('user_name') ?? '') : '';
-        item['completed_at'] = item['completed'] ? DateTime.now().toIso8601String() : '';
+        item['completed_by'] = !value ? user : '';
+        item['completed_at'] = !value ? DateTime.now().toIso8601String() : '';
       });
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3270,26 +2420,12 @@ class _PickupListScreenState extends State<PickupListScreen> {
     if (itemId.isEmpty) return;
 
     // Show confirmation dialog
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Delete Item'),
-        content: Text('Are you sure you want to delete "${item['item']}"?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Delete Item',
+      content: 'Are you sure you want to delete "${item['item']}"?',
     );
-
-    if (confirmed != true) return;
+    if (!confirmed) return;
 
     // Optimistic update: remove from list immediately
     final itemIndex = _items.indexWhere((it) => it['id'] == itemId);
@@ -3299,25 +2435,8 @@ class _PickupListScreenState extends State<PickupListScreen> {
     });
 
     try {
-      final queryParams = {
-        'action': 'delete_pickup_item',
-        'id': itemId,
-        if (apiKey != null) 'api_key': apiKey!,
-      };
+      await sbDeletePickupItem(id: itemId);
 
-      final uri = Uri.parse(apiBaseUrl).replace(queryParameters: queryParams);
-      final resp = await http.get(uri);
-
-      if (resp.statusCode != 200) {
-        throw Exception('Server error: ${resp.statusCode}');
-      }
-
-      final data = json.decode(resp.body);
-      if (data is Map && data['status'] != 'ok') {
-        throw Exception('API error: ${data['message'] ?? 'unknown'}');
-      }
-
-      // Success - show confirmation
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Item deleted')),
@@ -3499,18 +2618,6 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
-  String _titleForIndex(int i) {
-    switch (i) {
-      case 0:
-        return 'Lifts';
-      case 1:
-        return 'Ramps Inventory';
-      case 2:
-      default:
-        return 'Pickup List';
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -3575,7 +2682,7 @@ class _RampsScreenState extends State<RampsScreen> {
   @override
   void initState() {
     super.initState();
-    _future = fetchInventory();
+    _future = sbFetchInventory();
     _loadUserPrefs();
   }
 
@@ -3596,7 +2703,7 @@ class _RampsScreenState extends State<RampsScreen> {
 
   void _refresh() {
     setState(() {
-      _future = fetchInventory();
+      _future = sbFetchInventory();
     });
   }
 
@@ -4020,7 +3127,7 @@ class _RampsScreenState extends State<RampsScreen> {
                 child: RefreshIndicator(
                   onRefresh: () async {
                     setState(() {
-                      _future = fetchInventory();
+                      _future = sbFetchInventory();
                     });
                     await _future;
                   },
@@ -4113,7 +3220,7 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
   @override
   void initState() {
     super.initState();
-    _future = fetchInventory();
+    _future = sbFetchInventory();
   }
 
   String _keyFor(String itemId, String condition) => '$itemId|$condition';
@@ -4190,7 +3297,7 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
         return;
       }
 
-      await submitFullCheck(
+      await sbSubmitFullCheck(
         userEmail: userEmail,
         userName: userName,
         items: items,
@@ -4370,7 +3477,7 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
   @override
   void initState() {
     super.initState();
-    _future = fetchInventory();
+    _future = sbFetchInventory();
     _tabController = TabController(length: 2, vsync: this);
   }
 
@@ -4466,7 +3573,7 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
         return;
       }
 
-      await submitJobAdjustment(
+      await sbSubmitJobAdjustment(
         userEmail: userEmail,
         userName: userName,
         jobRef: _jobRef.trim(),
@@ -4696,12 +3803,12 @@ class _LiftsScreenState extends State<LiftsScreen> {
   @override
   void initState() {
     super.initState();
-    _future = fetchLifts();
+    _future = sbFetchLifts();
   }
 
   void _refresh() {
     setState(() {
-      _future = fetchLifts();
+      _future = sbFetchLifts();
     });
   }
 
@@ -4956,7 +4063,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                   child: RefreshIndicator(
                     onRefresh: () async {
                       setState(() {
-                        _future = fetchLifts();
+                        _future = sbFetchLifts();
                       });
                       await _future;
                     },
@@ -5234,7 +4341,7 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
   @override
   void initState() {
     super.initState();
-    _future = fetchInventory();
+    _future = sbFetchInventory();
     _tabController = TabController(length: 2, vsync: this);
   }
 
@@ -5246,7 +4353,7 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
 
   void _refresh() {
     setState(() {
-      _future = fetchInventory();
+      _future = sbFetchInventory();
     });
   }
 
@@ -5321,7 +4428,7 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
     return RefreshIndicator(
       onRefresh: () async {
         setState(() {
-          _future = fetchInventory();
+          _future = sbFetchInventory();
         });
         await _future;
       },
@@ -5403,21 +4510,10 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
     if (confirmed != true || !mounted) return;
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final userName = prefs.getString('user_name') ?? '';
-      final userEmail = prefs.getString('user_email') ?? '';
-      // Save notes by calling upsertLift-style endpoint via submitJobAdjustment
-      // with a notes-only update. Since we only have the stairlift item we use
-      // a dedicated notes update call via the inventory sheet update mechanism.
-      final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-        'action': 'update_stairlift_notes',
-        'item_id': item.itemId,
-        'notes': controller.text.trim(),
-        'user_name': userName,
-        'user_email': userEmail,
-        if (apiKey != null) 'api_key': apiKey!,
-      });
-      await http.get(uri);
+      await sbUpdateStairliftNotes(
+        itemId: item.itemId,
+        notes: controller.text.trim(),
+      );
       _refresh();
     } catch (_) {
       // Best-effort — refresh anyway to show current state
@@ -5512,7 +4608,7 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
     return RefreshIndicator(
       onRefresh: () async {
         setState(() {
-          _future = fetchInventory();
+          _future = sbFetchInventory();
         });
         await _future;
       },
@@ -5589,7 +4685,7 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
         return;
       }
 
-      await submitJobAdjustment(
+      await sbSubmitJobAdjustment(
         userEmail: userEmail,
         userName: userName,
         jobRef: 'Folding Rail Adjustment',
@@ -5672,7 +4768,7 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
           return;
         }
 
-        await submitFullCheck(
+        await sbSubmitFullCheck(
           userEmail: userEmail,
           userName: userName,
           items: [
@@ -5728,14 +4824,14 @@ class _StairliftQuantitiesScreenState
   @override
   void initState() {
     super.initState();
-    _liftsFuture = fetchLifts();
-    _inventoryFuture = fetchInventory();
+    _liftsFuture = sbFetchLifts();
+    _inventoryFuture = sbFetchInventory();
   }
 
   void _refresh() {
     setState(() {
-      _liftsFuture = fetchLifts();
-      _inventoryFuture = fetchInventory();
+      _liftsFuture = sbFetchLifts();
+      _inventoryFuture = sbFetchInventory();
     });
   }
 
@@ -6148,12 +5244,12 @@ class _ChangeHistoryScreenState extends State<ChangeHistoryScreen> {
   @override
   void initState() {
     super.initState();
-    _future = fetchChanges();
+    _future = sbFetchChanges();
   }
 
   void _refresh() {
     setState(() {
-      _future = fetchChanges();
+      _future = sbFetchChanges();
     });
   }
 
@@ -6334,17 +5430,17 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
     _photoUrls = List<String>.from(widget.lift.photoUrls);
 
     // History is now keyed purely by serial number
-    _historyFuture = fetchLiftHistory(
+    _historyFuture = sbFetchLiftHistory(
       serialNumber: _serialForApi,
     );
 
     // Service is also keyed purely by serial number
-    _serviceFuture = fetchLiftService(
+    _serviceFuture = sbFetchLiftService(
       serialNumber: _serialForApi,
     );
 
     // Prep checklists are also keyed by serial number
-    _prepChecklistsFuture = fetchPrepChecklists(
+    _prepChecklistsFuture = sbFetchPrepChecklists(
       serialNumber: _serialForApi,
     );
   }
@@ -6361,25 +5457,10 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
   }
 
   Future<void> _deleteLift() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete Lift'),
-        content: Text(
-          'Remove ${widget.lift.brand} ${widget.lift.series} (SN: ${widget.lift.serialNumber}) from the lifts master?\n\nThis cannot be undone.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Delete Lift',
+      content: 'Remove ${widget.lift.brand} ${widget.lift.series} (SN: ${widget.lift.serialNumber}) from the lifts master?\n\nThis cannot be undone.',
     );
     if (confirmed != true || !mounted) return;
 
@@ -6388,20 +5469,11 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
       final userName = prefs.getString('user_name') ?? '';
       final userEmail = prefs.getString('user_email') ?? '';
 
-      final uri = Uri.parse(apiBaseUrl).replace(queryParameters: {
-        'action': 'delete_lift',
-        'lift_id': widget.lift.liftId,
-        'user_email': userEmail,
-        'user_name': userName,
-        if (apiKey != null) 'api_key': apiKey!,
-      });
-
-      final resp = await http.get(uri);
-      if (resp.statusCode != 200) throw Exception('Server error ${resp.statusCode}');
-      final data = json.decode(resp.body);
-      if (data is Map && data['status'] != 'ok') {
-        throw Exception(data['message'] ?? 'Unknown error');
-      }
+      await sbDeleteLift(
+        liftId: widget.lift.liftId,
+        userEmail: userEmail,
+        userName: userName,
+      );
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -6421,7 +5493,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
   Future<void> _refreshService() async {
     try {
       // Re-fetch the service records for this lift (keyed by serial number)
-      _serviceFuture = fetchLiftService(
+      _serviceFuture = sbFetchLiftService(
         serialNumber: _serialForApi,
       );
       // Trigger a rebuild so UI reflects the new future
@@ -6487,9 +5559,9 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
 
     setState(() => _uploadingPhoto = true);
     try {
-      await uploadLiftPhoto(liftId: _liftIdForApi, imageFile: imageFile);
+      await sbUploadLiftPhoto(liftId: _liftIdForApi, imageFile: imageFile);
       // Refresh photo list from server
-      final urls = await fetchLiftPhotos(liftId: _liftIdForApi);
+      final urls = await sbFetchLiftPhotos(liftId: _liftIdForApi);
       if (mounted) {
         setState(() {
           _photoUrls = urls;
@@ -6510,31 +5582,16 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
   }
 
   Future<void> _deletePhoto(String url) async {
-    // Extract Drive file ID from the URL: .../uc?export=view&id=FILE_ID
-    final uri = Uri.tryParse(url);
-    final fileId = uri?.queryParameters['id'] ?? '';
-    if (fileId.isEmpty) return;
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete photo?'),
-        content: const Text('This cannot be undone.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
-          TextButton(
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Delete photo?',
+      content: 'This cannot be undone.',
     );
-    if (confirmed != true || !mounted) return;
+    if (!confirmed || !mounted) return;
 
     try {
-      await deleteLiftPhoto(liftId: _liftIdForApi, fileId: fileId);
-      final urls = await fetchLiftPhotos(liftId: _liftIdForApi);
+      await sbDeleteLiftPhoto(liftId: _liftIdForApi, fileUrl: url);
+      final urls = await sbFetchLiftPhotos(liftId: _liftIdForApi);
       if (mounted) setState(() => _photoUrls = urls);
     } catch (e) {
       if (mounted) {
@@ -6943,7 +6000,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
                   if (result == true && mounted) {
                     // Refresh the prep checklists
                     setState(() {
-                      _prepChecklistsFuture = fetchPrepChecklists(
+                      _prepChecklistsFuture = sbFetchPrepChecklists(
                         serialNumber: _serialForApi,
                       );
                     });
@@ -7086,7 +6143,6 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
 
   bool _saving = false;
 
-  String get _liftIdForApi => widget.lift.liftId;
   String get _serialForApi => widget.lift.serialNumber;
 
   @override
@@ -7138,7 +6194,7 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
     });
 
     try {
-      await addLiftService(
+      await sbAddLiftService(
         userEmail: userEmail,
         userName: userName,
         serialNumber: _serialForApi,
@@ -7148,9 +6204,7 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
         invoiceNumber: _invoiceController.text.trim(),
         jobRef: _jobRefController.text.trim(),
         customerName: _customerController.text.trim(),
-        notes: _notesController.text.trim().isEmpty
-            ? null
-            : _notesController.text.trim(),
+        notes: _notesController.text.trim(),
       );
 
       if (!mounted) return;
@@ -7363,7 +6417,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
 
   Future<void> _loadInventory() async {
     try {
-      final data = await fetchInventory();
+      final data = await sbFetchInventory();
 
       final activeStairlifts =
           data.stairlifts.where((s) => s.active).toList();
@@ -7558,7 +6612,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         });
 
         try {
-          final existingLift = await checkDuplicateSerial(serialNumber);
+          final existingLift = await sbCheckDuplicateSerial(serialNumber);
 
           if (existingLift != null) {
             if (!mounted) {
@@ -7626,7 +6680,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
     });
 
     try {
-      await upsertLift(
+      await sbUpsertLift(
         userEmail: userEmail,
         userName: userName,
         liftId: widget.existing?.liftId,
@@ -7640,27 +6694,13 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         preppedStatus: _preppedStatus,
         currentLocation: _currentLocationController.text.trim(),
         currentJob: _currentJobController.text.trim(),
-        dateAcquired: _dateAcquiredController.text.trim().isEmpty
-            ? null
-            : _dateAcquiredController.text.trim(),
-        installDate: _installDateController.text.trim().isEmpty
-            ? null
-            : _installDateController.text.trim(),
-        installerName: _installerNameController.text.trim().isEmpty
-            ? null
-            : _installerNameController.text.trim(),
-        lastPrepDate: _lastPrepDateController.text.trim().isEmpty
-            ? null
-            : _lastPrepDateController.text.trim(),
-        notes: _notesController.text.trim().isEmpty
-            ? null
-            : _notesController.text.trim(),
-        binNumber: _binNumberController.text.trim().isEmpty
-            ? null
-            : _binNumberController.text.trim(),
-        cleanBatteriesStatus: _cleanBatteriesStatus.isEmpty
-            ? null
-            : _cleanBatteriesStatus,
+        dateAcquired: _dateAcquiredController.text.trim(),
+        installDate: _installDateController.text.trim(),
+        installerName: _installerNameController.text.trim(),
+        lastPrepDate: _lastPrepDateController.text.trim(),
+        notes: _notesController.text.trim(),
+        binNumber: _binNumberController.text.trim(),
+        cleanBatteriesStatus: _cleanBatteriesStatus,
       );
 
       if (!mounted) return;
@@ -8003,7 +7043,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                   final serial = _serialController.text.trim();
                   if (serial.isNotEmpty && user['name']!.isNotEmpty) {
                     try {
-                      await addLiftService(
+                      await sbAddLiftService(
                         userEmail: user['email'] ?? '',
                         userName: user['name'] ?? '',
                         serialNumber: serial,
