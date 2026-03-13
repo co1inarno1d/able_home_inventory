@@ -2653,7 +2653,7 @@ class _HomeShellState extends State<HomeShell> {
     const LiftsScreen(),
     const RampsScreen(),
     const PrepScreen(),
-    const PickupListScreen(),
+    // const PickupListScreen(), // Hidden for now - not currently in use
     const AnnualsScreen(),
   ];
 
@@ -2689,10 +2689,10 @@ class _HomeShellState extends State<HomeShell> {
             icon: Icon(Icons.build),
             label: 'Prep',
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.check_box),
-            label: 'Pickup',
-          ),
+          // BottomNavigationBarItem(
+          //   icon: Icon(Icons.check_box),
+          //   label: 'Pickup',
+          // ),
           BottomNavigationBarItem(
             icon: Icon(Icons.calendar_month),
             label: 'Annuals',
@@ -4602,7 +4602,7 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      '${item.brand} ${item.series}',
+                      '${item.brand} ${item.series} - ${item.orientation}',
                       style: const TextStyle(fontWeight: FontWeight.w600),
                     ),
                   ),
