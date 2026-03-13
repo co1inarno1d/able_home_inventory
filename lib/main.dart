@@ -487,6 +487,52 @@ class InventoryData {
 /// UTILITY FUNCTIONS
 /// =======================
 
+/// Custom comparator for ramp brands: EZ Access first, then alphabetically
+int _compareRampBrands(String a, String b) {
+  final aLower = a.toLowerCase();
+  final bLower = b.toLowerCase();
+  final aIsEz = aLower.contains('ez access');
+  final bIsEz = bLower.contains('ez access');
+
+  if (aIsEz && !bIsEz) return -1;
+  if (!aIsEz && bIsEz) return 1;
+  return a.compareTo(b);
+}
+
+/// Custom comparator for ramp sizes within a brand
+/// Order: 2ft, 3ft, 4ft, 5ft, 6ft, 7ft, 8ft, 10ft, platforms, low profile platforms
+int _compareRampSizes(String a, String b) {
+  // Extract numeric value if present (e.g., "2ft" -> 2, "10ft" -> 10)
+  final aNum = int.tryParse(a.replaceAll(RegExp(r'[^0-9]'), ''));
+  final bNum = int.tryParse(b.replaceAll(RegExp(r'[^0-9]'), ''));
+
+  final aLower = a.toLowerCase();
+  final bLower = b.toLowerCase();
+  final aIsPlatform = aLower.contains('platform');
+  final bIsPlatform = bLower.contains('platform');
+  final aIsLowProf = aLower.contains('low prof') || aLower.contains('low-prof');
+  final bIsLowProf = bLower.contains('low prof') || bLower.contains('low-prof');
+
+  // Platforms come after numeric sizes
+  if (!aIsPlatform && bIsPlatform) return -1;
+  if (aIsPlatform && !bIsPlatform) return 1;
+
+  // Within platforms: regular platforms before low profile
+  if (aIsPlatform && bIsPlatform) {
+    if (!aIsLowProf && bIsLowProf) return -1;
+    if (aIsLowProf && !bIsLowProf) return 1;
+    return a.compareTo(b);
+  }
+
+  // Both are numeric sizes
+  if (aNum != null && bNum != null) {
+    return aNum.compareTo(bNum);
+  }
+
+  // Fallback to alphabetical
+  return a.compareTo(b);
+}
+
 /// Reusable confirmation dialog. Returns true if user taps the confirm button.
 Future<bool> showConfirmDialog(
   BuildContext context, {
@@ -2919,7 +2965,12 @@ class _RampsScreenState extends State<RampsScreen> {
         if (!haystack.contains(_searchQuery)) return false;
       }
       return true;
-    }).toList();
+    }).toList()
+      ..sort((a, b) {
+        final brandCmp = _compareRampBrands(a.brand, b.brand);
+        if (brandCmp != 0) return brandCmp;
+        return _compareRampSizes(a.size, b.size);
+      });
 
     return ListView(
       children: [
@@ -3351,7 +3402,12 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
     for (final item in filtered) {
       byBrand.putIfAbsent(item.brand, () => []).add(item);
     }
-    final brands = byBrand.keys.toList()..sort();
+    final brands = byBrand.keys.toList()..sort(_compareRampBrands);
+
+    // Sort items within each brand by size
+    for (final brand in brands) {
+      byBrand[brand]!.sort((a, b) => _compareRampSizes(a.size, b.size));
+    }
 
     return ListView(
       children: brands.map((brand) {
@@ -3635,7 +3691,12 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
     for (final item in filtered) {
       byBrand.putIfAbsent(item.brand, () => []).add(item);
     }
-    final brands = byBrand.keys.toList()..sort();
+    final brands = byBrand.keys.toList()..sort(_compareRampBrands);
+
+    // Sort items within each brand by size
+    for (final brand in brands) {
+      byBrand[brand]!.sort((a, b) => _compareRampSizes(a.size, b.size));
+    }
 
     return SingleChildScrollView(
       child: Column(
