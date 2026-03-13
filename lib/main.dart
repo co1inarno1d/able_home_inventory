@@ -3613,6 +3613,8 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
         items.add({
           'item_id': item.itemId,
           'category': 'ramp',
+          'brand': item.brand,
+          'size': item.size,
           'delta': delta,
           'condition': effectiveCondition,
         });
@@ -4754,6 +4756,9 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
           {
             'item_id': item.itemId,
             'category': 'stairlift',
+            'brand': item.brand,
+            'series': item.series,
+            'orientation': item.orientation,
             'delta': delta,
             'condition': item.condition,
           }
@@ -4836,6 +4841,9 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
             {
               'item_id': item.itemId,
               'category': 'stairlift',
+              'brand': item.brand,
+              'series': item.series,
+              'orientation': item.orientation,
               'condition': item.condition,
               'new_qty': result,
             }
