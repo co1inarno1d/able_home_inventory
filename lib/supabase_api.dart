@@ -530,6 +530,8 @@ Future<String> sbSavePrepChecklist({
     'checklist_items': items,
   };
 
+  final isNew = existingId?.isEmpty ?? true;
+
   if (existingId?.isNotEmpty == true) {
     await _sb
         .from('prep_checklists')
@@ -542,11 +544,39 @@ Future<String> sbSavePrepChecklist({
   // Also update prepped_status + last_prep_date on the lift
   if (serialNumber.isNotEmpty) {
     final allTrue = items.values.isNotEmpty && items.values.every((v) => v);
+    final preppedStatus = allTrue ? 'Prepped' : 'Needs prepping';
+
     await _sb.from('lifts').update({
-      'prepped_status': allTrue ? 'Prepped' : 'Needs prepping',
+      'prepped_status': preppedStatus,
       'last_prep_date': checklistData['prep_date'] ?? '',
       'updated_at': DateTime.now().toIso8601String(),
     }).eq('serial_number', serialNumber);
+
+    // Log prep checklist completion as a service record (only for new checklists)
+    if (isNew && allTrue) {
+      final brand = checklistData['brand'] ?? '';
+      final series = checklistData['series'] ?? '';
+      final prepDate = checklistData['prep_date'] ?? '';
+      final preppedByName = checklistData['prepped_by_name'] ?? '';
+      final preppedByEmail = checklistData['prepped_by_email'] ?? '';
+      final notes = checklistData['notes'] ?? '';
+
+      await _sb.from('lift_service').insert({
+        'timestamp': DateTime.now().toIso8601String(),
+        'lift_id': liftId,
+        'serial_number': serialNumber,
+        'service_date': prepDate,
+        'service_type': 'Prep',
+        'description': 'Prep checklist completed for $brand $series',
+        'invoice_number': '',
+        'technician_name': preppedByName,
+        'job_ref': '',
+        'customer_name': '',
+        'notes': notes,
+        'entered_by_email': preppedByEmail,
+        'entered_by_name': preppedByName,
+      });
+    }
   }
 
   return checklistId;

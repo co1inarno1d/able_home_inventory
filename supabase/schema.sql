@@ -225,3 +225,27 @@ create policy "allow_all" on inventory_changes    for all using (true) with chec
 create policy "allow_all" on pickup_list          for all using (true) with check (true);
 create policy "allow_all" on annuals              for all using (true) with check (true);
 create policy "allow_all" on annuals_history      for all using (true) with check (true);
+
+-- ---------------------------------------------------------------
+-- STORAGE BUCKET POLICIES (for lift photos)
+-- ---------------------------------------------------------------
+-- Create bucket (if not exists, run this in Supabase Storage UI or via SQL)
+insert into storage.buckets (id, name, public)
+values ('lift-photos', 'lift-photos', true)
+on conflict (id) do nothing;
+
+-- Allow anonymous users to upload, view, and delete photos
+create policy "allow_anon_upload"
+  on storage.objects for insert
+  to anon
+  with check (bucket_id = 'lift-photos');
+
+create policy "allow_anon_select"
+  on storage.objects for select
+  to anon
+  using (bucket_id = 'lift-photos');
+
+create policy "allow_anon_delete"
+  on storage.objects for delete
+  to anon
+  using (bucket_id = 'lift-photos');
