@@ -25,6 +25,8 @@ import 'main.dart'
         LiftServiceRecord,
         PrepChecklist,
         RampItem,
+        RemovalJobRecord,
+        ServiceJobRecord,
         StairliftItem,
         normalizeDrivePhotoUrl;
 
@@ -830,6 +832,197 @@ Future<List<Map<String, dynamic>>> sbFetchAnnualHistory({
       .order('timestamp', ascending: true);
 
   return (raw as List).map((r) => r as Map<String, dynamic>).toList();
+}
+
+// ---------------------------------------------------------------------------
+// SERVICE JOBS
+// ---------------------------------------------------------------------------
+
+Future<List<ServiceJobRecord>> sbFetchServiceJobs() async {
+  final raw = await _sb
+      .from('service_jobs')
+      .select()
+      .order('created_at', ascending: false);
+
+  return (raw as List)
+      .map((r) => ServiceJobRecord.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+Future<void> sbUpsertServiceJob({
+  required String userEmail,
+  required String userName,
+  String? jobId,
+  required String jobType,
+  required String customerName,
+  required String address,
+  required String phone,
+  required String liftType,
+  required String dateRequested,
+  String scheduledDate = '',
+  required String notes,
+  String liftId = '',
+  String serialNumber = '',
+}) async {
+  final resolvedId = (jobId != null && jobId.isNotEmpty)
+      ? jobId
+      : 'job_${DateTime.now().millisecondsSinceEpoch}';
+
+  final data = <String, dynamic>{
+    'job_id': resolvedId,
+    'job_type': jobType,
+    'customer_name': customerName,
+    'address': address,
+    'phone': phone,
+    'lift_type': liftType,
+    'date_requested': dateRequested,
+    'scheduled_date': scheduledDate,
+    'notes': notes,
+    'lift_id': liftId,
+    'serial_number': serialNumber,
+    'updated_at': DateTime.now().toIso8601String(),
+  };
+
+  final isNew = jobId == null || jobId.isEmpty;
+  if (isNew) {
+    data['status'] = 'Needs Scheduling';
+    data['created_at'] = DateTime.now().toIso8601String();
+    await _sb.from('service_jobs').insert(data);
+  } else {
+    await _sb.from('service_jobs').update(data).eq('job_id', jobId);
+  }
+}
+
+Future<void> sbUpdateServiceJobStatus({
+  required String jobId,
+  required String status,
+  String scheduledDate = '',
+}) async {
+  final data = <String, dynamic>{
+    'status': status,
+    'updated_at': DateTime.now().toIso8601String(),
+  };
+  if (scheduledDate.isNotEmpty) data['scheduled_date'] = scheduledDate;
+  await _sb.from('service_jobs').update(data).eq('job_id', jobId);
+}
+
+Future<void> sbDeleteServiceJob({required String jobId}) async {
+  await _sb.from('service_jobs').delete().eq('job_id', jobId);
+}
+
+// ---------------------------------------------------------------------------
+// REMOVAL JOBS
+// ---------------------------------------------------------------------------
+
+Future<List<RemovalJobRecord>> sbFetchRemovalJobs() async {
+  final raw = await _sb
+      .from('removal_jobs')
+      .select()
+      .order('created_at', ascending: false);
+
+  return (raw as List)
+      .map((r) => RemovalJobRecord.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+Future<void> sbUpsertRemovalJob({
+  required String userEmail,
+  required String userName,
+  String? jobId,
+  required String customerName,
+  required String address,
+  required String phone,
+  required String liftType,
+  String scheduledDate = '',
+  required String notes,
+  String liftId = '',
+  String serialNumber = '',
+}) async {
+  final resolvedId = (jobId != null && jobId.isNotEmpty)
+      ? jobId
+      : 'removal_${DateTime.now().millisecondsSinceEpoch}';
+
+  final data = <String, dynamic>{
+    'job_id': resolvedId,
+    'customer_name': customerName,
+    'address': address,
+    'phone': phone,
+    'lift_type': liftType,
+    'scheduled_date': scheduledDate,
+    'notes': notes,
+    'lift_id': liftId,
+    'serial_number': serialNumber,
+    'updated_at': DateTime.now().toIso8601String(),
+  };
+
+  final isNew = jobId == null || jobId.isEmpty;
+  if (isNew) {
+    data['status'] = 'Needs Scheduling';
+    data['created_at'] = DateTime.now().toIso8601String();
+    await _sb.from('removal_jobs').insert(data);
+  } else {
+    await _sb.from('removal_jobs').update(data).eq('job_id', jobId);
+  }
+}
+
+Future<void> sbUpdateRemovalJobStatus({
+  required String jobId,
+  required String status,
+  String scheduledDate = '',
+}) async {
+  final data = <String, dynamic>{
+    'status': status,
+    'updated_at': DateTime.now().toIso8601String(),
+  };
+  if (scheduledDate.isNotEmpty) data['scheduled_date'] = scheduledDate;
+  await _sb.from('removal_jobs').update(data).eq('job_id', jobId);
+}
+
+Future<void> sbDeleteRemovalJob({required String jobId}) async {
+  await _sb.from('removal_jobs').delete().eq('job_id', jobId);
+}
+
+// ---------------------------------------------------------------------------
+// LIFT STATUS (targeted update — for one-tap status change in Jobs CRM)
+// ---------------------------------------------------------------------------
+
+Future<void> sbMarkLiftStatus({
+  required String liftId,
+  required String newStatus,
+  required String userEmail,
+  required String userName,
+  String note = '',
+}) async {
+  final raw = await _sb
+      .from('lifts')
+      .select()
+      .eq('lift_id', liftId)
+      .maybeSingle();
+  if (raw == null) return;
+
+  final prev = LiftRecord.fromJson(raw as Map<String, dynamic>);
+
+  await _sb.from('lifts').update({
+    'status': newStatus,
+    'updated_at': DateTime.now().toIso8601String(),
+  }).eq('lift_id', liftId);
+
+  await _sb.from('lift_history').insert({
+    'timestamp': DateTime.now().toIso8601String(),
+    'lift_id': liftId,
+    'serial_number': prev.serialNumber,
+    'event_type': 'Status Change',
+    'from_status': prev.status,
+    'to_status': newStatus,
+    'from_location': prev.currentLocation,
+    'to_location': prev.currentLocation,
+    'from_customer': prev.currentJob,
+    'to_customer': prev.currentJob,
+    'job_ref': prev.currentJob,
+    'note': note,
+    'user_email': userEmail,
+    'user_name': userName,
+  });
 }
 
 // ---------------------------------------------------------------------------

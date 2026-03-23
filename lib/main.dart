@@ -1253,6 +1253,104 @@ class AnnualRecord {
 }
 
 // =======================
+// SERVICE JOB MODEL
+// =======================
+
+class ServiceJobRecord {
+  final String jobId;
+  final String jobType;
+  final String status;
+  final String customerName;
+  final String address;
+  final String phone;
+  final String liftType;
+  final String liftId;
+  final String serialNumber;
+  final String dateRequested;
+  final String scheduledDate;
+  final String notes;
+
+  ServiceJobRecord({
+    required this.jobId,
+    required this.jobType,
+    required this.status,
+    required this.customerName,
+    required this.address,
+    required this.phone,
+    required this.liftType,
+    this.liftId = '',
+    this.serialNumber = '',
+    required this.dateRequested,
+    required this.scheduledDate,
+    required this.notes,
+  });
+
+  factory ServiceJobRecord.fromJson(Map<String, dynamic> json) {
+    String s(dynamic v) => v?.toString() ?? '';
+    return ServiceJobRecord(
+      jobId: s(json['job_id']),
+      jobType: s(json['job_type']),
+      status: s(json['status']),
+      customerName: s(json['customer_name']),
+      address: s(json['address']),
+      phone: s(json['phone']),
+      liftType: s(json['lift_type']),
+      liftId: s(json['lift_id']),
+      serialNumber: s(json['serial_number']),
+      dateRequested: s(json['date_requested']),
+      scheduledDate: s(json['scheduled_date']),
+      notes: s(json['notes']),
+    );
+  }
+}
+
+// =======================
+// REMOVAL JOB MODEL
+// =======================
+
+class RemovalJobRecord {
+  final String jobId;
+  final String status;
+  final String customerName;
+  final String address;
+  final String phone;
+  final String liftType;
+  final String liftId;
+  final String serialNumber;
+  final String scheduledDate;
+  final String notes;
+
+  RemovalJobRecord({
+    required this.jobId,
+    required this.status,
+    required this.customerName,
+    required this.address,
+    required this.phone,
+    required this.liftType,
+    this.liftId = '',
+    this.serialNumber = '',
+    required this.scheduledDate,
+    required this.notes,
+  });
+
+  factory RemovalJobRecord.fromJson(Map<String, dynamic> json) {
+    String s(dynamic v) => v?.toString() ?? '';
+    return RemovalJobRecord(
+      jobId: s(json['job_id']),
+      status: s(json['status']),
+      customerName: s(json['customer_name']),
+      address: s(json['address']),
+      phone: s(json['phone']),
+      liftType: s(json['lift_type']),
+      liftId: s(json['lift_id']),
+      serialNumber: s(json['serial_number']),
+      scheduledDate: s(json['scheduled_date']),
+      notes: s(json['notes']),
+    );
+  }
+}
+
+// =======================
 // ANNUALS SCREEN
 // =======================
 
@@ -2644,6 +2742,1505 @@ class _PickupListScreenState extends State<PickupListScreen> {
   }
 }
 
+// =======================
+// JOBS SCREEN (CRM)
+// =======================
+
+class JobsScreen extends StatefulWidget {
+  const JobsScreen({super.key});
+
+  @override
+  State<JobsScreen> createState() => _JobsScreenState();
+}
+
+class _JobsScreenState extends State<JobsScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+
+  List<LiftRecord> _lifts = [];
+  List<RemovalJobRecord> _removalJobs = [];
+  List<ServiceJobRecord> _serviceJobs = [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 3, vsync: this);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final results = await Future.wait([
+        sbFetchLifts(),
+        sbFetchRemovalJobs(),
+        sbFetchServiceJobs(),
+      ]);
+      if (mounted) {
+        setState(() {
+          _lifts = results[0] as List<LiftRecord>;
+          _removalJobs = results[1] as List<RemovalJobRecord>;
+          _serviceJobs = results[2] as List<ServiceJobRecord>;
+          _loading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) setState(() { _loading = false; _error = e.toString(); });
+    }
+  }
+
+  Future<Map<String, String>> _loadUser() async {
+    final prefs = await SharedPreferences.getInstance();
+    return {
+      'name': prefs.getString('user_name') ?? '',
+      'email': prefs.getString('user_email') ?? '',
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Jobs'),
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+        actions: [
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+        ],
+        bottom: TabBar(
+          controller: _tabController,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white70,
+          indicatorColor: Colors.white,
+          tabs: const [
+            Tab(text: 'Installs'),
+            Tab(text: 'Removals'),
+            Tab(text: 'Service'),
+          ],
+        ),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(child: Text('Error: $_error'))
+              : TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _InstallsTab(
+                      lifts: _lifts,
+                      loadUser: _loadUser,
+                      onChanged: _load,
+                    ),
+                    _RemovalsTab(
+                      removalJobs: _removalJobs,
+                      loadUser: _loadUser,
+                      onChanged: _load,
+                    ),
+                    _ServiceTab(
+                      serviceJobs: _serviceJobs,
+                      loadUser: _loadUser,
+                      onChanged: _load,
+                    ),
+                  ],
+                ),
+      floatingActionButton: ListenableBuilder(
+        listenable: _tabController,
+        builder: (context, _) {
+          if (_tabController.index == 1) {
+            return FloatingActionButton.extended(
+              onPressed: () async {
+                final result = await Navigator.of(context).push<bool>(
+                  MaterialPageRoute(builder: (_) => const RemovalJobFormScreen()),
+                );
+                if (result == true) _load();
+              },
+              backgroundColor: kBrandGreen,
+              foregroundColor: Colors.white,
+              icon: const Icon(Icons.add),
+              label: const Text('Add Removal'),
+            );
+          }
+          if (_tabController.index == 2) {
+            return FloatingActionButton.extended(
+              onPressed: () async {
+                final result = await Navigator.of(context).push<bool>(
+                  MaterialPageRoute(builder: (_) => const ServiceJobFormScreen()),
+                );
+                if (result == true) _load();
+              },
+              backgroundColor: kBrandGreen,
+              foregroundColor: Colors.white,
+              icon: const Icon(Icons.add),
+              label: const Text('Add Service'),
+            );
+          }
+          return const SizedBox.shrink();
+        },
+      ),
+    );
+  }
+}
+
+// -----------------------
+// INSTALLS TAB
+// -----------------------
+
+class _InstallsTab extends StatelessWidget {
+  final List<LiftRecord> lifts;
+  final Future<Map<String, String>> Function() loadUser;
+  final VoidCallback onChanged;
+
+  const _InstallsTab({
+    required this.lifts,
+    required this.loadUser,
+    required this.onChanged,
+  });
+
+  Future<void> _markInstalled(BuildContext context, LiftRecord lift) async {
+    final user = await loadUser();
+    if (user['name']!.isEmpty) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please set your name in settings.')),
+      );
+      return;
+    }
+    try {
+      await sbMarkLiftStatus(
+        liftId: lift.liftId,
+        newStatus: 'Installed',
+        userEmail: user['email']!,
+        userName: user['name']!,
+      );
+      onChanged();
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final pending = lifts.where((l) => l.status == 'Assigned').toList();
+    final completed = lifts.where((l) => l.status == 'Installed').toList();
+
+    return RefreshIndicator(
+      onRefresh: () async => onChanged(),
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(8, 8, 8, 80),
+        children: [
+          _sectionHeader('Pending Installs (${pending.length})'),
+          if (pending.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('No lifts assigned for install.',
+                  style: TextStyle(color: Colors.black45)),
+            )
+          else
+            ...pending.map((l) => _installCard(context, l, pending: true)),
+          const SizedBox(height: 8),
+          _sectionHeader('Completed Installs (${completed.length})'),
+          if (completed.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('No installed lifts.',
+                  style: TextStyle(color: Colors.black45)),
+            )
+          else
+            ...completed.map((l) => _installCard(context, l, pending: false)),
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 8, 4, 4),
+      child: Text(title,
+          style: const TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 14,
+              color: Colors.black54)),
+    );
+  }
+
+  Widget _installCard(BuildContext context, LiftRecord lift, {required bool pending}) {
+    final liftLabel = [lift.brand, lift.series,
+      if (lift.orientation.isNotEmpty && lift.orientation != 'N/A') lift.orientation,
+    ].where((s) => s.isNotEmpty).join(' ');
+
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: InkWell(
+        onTap: () => Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: lift)),
+        ),
+        borderRadius: BorderRadius.circular(12),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(liftLabel.isNotEmpty ? liftLabel : 'Lift #${lift.liftId}',
+                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: (pending ? Colors.orange.shade700 : Colors.green.shade700)
+                          .withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                          color: (pending ? Colors.orange.shade700 : Colors.green.shade700)
+                              .withOpacity(0.4)),
+                    ),
+                    child: Text(
+                      pending ? 'Assigned' : 'Installed',
+                      style: TextStyle(
+                          color: pending ? Colors.orange.shade700 : Colors.green.shade700,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              if (lift.serialNumber.isNotEmpty)
+                Text('SN: ${lift.serialNumber}',
+                    style: const TextStyle(fontSize: 13, color: Colors.black54)),
+              if (lift.currentJob.isNotEmpty)
+                Row(children: [
+                  const Icon(Icons.person_outline, size: 14, color: Colors.black45),
+                  const SizedBox(width: 4),
+                  Expanded(child: Text(lift.currentJob,
+                      style: const TextStyle(fontSize: 13))),
+                ]),
+              if (lift.currentLocation.isNotEmpty)
+                Row(children: [
+                  const Icon(Icons.location_on_outlined, size: 14, color: Colors.black45),
+                  const SizedBox(width: 4),
+                  Expanded(child: Text(lift.currentLocation,
+                      style: const TextStyle(fontSize: 13))),
+                ]),
+              if (lift.installDate.isNotEmpty)
+                Text('Install date: ${normalizeDateDisplay(lift.installDate)}',
+                    style: const TextStyle(fontSize: 12, color: Colors.black45)),
+              if (pending) ...[
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: () => _markInstalled(context, lift),
+                      icon: const Icon(Icons.check_circle_outline, size: 16),
+                      label: const Text('Mark Installed'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: kBrandGreen,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        textStyle: const TextStyle(fontSize: 13),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// -----------------------
+// REMOVALS TAB
+// -----------------------
+
+class _RemovalsTab extends StatefulWidget {
+  final List<RemovalJobRecord> removalJobs;
+  final Future<Map<String, String>> Function() loadUser;
+  final VoidCallback onChanged;
+
+  const _RemovalsTab({
+    required this.removalJobs,
+    required this.loadUser,
+    required this.onChanged,
+  });
+
+  @override
+  State<_RemovalsTab> createState() => _RemovalsTabState();
+}
+
+class _RemovalsTabState extends State<_RemovalsTab> {
+  String? _statusFilter; // null=all
+
+  Future<void> _updateStatus(RemovalJobRecord job, String newStatus) async {
+    final user = await widget.loadUser();
+    if (user['name']!.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please set your name in settings.')),
+      );
+      return;
+    }
+    try {
+      await sbUpdateRemovalJobStatus(jobId: job.jobId, status: newStatus);
+      widget.onChanged();
+
+      // If completing and lift is linked, offer to log a service record
+      if (newStatus == 'Completed' && job.liftId.isNotEmpty && mounted) {
+        final logService = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Log service record?'),
+            content: Text(
+                'Would you like to log a removal service record for ${job.liftType.isNotEmpty ? job.liftType : "this lift"}?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Skip'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                child: const Text('Log Service'),
+              ),
+            ],
+          ),
+        );
+        if (logService == true && mounted) {
+          LiftRecord? linkedLift;
+          try {
+            final lifts = await sbFetchLifts();
+            linkedLift = lifts.where((l) => l.liftId == job.liftId).firstOrNull;
+          } catch (_) {}
+          if (linkedLift != null && mounted) {
+            await Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => LiftServiceFormScreen(
+                  lift: linkedLift!,
+                  prefillServiceType: 'Removal',
+                  prefillCustomerName: job.customerName,
+                  prefillDate: formatDate(DateTime.now()),
+                ),
+              ),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  Future<void> _delete(RemovalJobRecord job) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Delete removal job?',
+      content: 'Remove ${job.customerName.isNotEmpty ? job.customerName : "this job"}?',
+    );
+    if (!confirmed) return;
+    try {
+      await sbDeleteRemovalJob(jobId: job.jobId);
+      widget.onChanged();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = widget.removalJobs.where((j) {
+      if (_statusFilter == null) return true;
+      return j.status == _statusFilter;
+    }).toList();
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          child: Row(
+            children: [
+              _chip('All', null),
+              const SizedBox(width: 8),
+              _chip('Needs Scheduling', 'Needs Scheduling'),
+              const SizedBox(width: 8),
+              _chip('Scheduled', 'Scheduled'),
+              const SizedBox(width: 8),
+              _chip('Completed', 'Completed'),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          child: Row(children: [
+            Text('${filtered.length} job${filtered.length == 1 ? '' : 's'}',
+                style: const TextStyle(color: Colors.black54, fontSize: 13)),
+          ]),
+        ),
+        Expanded(
+          child: filtered.isEmpty
+              ? const Center(
+                  child: Text('No removal jobs.',
+                      style: TextStyle(color: Colors.black45)))
+              : RefreshIndicator(
+                  onRefresh: () async => widget.onChanged(),
+                  child: ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 80),
+                    itemCount: filtered.length,
+                    itemBuilder: (context, i) => _buildCard(filtered[i]),
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _chip(String label, String? value) {
+    final selected = _statusFilter == value;
+    return ChoiceChip(
+      label: Text(label, style: const TextStyle(fontSize: 12)),
+      selected: selected,
+      selectedColor: kBrandGreen.withOpacity(0.2),
+      onSelected: (_) => setState(() => _statusFilter = value),
+    );
+  }
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case 'Scheduled': return Colors.blue.shade700;
+      case 'Completed': return Colors.green.shade700;
+      default: return Colors.orange.shade700;
+    }
+  }
+
+  Widget _buildCard(RemovalJobRecord job) {
+    final sc = _statusColor(job.status);
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    job.customerName.isNotEmpty ? job.customerName : 'Unknown customer',
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: sc.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: sc.withOpacity(0.4)),
+                  ),
+                  child: Text(job.status,
+                      style: TextStyle(
+                          color: sc, fontSize: 12, fontWeight: FontWeight.w600)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            if (job.address.isNotEmpty)
+              Row(children: [
+                const Icon(Icons.location_on_outlined, size: 14, color: Colors.black45),
+                const SizedBox(width: 4),
+                Expanded(child: Text(job.address, style: const TextStyle(fontSize: 13))),
+              ]),
+            if (job.phone.isNotEmpty)
+              Row(children: [
+                const Icon(Icons.phone_outlined, size: 14, color: Colors.black45),
+                const SizedBox(width: 4),
+                Text(job.phone, style: const TextStyle(fontSize: 13)),
+              ]),
+            if (job.liftType.isNotEmpty)
+              Row(children: [
+                const Icon(Icons.stairs, size: 14, color: Colors.black45),
+                const SizedBox(width: 4),
+                Expanded(child: Text(job.liftType, style: const TextStyle(fontSize: 13))),
+                if (job.liftId.isNotEmpty)
+                  const Tooltip(
+                    message: 'Linked to lift in system',
+                    child: Icon(Icons.link, size: 14, color: kBrandGreen),
+                  ),
+              ]),
+            if (job.scheduledDate.isNotEmpty)
+              Text('Scheduled: ${normalizeDateDisplay(job.scheduledDate)}',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            if (job.notes.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(job.notes,
+                  style: const TextStyle(fontSize: 12, color: Colors.black45),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis),
+            ],
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                if (job.status == 'Needs Scheduling')
+                  TextButton.icon(
+                    onPressed: () => _updateStatus(job, 'Scheduled'),
+                    icon: const Icon(Icons.event_available_outlined, size: 16),
+                    label: const Text('Mark Scheduled'),
+                    style: TextButton.styleFrom(foregroundColor: kBrandGreen),
+                  ),
+                if (job.status == 'Scheduled')
+                  TextButton.icon(
+                    onPressed: () => _updateStatus(job, 'Completed'),
+                    icon: const Icon(Icons.check_circle_outline, size: 16),
+                    label: const Text('Mark Completed'),
+                    style: TextButton.styleFrom(foregroundColor: kBrandGreen),
+                  ),
+                TextButton.icon(
+                  onPressed: () async {
+                    final result = await Navigator.of(context).push<bool>(
+                      MaterialPageRoute(
+                          builder: (_) => RemovalJobFormScreen(existing: job)),
+                    );
+                    if (result == true) widget.onChanged();
+                  },
+                  icon: const Icon(Icons.edit_outlined, size: 16),
+                  label: const Text('Edit'),
+                  style: TextButton.styleFrom(foregroundColor: Colors.black54),
+                ),
+                TextButton.icon(
+                  onPressed: () => _delete(job),
+                  icon: const Icon(Icons.delete_outline, size: 16),
+                  label: const Text('Delete'),
+                  style: TextButton.styleFrom(foregroundColor: Colors.red),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// -----------------------
+// SERVICE TAB
+// -----------------------
+
+class _ServiceTab extends StatefulWidget {
+  final List<ServiceJobRecord> serviceJobs;
+  final Future<Map<String, String>> Function() loadUser;
+  final VoidCallback onChanged;
+
+  const _ServiceTab({
+    required this.serviceJobs,
+    required this.loadUser,
+    required this.onChanged,
+  });
+
+  @override
+  State<_ServiceTab> createState() => _ServiceTabState();
+}
+
+class _ServiceTabState extends State<_ServiceTab> {
+  String? _statusFilter;
+  String _search = '';
+
+  Future<void> _updateStatus(ServiceJobRecord job, String newStatus) async {
+    final user = await widget.loadUser();
+    if (user['name']!.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please set your name in settings.')),
+      );
+      return;
+    }
+    try {
+      await sbUpdateServiceJobStatus(jobId: job.jobId, status: newStatus);
+      widget.onChanged();
+
+      if (newStatus == 'Completed' && job.liftId.isNotEmpty && mounted) {
+        final logService = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Log service record?'),
+            content: Text(
+                'Would you like to log a service record for ${job.liftType.isNotEmpty ? job.liftType : "this lift"}?'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Skip'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                child: const Text('Log Service'),
+              ),
+            ],
+          ),
+        );
+        if (logService == true && mounted) {
+          LiftRecord? linkedLift;
+          try {
+            final lifts = await sbFetchLifts();
+            linkedLift = lifts.where((l) => l.liftId == job.liftId).firstOrNull;
+          } catch (_) {}
+          if (linkedLift != null && mounted) {
+            await Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => LiftServiceFormScreen(
+                  lift: linkedLift!,
+                  prefillServiceType: job.jobType,
+                  prefillCustomerName: job.customerName,
+                  prefillDate: formatDate(DateTime.now()),
+                ),
+              ),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  Future<void> _delete(ServiceJobRecord job) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Delete service job?',
+      content: 'Remove ${job.customerName.isNotEmpty ? job.customerName : "this job"}?',
+    );
+    if (!confirmed) return;
+    try {
+      await sbDeleteServiceJob(jobId: job.jobId);
+      widget.onChanged();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    var filtered = widget.serviceJobs.where((j) {
+      if (_statusFilter != null && j.status != _statusFilter) return false;
+      if (_search.isNotEmpty) {
+        final q = _search.toLowerCase();
+        if (!j.customerName.toLowerCase().contains(q) &&
+            !j.address.toLowerCase().contains(q) &&
+            !j.liftType.toLowerCase().contains(q)) return false;
+      }
+      return true;
+    }).toList();
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
+          child: TextField(
+            decoration: InputDecoration(
+              hintText: 'Search customers...',
+              prefixIcon: const Icon(Icons.search),
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+              contentPadding: const EdgeInsets.symmetric(vertical: 8),
+              isDense: true,
+              suffixIcon: _search.isNotEmpty
+                  ? IconButton(
+                      icon: const Icon(Icons.clear),
+                      onPressed: () => setState(() => _search = ''),
+                    )
+                  : null,
+            ),
+            onChanged: (v) => setState(() => _search = v.trim()),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Row(
+            children: [
+              _chip('All', null),
+              const SizedBox(width: 8),
+              _chip('Needs Scheduling', 'Needs Scheduling'),
+              const SizedBox(width: 8),
+              _chip('Scheduled', 'Scheduled'),
+              const SizedBox(width: 8),
+              _chip('Completed', 'Completed'),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          child: Row(children: [
+            Text('${filtered.length} job${filtered.length == 1 ? '' : 's'}',
+                style: const TextStyle(color: Colors.black54, fontSize: 13)),
+          ]),
+        ),
+        Expanded(
+          child: filtered.isEmpty
+              ? const Center(
+                  child: Text('No service jobs.',
+                      style: TextStyle(color: Colors.black45)))
+              : RefreshIndicator(
+                  onRefresh: () async => widget.onChanged(),
+                  child: ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 80),
+                    itemCount: filtered.length,
+                    itemBuilder: (context, i) => _buildCard(filtered[i]),
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _chip(String label, String? value) {
+    final selected = _statusFilter == value;
+    return ChoiceChip(
+      label: Text(label, style: const TextStyle(fontSize: 12)),
+      selected: selected,
+      selectedColor: kBrandGreen.withOpacity(0.2),
+      onSelected: (_) => setState(() => _statusFilter = value),
+    );
+  }
+
+  Color _statusColor(String status) {
+    switch (status) {
+      case 'Scheduled': return Colors.blue.shade700;
+      case 'Completed': return Colors.green.shade700;
+      default: return Colors.orange.shade700;
+    }
+  }
+
+  Widget _buildCard(ServiceJobRecord job) {
+    final sc = _statusColor(job.status);
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    job.customerName.isNotEmpty ? job.customerName : 'Unknown customer',
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: kBrandGreen.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: kBrandGreen.withOpacity(0.3)),
+                  ),
+                  child: Text(job.jobType,
+                      style: TextStyle(
+                          color: kBrandGreen,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600)),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: sc.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: sc.withOpacity(0.4)),
+                  ),
+                  child: Text(job.status,
+                      style: TextStyle(
+                          color: sc, fontSize: 12, fontWeight: FontWeight.w600)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            if (job.address.isNotEmpty)
+              Row(children: [
+                const Icon(Icons.location_on_outlined, size: 14, color: Colors.black45),
+                const SizedBox(width: 4),
+                Expanded(child: Text(job.address, style: const TextStyle(fontSize: 13))),
+              ]),
+            if (job.phone.isNotEmpty)
+              Row(children: [
+                const Icon(Icons.phone_outlined, size: 14, color: Colors.black45),
+                const SizedBox(width: 4),
+                Text(job.phone, style: const TextStyle(fontSize: 13)),
+              ]),
+            if (job.liftType.isNotEmpty)
+              Row(children: [
+                const Icon(Icons.stairs, size: 14, color: Colors.black45),
+                const SizedBox(width: 4),
+                Expanded(child: Text(job.liftType, style: const TextStyle(fontSize: 13))),
+                if (job.liftId.isNotEmpty)
+                  const Tooltip(
+                    message: 'Linked to lift in system',
+                    child: Icon(Icons.link, size: 14, color: kBrandGreen),
+                  ),
+              ]),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                if (job.dateRequested.isNotEmpty)
+                  Text('Requested: ${normalizeDateDisplay(job.dateRequested)}',
+                      style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                if (job.dateRequested.isNotEmpty && job.scheduledDate.isNotEmpty)
+                  const Text('  ·  ', style: TextStyle(color: Colors.black38)),
+                if (job.scheduledDate.isNotEmpty)
+                  Text('Scheduled: ${normalizeDateDisplay(job.scheduledDate)}',
+                      style: const TextStyle(fontSize: 12, color: Colors.black54)),
+              ],
+            ),
+            if (job.notes.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(job.notes,
+                  style: const TextStyle(fontSize: 12, color: Colors.black45),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis),
+            ],
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                if (job.status == 'Needs Scheduling')
+                  TextButton.icon(
+                    onPressed: () => _updateStatus(job, 'Scheduled'),
+                    icon: const Icon(Icons.event_available_outlined, size: 16),
+                    label: const Text('Mark Scheduled'),
+                    style: TextButton.styleFrom(foregroundColor: kBrandGreen),
+                  ),
+                if (job.status == 'Scheduled')
+                  TextButton.icon(
+                    onPressed: () => _updateStatus(job, 'Completed'),
+                    icon: const Icon(Icons.check_circle_outline, size: 16),
+                    label: const Text('Mark Completed'),
+                    style: TextButton.styleFrom(foregroundColor: kBrandGreen),
+                  ),
+                TextButton.icon(
+                  onPressed: () async {
+                    final result = await Navigator.of(context).push<bool>(
+                      MaterialPageRoute(
+                          builder: (_) => ServiceJobFormScreen(existing: job)),
+                    );
+                    if (result == true) widget.onChanged();
+                  },
+                  icon: const Icon(Icons.edit_outlined, size: 16),
+                  label: const Text('Edit'),
+                  style: TextButton.styleFrom(foregroundColor: Colors.black54),
+                ),
+                TextButton.icon(
+                  onPressed: () => _delete(job),
+                  icon: const Icon(Icons.delete_outline, size: 16),
+                  label: const Text('Delete'),
+                  style: TextButton.styleFrom(foregroundColor: Colors.red),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// =======================
+// REMOVAL JOB FORM SCREEN
+// =======================
+
+class RemovalJobFormScreen extends StatefulWidget {
+  final RemovalJobRecord? existing;
+  const RemovalJobFormScreen({super.key, this.existing});
+
+  @override
+  State<RemovalJobFormScreen> createState() => _RemovalJobFormScreenState();
+}
+
+class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
+  final _formKey = GlobalKey<FormState>();
+  bool _saving = false;
+
+  late final TextEditingController _nameController;
+  late final TextEditingController _addressController;
+  late final TextEditingController _phoneController;
+  late final TextEditingController _liftTypeController;
+  late final TextEditingController _scheduledDateController;
+  late final TextEditingController _notesController;
+
+  String? _linkedLiftId;
+  String? _linkedSerialNumber;
+  String? _linkedLiftLabel;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existing;
+    _nameController = TextEditingController(text: e?.customerName ?? '');
+    _addressController = TextEditingController(text: e?.address ?? '');
+    _phoneController = TextEditingController(text: e?.phone ?? '');
+    _liftTypeController = TextEditingController(text: e?.liftType ?? '');
+    _scheduledDateController = TextEditingController(
+        text: e != null ? normalizeDateDisplay(e.scheduledDate) : '');
+    _notesController = TextEditingController(text: e?.notes ?? '');
+    if (e != null && e.liftId.isNotEmpty) {
+      _linkedLiftId = e.liftId;
+      _linkedSerialNumber = e.serialNumber;
+      _linkedLiftLabel = e.liftType.isNotEmpty ? e.liftType : 'SN: ${e.serialNumber}';
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _addressController.dispose();
+    _phoneController.dispose();
+    _liftTypeController.dispose();
+    _scheduledDateController.dispose();
+    _notesController.dispose();
+    super.dispose();
+  }
+
+  void _linkLift(LiftRecord lift) {
+    final label = [lift.brand, lift.series,
+      if (lift.orientation.isNotEmpty && lift.orientation != 'N/A') lift.orientation,
+    ].where((s) => s.isNotEmpty).join(' ') +
+        (lift.serialNumber.isNotEmpty ? ' — SN: ${lift.serialNumber}' : '');
+    setState(() {
+      _linkedLiftId = lift.liftId;
+      _linkedSerialNumber = lift.serialNumber;
+      _linkedLiftLabel = label;
+      _liftTypeController.text = label;
+    });
+  }
+
+  void _unlinkLift() {
+    setState(() {
+      _linkedLiftId = null;
+      _linkedSerialNumber = null;
+      _linkedLiftLabel = null;
+      _liftTypeController.clear();
+    });
+  }
+
+  Future<void> _openLiftPicker() async {
+    final result = await showDialog(
+      context: context,
+      builder: (_) => const _LiftPickerDialog(),
+    );
+    if (result is LiftRecord) {
+      _linkLift(result);
+    } else if (result is _AddNewLiftSentinel) {
+      if (!mounted) return;
+      final saved = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(builder: (_) => const LiftFormScreen()),
+      );
+      if (saved == true) {
+        try {
+          final lifts = await sbFetchLifts();
+          if (lifts.isNotEmpty) _linkLift(lifts.last);
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<void> _pickDate(TextEditingController controller) async {
+    final now = DateTime.now();
+    DateTime initial = now;
+    if (controller.text.isNotEmpty) {
+      try {
+        final parts = controller.text.split('/');
+        if (parts.length == 3) {
+          initial = DateTime(int.parse(parts[2]), int.parse(parts[0]), int.parse(parts[1]));
+        }
+      } catch (_) {}
+    }
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked != null) controller.text = formatDate(picked);
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() => _saving = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await sbUpsertRemovalJob(
+        userEmail: prefs.getString('user_email') ?? '',
+        userName: prefs.getString('user_name') ?? '',
+        jobId: widget.existing?.jobId,
+        customerName: _nameController.text.trim(),
+        address: _addressController.text.trim(),
+        phone: _phoneController.text.trim(),
+        liftType: _liftTypeController.text.trim(),
+        scheduledDate: _scheduledDateController.text.trim(),
+        notes: _notesController.text.trim(),
+        liftId: _linkedLiftId ?? '',
+        serialNumber: _linkedSerialNumber ?? '',
+      );
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isEditing = widget.existing != null;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isEditing ? 'Edit Removal Job' : 'Add Removal Job'),
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+      ),
+      body: Form(
+        key: _formKey,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              TextFormField(
+                controller: _nameController,
+                decoration: const InputDecoration(
+                    labelText: 'Customer name *', border: OutlineInputBorder()),
+                validator: (v) =>
+                    v == null || v.trim().isEmpty ? 'Required' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _addressController,
+                decoration: const InputDecoration(
+                    labelText: 'Address', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _phoneController,
+                decoration: const InputDecoration(
+                    labelText: 'Phone', border: OutlineInputBorder()),
+                keyboardType: TextInputType.phone,
+              ),
+              const SizedBox(height: 12),
+              if (_linkedLiftLabel != null) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: kBrandGreen),
+                    borderRadius: BorderRadius.circular(8),
+                    color: kBrandGreen.withOpacity(0.05),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.stairs, color: kBrandGreen, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(_linkedLiftLabel!,
+                            style: const TextStyle(fontWeight: FontWeight.w500)),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        tooltip: 'Unlink lift',
+                        onPressed: _unlinkLift,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else ...[
+                OutlinedButton.icon(
+                  onPressed: _openLiftPicker,
+                  icon: const Icon(Icons.link),
+                  label: const Text('Link a lift from system'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 48),
+                    foregroundColor: kBrandGreen,
+                    side: const BorderSide(color: kBrandGreen),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _liftTypeController,
+                  decoration: const InputDecoration(
+                      labelText: 'Or type lift description manually',
+                      border: OutlineInputBorder()),
+                ),
+              ],
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _scheduledDateController,
+                readOnly: true,
+                decoration: const InputDecoration(
+                  labelText: 'Scheduled date (optional)',
+                  border: OutlineInputBorder(),
+                  suffixIcon: Icon(Icons.calendar_today_outlined),
+                ),
+                onTap: () => _pickDate(_scheduledDateController),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _notesController,
+                decoration: const InputDecoration(
+                    labelText: 'Notes', border: OutlineInputBorder()),
+                maxLines: 3,
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _saving ? null : _save,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: kBrandGreen,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: _saving
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : Text(isEditing ? 'Save changes' : 'Add removal job'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// =======================
+// SERVICE JOB FORM SCREEN
+// =======================
+
+class ServiceJobFormScreen extends StatefulWidget {
+  final ServiceJobRecord? existing;
+  const ServiceJobFormScreen({super.key, this.existing});
+
+  @override
+  State<ServiceJobFormScreen> createState() => _ServiceJobFormScreenState();
+}
+
+class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
+  final _formKey = GlobalKey<FormState>();
+  bool _saving = false;
+  String _jobType = 'Service';
+
+  late final TextEditingController _nameController;
+  late final TextEditingController _addressController;
+  late final TextEditingController _phoneController;
+  late final TextEditingController _liftTypeController;
+  late final TextEditingController _dateRequestedController;
+  late final TextEditingController _scheduledDateController;
+  late final TextEditingController _notesController;
+
+  String? _linkedLiftId;
+  String? _linkedSerialNumber;
+  String? _linkedLiftLabel;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existing;
+    _jobType = e?.jobType ?? 'Service';
+    _nameController = TextEditingController(text: e?.customerName ?? '');
+    _addressController = TextEditingController(text: e?.address ?? '');
+    _phoneController = TextEditingController(text: e?.phone ?? '');
+    _liftTypeController = TextEditingController(text: e?.liftType ?? '');
+    _dateRequestedController = TextEditingController(
+        text: e != null ? normalizeDateDisplay(e.dateRequested) : '');
+    _scheduledDateController = TextEditingController(
+        text: e != null ? normalizeDateDisplay(e.scheduledDate) : '');
+    _notesController = TextEditingController(text: e?.notes ?? '');
+    if (e != null && e.liftId.isNotEmpty) {
+      _linkedLiftId = e.liftId;
+      _linkedSerialNumber = e.serialNumber;
+      _linkedLiftLabel = e.liftType.isNotEmpty ? e.liftType : 'SN: ${e.serialNumber}';
+    }
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _addressController.dispose();
+    _phoneController.dispose();
+    _liftTypeController.dispose();
+    _dateRequestedController.dispose();
+    _scheduledDateController.dispose();
+    _notesController.dispose();
+    super.dispose();
+  }
+
+  void _linkLift(LiftRecord lift) {
+    final label = [lift.brand, lift.series,
+      if (lift.orientation.isNotEmpty && lift.orientation != 'N/A') lift.orientation,
+    ].where((s) => s.isNotEmpty).join(' ') +
+        (lift.serialNumber.isNotEmpty ? ' — SN: ${lift.serialNumber}' : '');
+    setState(() {
+      _linkedLiftId = lift.liftId;
+      _linkedSerialNumber = lift.serialNumber;
+      _linkedLiftLabel = label;
+      _liftTypeController.text = label;
+    });
+  }
+
+  void _unlinkLift() {
+    setState(() {
+      _linkedLiftId = null;
+      _linkedSerialNumber = null;
+      _linkedLiftLabel = null;
+      _liftTypeController.clear();
+    });
+  }
+
+  Future<void> _openLiftPicker() async {
+    final result = await showDialog(
+      context: context,
+      builder: (_) => const _LiftPickerDialog(),
+    );
+    if (result is LiftRecord) {
+      _linkLift(result);
+    } else if (result is _AddNewLiftSentinel) {
+      if (!mounted) return;
+      final saved = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(builder: (_) => const LiftFormScreen()),
+      );
+      if (saved == true) {
+        try {
+          final lifts = await sbFetchLifts();
+          if (lifts.isNotEmpty) _linkLift(lifts.last);
+        } catch (_) {}
+      }
+    }
+  }
+
+  Future<void> _pickDate(TextEditingController controller) async {
+    final now = DateTime.now();
+    DateTime initial = now;
+    if (controller.text.isNotEmpty) {
+      try {
+        final parts = controller.text.split('/');
+        if (parts.length == 3) {
+          initial = DateTime(int.parse(parts[2]), int.parse(parts[0]), int.parse(parts[1]));
+        }
+      } catch (_) {}
+    }
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (picked != null) controller.text = formatDate(picked);
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() => _saving = true);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await sbUpsertServiceJob(
+        userEmail: prefs.getString('user_email') ?? '',
+        userName: prefs.getString('user_name') ?? '',
+        jobId: widget.existing?.jobId,
+        jobType: _jobType,
+        customerName: _nameController.text.trim(),
+        address: _addressController.text.trim(),
+        phone: _phoneController.text.trim(),
+        liftType: _liftTypeController.text.trim(),
+        dateRequested: _dateRequestedController.text.trim(),
+        scheduledDate: _scheduledDateController.text.trim(),
+        notes: _notesController.text.trim(),
+        liftId: _linkedLiftId ?? '',
+        serialNumber: _linkedSerialNumber ?? '',
+      );
+      if (mounted) Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isEditing = widget.existing != null;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isEditing ? 'Edit Service Job' : 'Add Service Job'),
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+      ),
+      body: Form(
+        key: _formKey,
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              DropdownButtonFormField<String>(
+                value: _jobType,
+                decoration: const InputDecoration(
+                    labelText: 'Service type', border: OutlineInputBorder()),
+                items: const [
+                  DropdownMenuItem(value: 'Service', child: Text('Service')),
+                  DropdownMenuItem(
+                      value: 'Annual Service', child: Text('Annual Service')),
+                ],
+                onChanged: (v) => setState(() => _jobType = v ?? 'Service'),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _nameController,
+                decoration: const InputDecoration(
+                    labelText: 'Customer name *', border: OutlineInputBorder()),
+                validator: (v) =>
+                    v == null || v.trim().isEmpty ? 'Required' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _addressController,
+                decoration: const InputDecoration(
+                    labelText: 'Address', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _phoneController,
+                decoration: const InputDecoration(
+                    labelText: 'Phone', border: OutlineInputBorder()),
+                keyboardType: TextInputType.phone,
+              ),
+              const SizedBox(height: 12),
+              if (_linkedLiftLabel != null) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: kBrandGreen),
+                    borderRadius: BorderRadius.circular(8),
+                    color: kBrandGreen.withOpacity(0.05),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.stairs, color: kBrandGreen, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(_linkedLiftLabel!,
+                            style: const TextStyle(fontWeight: FontWeight.w500)),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        tooltip: 'Unlink lift',
+                        onPressed: _unlinkLift,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ],
+                  ),
+                ),
+              ] else ...[
+                OutlinedButton.icon(
+                  onPressed: _openLiftPicker,
+                  icon: const Icon(Icons.link),
+                  label: const Text('Link a lift from system'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(double.infinity, 48),
+                    foregroundColor: kBrandGreen,
+                    side: const BorderSide(color: kBrandGreen),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextFormField(
+                  controller: _liftTypeController,
+                  decoration: const InputDecoration(
+                      labelText: 'Or type lift description manually',
+                      border: OutlineInputBorder()),
+                ),
+              ],
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _dateRequestedController,
+                readOnly: true,
+                decoration: const InputDecoration(
+                  labelText: 'Date requested',
+                  border: OutlineInputBorder(),
+                  suffixIcon: Icon(Icons.calendar_today_outlined),
+                ),
+                onTap: () => _pickDate(_dateRequestedController),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _scheduledDateController,
+                readOnly: true,
+                decoration: const InputDecoration(
+                  labelText: 'Scheduled date (optional)',
+                  border: OutlineInputBorder(),
+                  suffixIcon: Icon(Icons.calendar_today_outlined),
+                ),
+                onTap: () => _pickDate(_scheduledDateController),
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _notesController,
+                decoration: const InputDecoration(
+                    labelText: 'Notes', border: OutlineInputBorder()),
+                maxLines: 3,
+              ),
+              const SizedBox(height: 24),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _saving ? null : _save,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: kBrandGreen,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  child: _saving
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : Text(isEditing ? 'Save changes' : 'Add service job'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _HomeShellState extends State<HomeShell> {
   int _selectedIndex = 0;
 
@@ -2654,7 +4251,7 @@ class _HomeShellState extends State<HomeShell> {
     const RampsScreen(),
     const PrepScreen(),
     // const PickupListScreen(), // Hidden for now - not currently in use
-    const AnnualsScreen(),
+    const JobsScreen(),
   ];
 
   void _onItemTapped(int index) {
@@ -2694,8 +4291,8 @@ class _HomeShellState extends State<HomeShell> {
           //   label: 'Pickup',
           // ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.calendar_month),
-            label: 'Annuals',
+            icon: Icon(Icons.work_outline),
+            label: 'Jobs',
           ),
         ],
       ),

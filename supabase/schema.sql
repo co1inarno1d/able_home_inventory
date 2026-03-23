@@ -200,6 +200,69 @@ create table if not exists annuals_history (
 create index if not exists annuals_history_annual_id_idx on annuals_history(annual_id);
 
 -- ---------------------------------------------------------------
+-- SERVICE JOBS (general service scheduling — replaces/extends annuals)
+-- ---------------------------------------------------------------
+create table if not exists service_jobs (
+  id              bigserial primary key,
+  job_id          text unique not null,
+  job_type        text not null default 'Service',  -- 'Annual Service', 'Service'
+  status          text not null default 'Needs Scheduling',
+                                      -- 'Needs Scheduling', 'Scheduled', 'Completed'
+  customer_name   text,
+  address         text,
+  phone           text,
+  lift_type       text,
+  lift_id         text default '',
+  serial_number   text default '',
+  date_requested  text,
+  scheduled_date  text,
+  notes           text,
+  created_at      timestamptz default now(),
+  updated_at      timestamptz default now()
+);
+
+create index if not exists service_jobs_status_idx on service_jobs(status);
+create index if not exists service_jobs_lift_id_idx on service_jobs(lift_id);
+
+-- ---------------------------------------------------------------
+-- REMOVAL JOBS (CRM tracking for lift removals)
+-- ---------------------------------------------------------------
+create table if not exists removal_jobs (
+  id              bigserial primary key,
+  job_id          text unique not null,
+  status          text not null default 'Needs Scheduling',
+                                      -- 'Needs Scheduling', 'Scheduled', 'Completed'
+  customer_name   text,
+  address         text,
+  phone           text,
+  lift_type       text,
+  lift_id         text default '',
+  serial_number   text default '',
+  scheduled_date  text,
+  notes           text,
+  created_at      timestamptz default now(),
+  updated_at      timestamptz default now()
+);
+
+create index if not exists removal_jobs_status_idx on removal_jobs(status);
+create index if not exists removal_jobs_lift_id_idx on removal_jobs(lift_id);
+
+-- ---------------------------------------------------------------
+-- MIGRATION: copy annuals → service_jobs
+-- Run once after creating service_jobs table
+-- ---------------------------------------------------------------
+-- insert into service_jobs (job_id, job_type, status, customer_name, address, phone,
+--   lift_type, lift_id, serial_number, date_requested, notes, created_at)
+-- select
+--   annual_id,
+--   'Annual Service',
+--   case when scheduled then 'Scheduled' else 'Needs Scheduling' end,
+--   customer_name, address, phone, lift_type,
+--   coalesce(lift_id, ''), coalesce(serial_number, ''),
+--   date_requested, notes, created_at
+-- from annuals;
+
+-- ---------------------------------------------------------------
 -- ROW LEVEL SECURITY
 -- Allow full access via anon key (internal tool, no auth needed)
 -- ---------------------------------------------------------------
@@ -213,6 +276,8 @@ alter table inventory_changes    enable row level security;
 alter table pickup_list          enable row level security;
 alter table annuals              enable row level security;
 alter table annuals_history      enable row level security;
+alter table service_jobs         enable row level security;
+alter table removal_jobs         enable row level security;
 
 -- Allow all operations for anonymous users (internal tool)
 create policy "allow_all" on lifts                for all using (true) with check (true);
@@ -225,6 +290,8 @@ create policy "allow_all" on inventory_changes    for all using (true) with chec
 create policy "allow_all" on pickup_list          for all using (true) with check (true);
 create policy "allow_all" on annuals              for all using (true) with check (true);
 create policy "allow_all" on annuals_history      for all using (true) with check (true);
+create policy "allow_all" on service_jobs         for all using (true) with check (true);
+create policy "allow_all" on removal_jobs         for all using (true) with check (true);
 
 -- ---------------------------------------------------------------
 -- STORAGE BUCKET POLICIES (for lift photos)
