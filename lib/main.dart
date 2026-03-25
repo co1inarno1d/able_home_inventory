@@ -4250,10 +4250,10 @@ class _HomeShellState extends State<HomeShell> {
   final List<Widget> _pages = [
     const LiftsScreen(),
     const RampsScreen(),
+    const ScheduleScreen(),
+    const JobsScreen(),
     const PrepScreen(),
     // const PickupListScreen(), // Hidden for now - not currently in use
-    const JobsScreen(),
-    const ScheduleScreen(),
   ];
 
   void _onItemTapped(int index) {
@@ -4285,6 +4285,14 @@ class _HomeShellState extends State<HomeShell> {
             label: 'Ramps',
           ),
           BottomNavigationBarItem(
+            icon: Icon(Icons.calendar_today),
+            label: 'Schedule',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.work_outline),
+            label: 'Jobs',
+          ),
+          BottomNavigationBarItem(
             icon: Icon(Icons.build),
             label: 'Prep',
           ),
@@ -4292,14 +4300,6 @@ class _HomeShellState extends State<HomeShell> {
           //   icon: Icon(Icons.check_box),
           //   label: 'Pickup',
           // ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.work_outline),
-            label: 'Jobs',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.calendar_today),
-            label: 'Schedule',
-          ),
         ],
       ),
     );
@@ -8915,9 +8915,28 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     _load();
   }
 
-  Color _parseColor(String hex) {
+  // Fixed color per user — each person always gets the same color.
+  // Falls back to their TSheets event color if not in the map.
+  static const _userColorMap = {
+    '3486046': Color(0xFF2F7D46), // Colin — brand green
+    '2276241': Color(0xFFEF6C00), // Christopher — orange
+    '3270476': Color(0xFF1565C0), // Connor — blue
+    '3429974': Color(0xFF6A1B9A), // Harrington — purple
+    '2276243': Color(0xFF00897B), // James — teal
+    '3401118': Color(0xFF558B2F), // Liam — olive green
+    '1264929': Color(0xFF888888), // Matthew — grey
+    '2683584': Color(0xFFE53935), // Ryan — red
+    '3056876': Color(0xFF0277BD), // Stephen — dark blue
+  };
+
+  Color _userColor(QbtScheduleEvent event) {
+    if (event.assignedUserIds.isNotEmpty) {
+      final id = event.assignedUserIds.first;
+      if (_userColorMap.containsKey(id)) return _userColorMap[id]!;
+    }
+    // Fallback: parse the event's own color field
     try {
-      final h = hex.replaceAll('#', '');
+      final h = event.color.replaceAll('#', '');
       return Color(int.parse('FF$h', radix: 16));
     } catch (_) {
       return kBrandGreen;
@@ -9031,16 +9050,18 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           return _ScheduleEventCard(
             event: event,
             assignedNames: _assignedNames(event),
-            color: _parseColor(event.color),
+            color: _userColor(event),
             formatTime: _formatTime,
             onTap: () async {
               final changed = await Navigator.push<bool>(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => ScheduleEventFormScreen(
+                  builder: (_) => ScheduleEventDetailScreen(
+                    event: event,
                     users: _users,
-                    existingEvent: event,
-                    initialDate: _selectedDay,
+                    assignedNames: _assignedNames(event),
+                    color: _userColor(event),
+                    formatTime: _formatTime,
                   ),
                 ),
               );
@@ -9183,109 +9204,328 @@ class _ScheduleEventCard extends StatelessWidget {
             ? formatTime(startLocal)
             : '${formatTime(startLocal)} – ${formatTime(endLocal)}';
 
+    // Determine if the background color is dark enough to need white text
+    final luminance = color.computeLuminance();
+    final textColor = luminance > 0.35 ? Colors.black87 : Colors.white;
+    final subtleText = luminance > 0.35
+        ? Colors.black.withAlpha(140)
+        : Colors.white.withAlpha(200);
+
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       clipBehavior: Clip.antiAlias,
+      elevation: 2,
       child: InkWell(
         onTap: onTap,
-        child: IntrinsicHeight(
+        child: Container(
+          color: color,
+          padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // Color bar on left — matches TSheets event color
-              Container(width: 6, color: color),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Time + title row
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // Time block
-                          SizedBox(
-                            width: 90,
-                            child: Text(
-                              timeLabel,
-                              style: TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: color,
-                              ),
-                            ),
-                          ),
-                          Expanded(
-                            child: Text(
-                              event.title.isNotEmpty ? event.title : '(No title)',
-                              style: const TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                          const Icon(Icons.chevron_right, color: Colors.grey, size: 18),
-                        ],
+              // Left: time + assigned name stacked
+              SizedBox(
+                width: 82,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      timeLabel,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: textColor,
                       ),
-                      if (assignedNames.isNotEmpty) ...[
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            const SizedBox(width: 90),
-                            const Icon(Icons.person_outline, size: 13, color: Colors.grey),
-                            const SizedBox(width: 3),
-                            Expanded(
-                              child: Text(
-                                assignedNames,
-                                style: const TextStyle(fontSize: 12, color: Colors.grey),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                      if (event.location.isNotEmpty) ...[
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            const SizedBox(width: 90),
-                            const Icon(Icons.location_on_outlined, size: 13, color: Colors.grey),
-                            const SizedBox(width: 3),
-                            Expanded(
-                              child: Text(
-                                event.location,
-                                style: const TextStyle(fontSize: 12, color: Colors.grey),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                      if (event.notes.isNotEmpty) ...[
-                        const SizedBox(height: 6),
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const SizedBox(width: 90),
-                            Expanded(
-                              child: Text(
-                                event.notes,
-                                style: const TextStyle(fontSize: 13, color: Colors.black87),
-                                maxLines: 3,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
+                    ),
+                    if (assignedNames.isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        assignedNames,
+                        style: TextStyle(fontSize: 11, color: subtleText),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
                     ],
-                  ),
+                  ],
                 ),
               ),
+              const SizedBox(width: 10),
+              // Divider line
+              Container(
+                width: 1,
+                height: 36,
+                color: textColor.withAlpha(60),
+              ),
+              const SizedBox(width: 10),
+              // Right: title + location
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      event.title.isNotEmpty ? event.title : '(No title)',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                        color: textColor,
+                      ),
+                    ),
+                    if (event.location.isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          Icon(Icons.location_on_outlined,
+                              size: 12, color: subtleText),
+                          const SizedBox(width: 3),
+                          Expanded(
+                            child: Text(
+                              event.location,
+                              style: TextStyle(fontSize: 12, color: subtleText),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right, color: subtleText, size: 18),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Schedule event detail screen
+// ---------------------------------------------------------------------------
+
+class ScheduleEventDetailScreen extends StatelessWidget {
+  final QbtScheduleEvent event;
+  final Map<String, QbtUser> users;
+  final String assignedNames;
+  final Color color;
+  final String Function(DateTime) formatTime;
+
+  const ScheduleEventDetailScreen({
+    super.key,
+    required this.event,
+    required this.users,
+    required this.assignedNames,
+    required this.color,
+    required this.formatTime,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final startLocal = event.start.toLocal();
+    final endLocal = event.end.toLocal();
+    final sameTime = startLocal == endLocal;
+
+    final timeLabel = event.allDay
+        ? 'All day'
+        : sameTime
+            ? formatTime(startLocal)
+            : '${formatTime(startLocal)} – ${formatTime(endLocal)}';
+
+    final luminance = color.computeLuminance();
+    final headerText = luminance > 0.35 ? Colors.black87 : Colors.white;
+
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: color,
+        foregroundColor: headerText,
+        title: Text(
+          event.title.isNotEmpty ? event.title : '(No title)',
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.edit, color: headerText),
+            tooltip: 'Edit',
+            onPressed: () async {
+              final changed = await Navigator.push<bool>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ScheduleEventFormScreen(
+                    users: users,
+                    existingEvent: event,
+                    initialDate: startLocal,
+                  ),
+                ),
+              );
+              if (changed == true && context.mounted) {
+                Navigator.pop(context, true);
+              }
+            },
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          // Color accent bar at top
+          Container(
+            height: 5,
+            decoration: BoxDecoration(
+              color: color,
+              borderRadius: BorderRadius.circular(3),
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // Time
+          _DetailRow(
+            icon: Icons.access_time,
+            label: 'Time',
+            value: timeLabel,
+            color: color,
+          ),
+
+          // Assigned to
+          if (assignedNames.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _DetailRow(
+              icon: Icons.person_outline,
+              label: 'Assigned to',
+              value: assignedNames,
+              color: color,
+            ),
+          ],
+
+          // Location
+          if (event.location.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            _DetailRow(
+              icon: Icons.location_on_outlined,
+              label: 'Location',
+              value: event.location,
+              color: color,
+            ),
+          ],
+
+          // Notes
+          if (event.notes.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.notes, color: color, size: 22),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Notes',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.grey[600],
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: color.withAlpha(18),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: color.withAlpha(50)),
+                        ),
+                        child: Text(
+                          event.notes,
+                          style: const TextStyle(
+                            fontSize: 15,
+                            height: 1.5,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
+
+          const SizedBox(height: 32),
+
+          // Edit button
+          ElevatedButton.icon(
+            onPressed: () async {
+              final changed = await Navigator.push<bool>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ScheduleEventFormScreen(
+                    users: users,
+                    existingEvent: event,
+                    initialDate: startLocal,
+                  ),
+                ),
+              );
+              if (changed == true && context.mounted) {
+                Navigator.pop(context, true);
+              }
+            },
+            icon: const Icon(Icons.edit),
+            label: const Text('Edit Event'),
+            style: ElevatedButton.styleFrom(
+              minimumSize: const Size.fromHeight(48),
+              backgroundColor: color,
+              foregroundColor: headerText,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DetailRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  const _DetailRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, color: color, size: 22),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[600],
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(value, style: const TextStyle(fontSize: 15)),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -9324,17 +9564,6 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
   bool _saving = false;
   bool _deleting = false;
 
-  // Color options mirroring TSheets palette
-  static const _colors = [
-    '#2196F3', // blue (default)
-    '#EF6C00', // orange
-    '#2F7D46', // green (brand)
-    '#888888', // grey
-    '#E53935', // red
-    '#8E24AA', // purple
-    '#00897B', // teal
-  ];
-  late String _selectedColor;
 
   bool get _isEditing => widget.existingEvent != null;
 
@@ -9345,7 +9574,6 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
     _titleCtrl = TextEditingController(text: e?.title ?? '');
     _notesCtrl = TextEditingController(text: e?.notes ?? '');
     _locationCtrl = TextEditingController(text: e?.location ?? '');
-    _selectedColor = e?.color ?? '#2196F3';
     _allDay = e?.allDay ?? false;
     _selectedUserIds = List.from(e?.assignedUserIds ?? []);
 
@@ -9432,7 +9660,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
       end: end,
       allDay: _allDay,
       location: _locationCtrl.text.trim(),
-      color: _selectedColor,
+      color: widget.existingEvent?.color ?? '#2196F3',
       assignedUserIds: _selectedUserIds,
       active: true,
     );
@@ -9635,42 +9863,6 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
                 );
               }).toList(),
             ),
-            const SizedBox(height: 16),
-
-            // Color
-            const Text('Color',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: _colors.map((hex) {
-                Color c;
-                try {
-                  c = Color(int.parse('FF${hex.replaceAll('#', '')}', radix: 16));
-                } catch (_) {
-                  c = kBrandGreen;
-                }
-                final selected = _selectedColor == hex;
-                return GestureDetector(
-                  onTap: () => setState(() => _selectedColor = hex),
-                  child: Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      color: c,
-                      shape: BoxShape.circle,
-                      border: selected
-                          ? Border.all(color: Colors.black, width: 2.5)
-                          : null,
-                    ),
-                    child: selected
-                        ? const Icon(Icons.check, color: Colors.white, size: 18)
-                        : null,
-                  ),
-                );
-              }).toList(),
-            ),
-
             const SizedBox(height: 24),
 
             // Save button
