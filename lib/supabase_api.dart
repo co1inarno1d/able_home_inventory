@@ -1026,6 +1026,38 @@ Future<void> sbMarkLiftStatus({
 }
 
 // ---------------------------------------------------------------------------
+// SCHEDULE EVENT COMPLETION (stored in Supabase, not in TSheets)
+// ---------------------------------------------------------------------------
+// Uses the app_config table with key pattern "completed_event_<event_id>"
+// so we never need a separate table.
+
+Future<Set<String>> sbFetchCompletedEventIds() async {
+  final rows = await _sb
+      .from('app_config')
+      .select('key')
+      .like('key', 'completed_event_%');
+  return {
+    for (final r in rows as List)
+      (r['key'] as String).replaceFirst('completed_event_', '')
+  };
+}
+
+Future<void> sbSetEventCompleted({
+  required String eventId,
+  required bool completed,
+}) async {
+  final key = 'completed_event_$eventId';
+  if (completed) {
+    await _sb.from('app_config').upsert(
+      {'key': key, 'value': 'true', 'updated_at': DateTime.now().toIso8601String()},
+      onConflict: 'key',
+    );
+  } else {
+    await _sb.from('app_config').delete().eq('key', key);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // PREP CHECKLIST TEMPLATES (hardcoded — rarely changes)
 // ---------------------------------------------------------------------------
 

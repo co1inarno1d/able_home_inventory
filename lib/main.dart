@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:url_launcher/url_launcher.dart';
+
 import 'prep_checklist_form.dart';
 import 'qbt_api.dart';
 import 'supabase_api.dart';
@@ -8915,28 +8917,9 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     _load();
   }
 
-  // Fixed color per user — each person always gets the same color.
-  // Falls back to their TSheets event color if not in the map.
-  static const _userColorMap = {
-    '3486046': Color(0xFF2F7D46), // Colin — brand green
-    '2276241': Color(0xFFEF6C00), // Christopher — orange
-    '3270476': Color(0xFF1565C0), // Connor — blue
-    '3429974': Color(0xFF6A1B9A), // Harrington — purple
-    '2276243': Color(0xFF00897B), // James — teal
-    '3401118': Color(0xFF558B2F), // Liam — olive green
-    '1264929': Color(0xFF888888), // Matthew — grey
-    '2683584': Color(0xFFE53935), // Ryan — red
-    '3056876': Color(0xFF0277BD), // Stephen — dark blue
-  };
-
-  Color _userColor(QbtScheduleEvent event) {
-    if (event.assignedUserIds.isNotEmpty) {
-      final id = event.assignedUserIds.first;
-      if (_userColorMap.containsKey(id)) return _userColorMap[id]!;
-    }
-    // Fallback: parse the event's own color field
+  Color _parseColor(String hex) {
     try {
-      final h = event.color.replaceAll('#', '');
+      final h = hex.replaceAll('#', '');
       return Color(int.parse('FF$h', radix: 16));
     } catch (_) {
       return kBrandGreen;
@@ -9050,7 +9033,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           return _ScheduleEventCard(
             event: event,
             assignedNames: _assignedNames(event),
-            color: _userColor(event),
+            color: _parseColor(event.color),
             formatTime: _formatTime,
             onTap: () async {
               final changed = await Navigator.push<bool>(
@@ -9060,7 +9043,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                     event: event,
                     users: _users,
                     assignedNames: _assignedNames(event),
-                    color: _userColor(event),
+                    color: _parseColor(event.color),
                     formatTime: _formatTime,
                   ),
                 ),
@@ -9307,7 +9290,7 @@ class _ScheduleEventCard extends StatelessWidget {
 // Schedule event detail screen
 // ---------------------------------------------------------------------------
 
-class ScheduleEventDetailScreen extends StatelessWidget {
+class ScheduleEventDetailScreen extends StatefulWidget {
   final QbtScheduleEvent event;
   final Map<String, QbtUser> users;
   final String assignedNames;
@@ -9324,17 +9307,72 @@ class ScheduleEventDetailScreen extends StatelessWidget {
   });
 
   @override
+  State<ScheduleEventDetailScreen> createState() =>
+      _ScheduleEventDetailScreenState();
+}
+
+class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
+  bool _completed = false;
+  bool _loadingComplete = true;
+  bool _savingComplete = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCompleted();
+  }
+
+  Future<void> _loadCompleted() async {
+    final ids = await sbFetchCompletedEventIds();
+    if (!mounted) return;
+    setState(() {
+      _completed = ids.contains(widget.event.id);
+      _loadingComplete = false;
+    });
+  }
+
+  Future<void> _toggleCompleted() async {
+    final next = !_completed;
+    setState(() {
+      _completed = next;
+      _savingComplete = true;
+    });
+    try {
+      await sbSetEventCompleted(eventId: widget.event.id, completed: next);
+    } catch (_) {
+      // Revert on failure
+      if (mounted) setState(() => _completed = !next);
+    } finally {
+      if (mounted) setState(() => _savingComplete = false);
+    }
+  }
+
+  Future<void> _openMaps(String location) async {
+    final encoded = Uri.encodeComponent(location);
+    // Try Apple Maps first on iOS, fall back to Google Maps URL
+    final appleUri = Uri.parse('maps://?q=$encoded');
+    final googleUri =
+        Uri.parse('https://www.google.com/maps/search/?api=1&query=$encoded');
+    if (await canLaunchUrl(appleUri)) {
+      await launchUrl(appleUri);
+    } else {
+      await launchUrl(googleUri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final startLocal = event.start.toLocal();
-    final endLocal = event.end.toLocal();
+    final startLocal = widget.event.start.toLocal();
+    final endLocal = widget.event.end.toLocal();
     final sameTime = startLocal == endLocal;
 
-    final timeLabel = event.allDay
+    final timeLabel = widget.event.allDay
         ? 'All day'
         : sameTime
-            ? formatTime(startLocal)
-            : '${formatTime(startLocal)} – ${formatTime(endLocal)}';
+            ? widget.formatTime(startLocal)
+            : '${widget.formatTime(startLocal)} – ${widget.formatTime(endLocal)}';
 
+    final color = widget.color;
     final luminance = color.computeLuminance();
     final headerText = luminance > 0.35 ? Colors.black87 : Colors.white;
 
@@ -9343,7 +9381,7 @@ class ScheduleEventDetailScreen extends StatelessWidget {
         backgroundColor: color,
         foregroundColor: headerText,
         title: Text(
-          event.title.isNotEmpty ? event.title : '(No title)',
+          widget.event.title.isNotEmpty ? widget.event.title : '(No title)',
           style: const TextStyle(fontWeight: FontWeight.bold),
         ),
         actions: [
@@ -9355,8 +9393,8 @@ class ScheduleEventDetailScreen extends StatelessWidget {
                 context,
                 MaterialPageRoute(
                   builder: (_) => ScheduleEventFormScreen(
-                    users: users,
-                    existingEvent: event,
+                    users: widget.users,
+                    existingEvent: widget.event,
                     initialDate: startLocal,
                   ),
                 ),
@@ -9381,6 +9419,52 @@ class ScheduleEventDetailScreen extends StatelessWidget {
           ),
           const SizedBox(height: 20),
 
+          // Complete toggle
+          Container(
+            decoration: BoxDecoration(
+              color: _completed
+                  ? Colors.green.withAlpha(20)
+                  : Colors.grey.withAlpha(15),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: _completed
+                    ? Colors.green.withAlpha(80)
+                    : Colors.grey.withAlpha(60),
+              ),
+            ),
+            child: SwitchListTile(
+              contentPadding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+              title: Text(
+                _completed ? 'Job Complete' : 'Mark as Complete',
+                style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  color: _completed ? Colors.green[700] : Colors.black87,
+                ),
+              ),
+              secondary: _loadingComplete
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : Icon(
+                      _completed
+                          ? Icons.check_circle
+                          : Icons.radio_button_unchecked,
+                      color:
+                          _completed ? Colors.green[700] : Colors.grey,
+                    ),
+              value: _completed,
+              activeThumbColor: Colors.green[700],
+              onChanged: _loadingComplete || _savingComplete
+                  ? null
+                  : (_) => _toggleCompleted(),
+            ),
+          ),
+
+          const SizedBox(height: 20),
+
           // Time
           _DetailRow(
             icon: Icons.access_time,
@@ -9390,29 +9474,66 @@ class ScheduleEventDetailScreen extends StatelessWidget {
           ),
 
           // Assigned to
-          if (assignedNames.isNotEmpty) ...[
+          if (widget.assignedNames.isNotEmpty) ...[
             const SizedBox(height: 16),
             _DetailRow(
               icon: Icons.person_outline,
               label: 'Assigned to',
-              value: assignedNames,
+              value: widget.assignedNames,
               color: color,
             ),
           ],
 
-          // Location
-          if (event.location.isNotEmpty) ...[
+          // Location — tappable to open maps
+          if (widget.event.location.isNotEmpty) ...[
             const SizedBox(height: 16),
-            _DetailRow(
-              icon: Icons.location_on_outlined,
-              label: 'Location',
-              value: event.location,
-              color: color,
+            InkWell(
+              onTap: () => _openMaps(widget.event.location),
+              borderRadius: BorderRadius.circular(8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.location_on, color: color, size: 22),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Location',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                widget.event.location,
+                                style: TextStyle(
+                                  fontSize: 15,
+                                  color: color,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ),
+                            Icon(Icons.open_in_new,
+                                size: 14, color: color),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
             ),
           ],
 
           // Notes
-          if (event.notes.isNotEmpty) ...[
+          if (widget.event.notes.isNotEmpty) ...[
             const SizedBox(height: 16),
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -9441,11 +9562,8 @@ class ScheduleEventDetailScreen extends StatelessWidget {
                           border: Border.all(color: color.withAlpha(50)),
                         ),
                         child: Text(
-                          event.notes,
-                          style: const TextStyle(
-                            fontSize: 15,
-                            height: 1.5,
-                          ),
+                          widget.event.notes,
+                          style: const TextStyle(fontSize: 15, height: 1.5),
                         ),
                       ),
                     ],
@@ -9464,8 +9582,8 @@ class ScheduleEventDetailScreen extends StatelessWidget {
                 context,
                 MaterialPageRoute(
                   builder: (_) => ScheduleEventFormScreen(
-                    users: users,
-                    existingEvent: event,
+                    users: widget.users,
+                    existingEvent: widget.event,
                     initialDate: startLocal,
                   ),
                 ),
@@ -9561,9 +9679,20 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
   late TimeOfDay _endTime;
   bool _allDay = false;
   List<String> _selectedUserIds = [];
+  late String _selectedColor;
   bool _saving = false;
   bool _deleting = false;
 
+  static const _colorOptions = [
+    '#2196F3', // blue
+    '#EF6C00', // orange
+    '#2F7D46', // green
+    '#888888', // grey
+    '#E53935', // red
+    '#8E24AA', // purple
+    '#00897B', // teal
+    '#F9A825', // yellow
+  ];
 
   bool get _isEditing => widget.existingEvent != null;
 
@@ -9575,6 +9704,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
     _notesCtrl = TextEditingController(text: e?.notes ?? '');
     _locationCtrl = TextEditingController(text: e?.location ?? '');
     _allDay = e?.allDay ?? false;
+    _selectedColor = e?.color ?? '#2196F3';
     _selectedUserIds = List.from(e?.assignedUserIds ?? []);
 
     if (e != null) {
@@ -9660,7 +9790,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
       end: end,
       allDay: _allDay,
       location: _locationCtrl.text.trim(),
-      color: widget.existingEvent?.color ?? '#2196F3',
+      color: _selectedColor,
       assignedUserIds: _selectedUserIds,
       active: true,
     );
@@ -9863,6 +9993,37 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
                 );
               }).toList(),
             ),
+            const SizedBox(height: 16),
+
+            // Color
+            const Text('Color',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 10,
+              children: _colorOptions.map((hex) {
+                final c = Color(int.parse('FF${hex.replaceAll('#', '')}', radix: 16));
+                final selected = _selectedColor == hex;
+                return GestureDetector(
+                  onTap: () => setState(() => _selectedColor = hex),
+                  child: Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: c,
+                      shape: BoxShape.circle,
+                      border: selected
+                          ? Border.all(color: Colors.black, width: 2.5)
+                          : null,
+                    ),
+                    child: selected
+                        ? const Icon(Icons.check, color: Colors.white, size: 18)
+                        : null,
+                  ),
+                );
+              }).toList(),
+            ),
+
             const SizedBox(height: 24),
 
             // Save button
