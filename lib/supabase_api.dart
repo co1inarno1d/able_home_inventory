@@ -1058,6 +1058,55 @@ Future<void> sbSetEventCompleted({
 }
 
 // ---------------------------------------------------------------------------
+// SCHEDULE EVENT METADATA (job type + linked lift, stored in app_config)
+// ---------------------------------------------------------------------------
+
+Future<Map<String, String?>> sbGetEventMeta(String eventId) async {
+  final rows = await _sb
+      .from('app_config')
+      .select('key, value')
+      .or('key.eq.event_job_type_$eventId,key.eq.event_lift_$eventId');
+  final map = {for (final r in rows as List) r['key'] as String: r['value'] as String?};
+  return {
+    'job_type': map['event_job_type_$eventId'],
+    'lift_id': map['event_lift_$eventId'],
+  };
+}
+
+Future<void> sbSetEventJobType(String eventId, String? jobType) async {
+  final key = 'event_job_type_$eventId';
+  if (jobType == null || jobType.isEmpty) {
+    await _sb.from('app_config').delete().eq('key', key);
+  } else {
+    await _sb.from('app_config').upsert(
+      {'key': key, 'value': jobType, 'updated_at': DateTime.now().toIso8601String()},
+      onConflict: 'key',
+    );
+  }
+}
+
+Future<void> sbSetEventLiftId(String eventId, String? liftId) async {
+  final key = 'event_lift_$eventId';
+  if (liftId == null || liftId.isEmpty) {
+    await _sb.from('app_config').delete().eq('key', key);
+  } else {
+    await _sb.from('app_config').upsert(
+      {'key': key, 'value': liftId, 'updated_at': DateTime.now().toIso8601String()},
+      onConflict: 'key',
+    );
+  }
+}
+
+Future<LiftRecord?> sbFetchLiftById(String liftId) async {
+  final raw = await _sb
+      .from('lifts')
+      .select()
+      .eq('lift_id', liftId)
+      .maybeSingle();
+  return raw == null ? null : LiftRecord.fromJson(raw);
+}
+
+// ---------------------------------------------------------------------------
 // PREP CHECKLIST TEMPLATES (hardcoded — rarely changes)
 // ---------------------------------------------------------------------------
 

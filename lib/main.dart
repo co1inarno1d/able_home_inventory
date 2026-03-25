@@ -7791,6 +7791,7 @@ class LiftServiceFormScreen extends StatefulWidget {
   final String? prefillServiceType;
   final String? prefillCustomerName;
   final String? prefillDate;
+  final bool offerInvoicePhoto;
 
   const LiftServiceFormScreen({
     super.key,
@@ -7798,6 +7799,7 @@ class LiftServiceFormScreen extends StatefulWidget {
     this.prefillServiceType,
     this.prefillCustomerName,
     this.prefillDate,
+    this.offerInvoicePhoto = false,
   });
 
   @override
@@ -7815,6 +7817,8 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
   final _customerController = TextEditingController();
   final _notesController = TextEditingController();
 
+  XFile? _invoicePhoto;
+  bool _uploadingPhoto = false;
   bool _saving = false;
 
   String get _serialForApi => widget.lift.serialNumber;
@@ -7882,6 +7886,56 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
       );
 
       if (!mounted) return;
+
+      // If there's already a photo selected, upload it now
+      if (_invoicePhoto != null) {
+        setState(() => _uploadingPhoto = true);
+        try {
+          await sbUploadLiftPhoto(
+            liftId: widget.lift.liftId,
+            imageFile: _invoicePhoto!,
+          );
+        } catch (_) {
+          // Non-fatal — record was already saved
+        } finally {
+          if (mounted) setState(() => _uploadingPhoto = false);
+        }
+      } else if (widget.offerInvoicePhoto) {
+        // Offer to attach photo now
+        final attach = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Attach invoice photo?'),
+            content: const Text('Would you like to attach a photo of the invoice to this lift record?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                child: const Text('Attach Photo'),
+              ),
+            ],
+          ),
+        );
+        if (attach == true && mounted) {
+          final picked = await ImagePicker().pickImage(source: ImageSource.camera);
+          if (picked != null && mounted) {
+            setState(() => _uploadingPhoto = true);
+            try {
+              await sbUploadLiftPhoto(
+                liftId: widget.lift.liftId,
+                imageFile: picked,
+              );
+            } catch (_) {
+              // Non-fatal
+            } finally {
+              if (mounted) setState(() => _uploadingPhoto = false);
+            }
+          }
+        }
+      }
+
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Service record added')),
       );
@@ -7891,9 +7945,7 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error saving service record: $e')),
       );
-      setState(() {
-        _saving = false;
-      });
+      setState(() => _saving = false);
     }
   }
 
@@ -7987,17 +8039,34 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
               ),
               maxLines: 3,
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: 12),
+            // Invoice photo picker
+            if (widget.offerInvoicePhoto || _invoicePhoto != null) ...[
+              OutlinedButton.icon(
+                onPressed: () async {
+                  final picked = await ImagePicker().pickImage(source: ImageSource.camera);
+                  if (picked != null) setState(() => _invoicePhoto = picked);
+                },
+                icon: const Icon(Icons.camera_alt_outlined),
+                label: Text(_invoicePhoto != null ? 'Invoice photo selected ✓' : 'Attach invoice photo'),
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size.fromHeight(44),
+                  foregroundColor: _invoicePhoto != null ? kBrandGreen : null,
+                  side: _invoicePhoto != null ? const BorderSide(color: kBrandGreen) : null,
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
             ElevatedButton.icon(
-              onPressed: _saving ? null : _save,
-              icon: _saving
+              onPressed: _saving || _uploadingPhoto ? null : _save,
+              icon: _saving || _uploadingPhoto
                   ? const SizedBox(
                       width: 16,
                       height: 16,
                       child: CircularProgressIndicator(strokeWidth: 2),
                     )
                   : const Icon(Icons.save),
-              label: Text(_saving ? 'Saving...' : 'Save Service Record'),
+              label: Text(_uploadingPhoto ? 'Uploading photo...' : _saving ? 'Saving...' : 'Save Service Record'),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size.fromHeight(48),
                 backgroundColor: kBrandGreen,
@@ -8922,6 +8991,24 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     _load();
   }
 
+  void _goToPrevDay() {
+    final prev = _selectedDay.subtract(const Duration(days: 1));
+    setState(() => _selectedDay = prev);
+    if (prev.isBefore(_weekStart)) {
+      setState(() => _weekStart = _mondayOf(prev));
+      _load();
+    }
+  }
+
+  void _goToNextDay() {
+    final next = _selectedDay.add(const Duration(days: 1));
+    setState(() => _selectedDay = next);
+    if (next.isAfter(_weekStart.add(const Duration(days: 6)))) {
+      setState(() => _weekStart = _mondayOf(next));
+      _load();
+    }
+  }
+
   void _goToToday() {
     final today = DateTime.now();
     setState(() {
@@ -8984,7 +9071,19 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             onNextWeek: _goToNextWeek,
           ),
           const Divider(height: 1),
-          Expanded(child: _buildBody()),
+          Expanded(
+            child: GestureDetector(
+              onHorizontalDragEnd: (d) {
+                final v = d.primaryVelocity ?? 0;
+                if (v < -300) {
+                  _goToNextDay();
+                } else if (v > 300) {
+                  _goToPrevDay();
+                }
+              },
+              child: _buildBody(),
+            ),
+          ),
         ],
       ),
       floatingActionButton: FloatingActionButton(
@@ -9108,76 +9207,86 @@ class _WeekStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final today = DateTime.now();
-    return Container(
-      color: Colors.white,
-      child: Row(
-        children: [
-          IconButton(
-            icon: const Icon(Icons.chevron_left),
-            onPressed: onPrevWeek,
-            tooltip: 'Previous week',
-          ),
-          Expanded(
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: List.generate(7, (i) {
-                final day = weekStart.add(Duration(days: i));
-                final isSelected = day.year == selectedDay.year &&
-                    day.month == selectedDay.month &&
-                    day.day == selectedDay.day;
-                final isToday = day.year == today.year &&
-                    day.month == today.month &&
-                    day.day == today.day;
-
-                return GestureDetector(
-                  onTap: () => onDaySelected(day),
-                  child: Container(
-                    width: 40,
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    decoration: BoxDecoration(
-                      color: isSelected ? kBrandGreen : Colors.transparent,
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _dayNames[i],
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: isSelected
-                                ? Colors.white
-                                : Colors.grey[600],
-                          ),
-                        ),
-                        const SizedBox(height: 2),
-                        Text(
-                          '${day.day}',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: isSelected || isToday
-                                ? FontWeight.bold
-                                : FontWeight.normal,
-                            color: isSelected
-                                ? Colors.white
-                                : isToday
-                                    ? kBrandGreen
-                                    : Colors.black87,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                );
-              }),
+    return GestureDetector(
+      onHorizontalDragEnd: (d) {
+        final v = d.primaryVelocity ?? 0;
+        if (v < -300) {
+          onNextWeek();
+        } else if (v > 300) {
+          onPrevWeek();
+        }
+      },
+      child: Container(
+        color: Colors.white,
+        child: Row(
+          children: [
+            IconButton(
+              icon: const Icon(Icons.chevron_left),
+              onPressed: onPrevWeek,
+              tooltip: 'Previous week',
             ),
-          ),
-          IconButton(
-            icon: const Icon(Icons.chevron_right),
-            onPressed: onNextWeek,
-            tooltip: 'Next week',
-          ),
-        ],
+            Expanded(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: List.generate(7, (i) {
+                  final day = weekStart.add(Duration(days: i));
+                  final isSelected = day.year == selectedDay.year &&
+                      day.month == selectedDay.month &&
+                      day.day == selectedDay.day;
+                  final isToday = day.year == today.year &&
+                      day.month == today.month &&
+                      day.day == today.day;
+
+                  return GestureDetector(
+                    onTap: () => onDaySelected(day),
+                    child: Container(
+                      width: 40,
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      decoration: BoxDecoration(
+                        color: isSelected ? kBrandGreen : Colors.transparent,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            _dayNames[i],
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: isSelected
+                                  ? Colors.white
+                                  : Colors.grey[600],
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            '${day.day}',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: isSelected || isToday
+                                  ? FontWeight.bold
+                                  : FontWeight.normal,
+                              color: isSelected
+                                  ? Colors.white
+                                  : isToday
+                                      ? kBrandGreen
+                                      : Colors.black87,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.chevron_right),
+              onPressed: onNextWeek,
+              tooltip: 'Next week',
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -9322,38 +9431,22 @@ class _ScheduleEventCard extends StatelessWidget {
                         ],
                       ),
                     ),
-                    Icon(Icons.chevron_right, color: subtleText, size: 18),
-                  ],
-                ),
-              ),
-
-              // Complete toggle bar at bottom
-              InkWell(
-                onTap: onToggleComplete,
-                child: Container(
-                  color: textColor.withAlpha(25),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                  child: Row(
-                    children: [
-                      Icon(
-                        completed
-                            ? Icons.check_circle
-                            : Icons.radio_button_unchecked,
-                        size: 16,
-                        color: completed ? textColor : subtleText,
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        completed ? 'Completed' : 'Mark complete',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
+                    // Complete toggle icon on the right
+                    GestureDetector(
+                      onTap: onToggleComplete,
+                      behavior: HitTestBehavior.opaque,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(8, 4, 4, 4),
+                        child: Icon(
+                          completed
+                              ? Icons.check_circle
+                              : Icons.radio_button_unchecked,
+                          size: 26,
                           color: completed ? textColor : subtleText,
                         ),
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -9394,10 +9487,16 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   bool _loadingComplete = true;
   bool _savingComplete = false;
 
+  String? _jobType;
+  LiftRecord? _linkedLift;
+  bool _loadingMeta = true;
+  bool _savingLift = false;
+
   @override
   void initState() {
     super.initState();
     _loadCompleted();
+    _loadMeta();
   }
 
   Future<void> _loadCompleted() async {
@@ -9409,6 +9508,42 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     });
   }
 
+  Future<void> _loadMeta() async {
+    final meta = await sbGetEventMeta(widget.event.id);
+    if (!mounted) return;
+    final liftId = meta['lift_id'];
+    LiftRecord? lift;
+    if (liftId != null && liftId.isNotEmpty) {
+      lift = await sbFetchLiftById(liftId);
+    }
+    if (!mounted) return;
+    setState(() {
+      _jobType = meta['job_type'];
+      _linkedLift = lift;
+      _loadingMeta = false;
+    });
+  }
+
+  Future<void> _linkLift(LiftRecord lift) async {
+    setState(() => _savingLift = true);
+    await sbSetEventLiftId(widget.event.id, lift.liftId);
+    if (!mounted) return;
+    setState(() {
+      _linkedLift = lift;
+      _savingLift = false;
+    });
+  }
+
+  Future<void> _unlinkLift() async {
+    setState(() => _savingLift = true);
+    await sbSetEventLiftId(widget.event.id, null);
+    if (!mounted) return;
+    setState(() {
+      _linkedLift = null;
+      _savingLift = false;
+    });
+  }
+
   Future<void> _toggleCompleted() async {
     final next = !_completed;
     setState(() {
@@ -9417,11 +9552,121 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     });
     try {
       await sbSetEventCompleted(eventId: widget.event.id, completed: next);
+      // Smart completion: trigger downstream actions when marking complete
+      if (next && _linkedLift != null && mounted) {
+        await _handleSmartCompletion();
+      }
     } catch (_) {
-      // Revert on failure
       if (mounted) setState(() => _completed = !next);
     } finally {
       if (mounted) setState(() => _savingComplete = false);
+    }
+  }
+
+  Future<void> _handleSmartCompletion() async {
+    final lift = _linkedLift!;
+    final prefs = await SharedPreferences.getInstance();
+    final userName = prefs.getString('user_name') ?? '';
+    final userEmail = prefs.getString('user_email') ?? '';
+
+    switch (_jobType) {
+      case 'Install':
+        if (lift.status == 'Assigned' && mounted) {
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text('Mark lift as Installed?'),
+              content: Text(
+                'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed status?',
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                  child: const Text('Mark Installed'),
+                ),
+              ],
+            ),
+          );
+          if (confirm == true && mounted) {
+            await sbMarkLiftStatus(
+              liftId: lift.liftId,
+              newStatus: 'Installed',
+              userEmail: userEmail,
+              userName: userName,
+              note: 'Marked installed via schedule event: ${widget.event.title}',
+            );
+            await _loadMeta(); // refresh lift status
+          }
+        }
+        break;
+
+      case 'Removal':
+        if (lift.status == 'Installed' && mounted) {
+          final confirm = await showDialog<bool>(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text('Mark lift as Removed?'),
+              content: Text(
+                'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed status?',
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                ElevatedButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                  child: const Text('Mark Removed'),
+                ),
+              ],
+            ),
+          );
+          if (confirm == true && mounted) {
+            await sbMarkLiftStatus(
+              liftId: lift.liftId,
+              newStatus: 'Removed',
+              userEmail: userEmail,
+              userName: userName,
+              note: 'Marked removed via schedule event: ${widget.event.title}',
+            );
+            await _loadMeta();
+          }
+        }
+        break;
+
+      case 'Service':
+      case 'Annual Service':
+        if (!mounted) return;
+        final serviceType = _jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
+        final confirm = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Log service record?'),
+            content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                child: const Text('Log Service'),
+              ),
+            ],
+          ),
+        );
+        if (confirm == true && mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => LiftServiceFormScreen(
+                lift: lift,
+                prefillServiceType: serviceType,
+                prefillCustomerName: widget.event.title,
+                prefillDate: formatDate(DateTime.now()),
+                offerInvoicePhoto: true,
+              ),
+            ),
+          );
+        }
+        break;
     }
   }
 
@@ -9539,6 +9784,120 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                   ? null
                   : (_) => _toggleCompleted(),
             ),
+          ),
+
+          const SizedBox(height: 20),
+
+          // Job type badge
+          if (_jobType != null && _jobType!.isNotEmpty) ...[
+            Row(
+              children: [
+                Icon(Icons.work_outline, size: 16, color: color),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: color.withAlpha(30),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: color.withAlpha(80)),
+                  ),
+                  child: Text(
+                    _jobType!,
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+          ],
+
+          // Linked lift section
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.grey.withAlpha(12),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.grey.withAlpha(40)),
+            ),
+            child: _loadingMeta
+                ? const Padding(
+                    padding: EdgeInsets.all(14),
+                    child: Row(children: [
+                      SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                      SizedBox(width: 10),
+                      Text('Loading...', style: TextStyle(color: Colors.black45)),
+                    ]),
+                  )
+                : _linkedLift != null
+                    ? ListTile(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                        leading: Icon(Icons.stairs, color: color),
+                        title: Text(
+                          '${_linkedLift!.brand} ${_linkedLift!.series}',
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (_linkedLift!.serialNumber.isNotEmpty)
+                              Text('SN: ${_linkedLift!.serialNumber}'),
+                            Text(
+                              _linkedLift!.status,
+                              style: TextStyle(
+                                color: _linkedLift!.status == 'Installed'
+                                    ? Colors.green[700]
+                                    : _linkedLift!.status == 'Assigned'
+                                        ? Colors.orange[700]
+                                        : Colors.black54,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                        trailing: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            IconButton(
+                              icon: const Icon(Icons.open_in_new, size: 18),
+                              tooltip: 'View lift',
+                              onPressed: () => Navigator.of(context).push(
+                                MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: _linkedLift!)),
+                              ),
+                            ),
+                            IconButton(
+                              icon: const Icon(Icons.link_off, size: 18, color: Colors.red),
+                              tooltip: 'Remove link',
+                              onPressed: _savingLift ? null : _unlinkLift,
+                            ),
+                          ],
+                        ),
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: _linkedLift!)),
+                        ),
+                      )
+                    : ListTile(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                        leading: Icon(Icons.link, color: Colors.grey[400]),
+                        title: Text(
+                          'Link a lift',
+                          style: TextStyle(color: Colors.grey[600]),
+                        ),
+                        subtitle: Text(
+                          'Connect this event to a stairlift',
+                          style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                        ),
+                        trailing: _savingLift
+                            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                            : Icon(Icons.chevron_right, color: Colors.grey[400]),
+                        onTap: _savingLift
+                            ? null
+                            : () async {
+                                final lift = await showDialog<LiftRecord>(
+                                  context: context,
+                                  builder: (_) => const _LiftPickerDialog(),
+                                );
+                                if (lift != null) await _linkLift(lift);
+                              },
+                      ),
           ),
 
           const SizedBox(height: 20),
@@ -9758,8 +10117,18 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
   bool _allDay = false;
   List<String> _selectedUserIds = [];
   late String _selectedColor;
+  String? _jobType;
   bool _saving = false;
   bool _deleting = false;
+
+  static const _jobTypeOptions = [
+    'Install',
+    'Removal',
+    'Service',
+    'Annual Service',
+    'Reminder',
+    'Other',
+  ];
 
   static const _colorOptions = [
     '#2196F3', // blue
@@ -9791,6 +10160,10 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
       _date = DateTime(startLocal.year, startLocal.month, startLocal.day);
       _startTime = TimeOfDay.fromDateTime(startLocal);
       _endTime = TimeOfDay.fromDateTime(endLocal);
+      // Load existing job type from Supabase metadata
+      sbGetEventMeta(e.id).then((meta) {
+        if (mounted) setState(() => _jobType = meta['job_type']);
+      });
     } else {
       _date = widget.initialDate;
       _startTime = const TimeOfDay(hour: 8, minute: 0);
@@ -9874,11 +10247,14 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
     );
 
     try {
+      QbtScheduleEvent saved;
       if (_isEditing) {
-        await qbtUpdateScheduleEvent(event);
+        saved = await qbtUpdateScheduleEvent(event);
       } else {
-        await qbtCreateScheduleEvent(event);
+        saved = await qbtCreateScheduleEvent(event);
       }
+      // Persist job type metadata (independent of QBT)
+      await sbSetEventJobType(saved.id, _jobType);
       if (!mounted) return;
       Navigator.pop(context, true);
     } catch (e) {
@@ -9971,6 +10347,22 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
               validator: (v) =>
                   (v == null || v.trim().isEmpty) ? 'Title is required' : null,
               textCapitalization: TextCapitalization.sentences,
+            ),
+            const SizedBox(height: 16),
+
+            // Job type
+            DropdownButtonFormField<String>(
+              initialValue: _jobType,
+              decoration: const InputDecoration(
+                labelText: 'Job Type',
+                border: OutlineInputBorder(),
+              ),
+              hint: const Text('Select job type (optional)'),
+              items: [
+                const DropdownMenuItem<String>(value: null, child: Text('— None —')),
+                ..._jobTypeOptions.map((t) => DropdownMenuItem(value: t, child: Text(t))),
+              ],
+              onChanged: (v) => setState(() => _jobType = v),
             ),
             const SizedBox(height: 16),
 
