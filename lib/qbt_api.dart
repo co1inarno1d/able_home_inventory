@@ -11,15 +11,15 @@ import 'package:http/http.dart' as http;
 /// Base URL:  https://rest.tsheets.com/api/v1
 /// Calendar:  Matthew (id 123571)
 
-const String _qbtToken =
-    'S.6__bc39aa448aae631d140c82d5a694c54b4fd94ebd';
-const String _qbtBase = 'https://rest.tsheets.com/api/v1';
+// All requests route through the Supabase edge function proxy so that
+// CORS headers are added — required for web/PWA (Safari home screen).
+const String _qbtBase =
+    'https://kaujczbhtajqfrjgbxft.supabase.co/functions/v1/tsheets-proxy';
 
 /// The single shared schedule calendar ID for Able Home.
 const String _calendarId = '123571';
 
 Map<String, String> get _headers => {
-      'Authorization': 'Bearer $_qbtToken',
       'Content-Type': 'application/json',
     };
 
