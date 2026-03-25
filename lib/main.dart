@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'prep_checklist_form.dart';
+import 'qbt_api.dart';
 import 'supabase_api.dart';
 
 /// =======================
@@ -4252,6 +4253,7 @@ class _HomeShellState extends State<HomeShell> {
     const PrepScreen(),
     // const PickupListScreen(), // Hidden for now - not currently in use
     const JobsScreen(),
+    const ScheduleScreen(),
   ];
 
   void _onItemTapped(int index) {
@@ -4293,6 +4295,10 @@ class _HomeShellState extends State<HomeShell> {
           BottomNavigationBarItem(
             icon: Icon(Icons.work_outline),
             label: 'Jobs',
+          ),
+          BottomNavigationBarItem(
+            icon: Icon(Icons.calendar_today),
+            label: 'Schedule',
           ),
         ],
       ),
@@ -8801,6 +8807,883 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                     )
                   : const Icon(Icons.save),
               label: Text(_saving ? 'Saving...' : 'Save Lift'),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size.fromHeight(48),
+                backgroundColor: kBrandGreen,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// =======================
+/// SCHEDULE SCREEN
+/// =======================
+
+class ScheduleScreen extends StatefulWidget {
+  const ScheduleScreen({super.key});
+
+  @override
+  State<ScheduleScreen> createState() => _ScheduleScreenState();
+}
+
+class _ScheduleScreenState extends State<ScheduleScreen> {
+  DateTime _selectedDay = DateTime.now();
+  // The week we're displaying — Monday of current week
+  late DateTime _weekStart;
+
+  List<QbtScheduleEvent> _events = [];
+  Map<String, QbtUser> _users = {};
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _weekStart = _mondayOf(DateTime.now());
+    _load();
+  }
+
+  DateTime _mondayOf(DateTime d) {
+    final diff = d.weekday - 1; // Monday = 1
+    return DateTime(d.year, d.month, d.day - diff);
+  }
+
+  DateTime get _weekEnd => _weekStart.add(const Duration(days: 6));
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final results = await Future.wait([
+        qbtFetchScheduleEvents(start: _weekStart, end: _weekEnd),
+        qbtFetchUsers(),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _events = results[0] as List<QbtScheduleEvent>;
+        _users = results[1] as Map<String, QbtUser>;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString().replaceFirst('Exception: ', '');
+        _loading = false;
+      });
+    }
+  }
+
+  List<QbtScheduleEvent> get _eventsForSelectedDay {
+    return _events.where((e) {
+      final local = e.start.toLocal();
+      return local.year == _selectedDay.year &&
+          local.month == _selectedDay.month &&
+          local.day == _selectedDay.day;
+    }).toList();
+  }
+
+  void _goToPrevWeek() {
+    setState(() {
+      _weekStart = _weekStart.subtract(const Duration(days: 7));
+      // Keep selected day in sync with new week
+      _selectedDay = _weekStart;
+    });
+    _load();
+  }
+
+  void _goToNextWeek() {
+    setState(() {
+      _weekStart = _weekStart.add(const Duration(days: 7));
+      _selectedDay = _weekStart;
+    });
+    _load();
+  }
+
+  void _goToToday() {
+    final today = DateTime.now();
+    setState(() {
+      _weekStart = _mondayOf(today);
+      _selectedDay = DateTime(today.year, today.month, today.day);
+    });
+    _load();
+  }
+
+  Color _parseColor(String hex) {
+    try {
+      final h = hex.replaceAll('#', '');
+      return Color(int.parse('FF$h', radix: 16));
+    } catch (_) {
+      return kBrandGreen;
+    }
+  }
+
+  String _formatTime(DateTime dt) {
+    final local = dt.toLocal();
+    final h = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final m = local.minute.toString().padLeft(2, '0');
+    final ampm = local.hour < 12 ? 'AM' : 'PM';
+    return '$h:$m $ampm';
+  }
+
+  String _assignedNames(QbtScheduleEvent event) {
+    if (event.assignedUserIds.isEmpty) return '';
+    return event.assignedUserIds
+        .map((id) => _users[id]?.displayName ?? 'Unknown')
+        .join(', ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+        title: const Text('Schedule', style: TextStyle(fontWeight: FontWeight.bold)),
+        actions: [
+          TextButton(
+            onPressed: _goToToday,
+            child: const Text('Today', style: TextStyle(color: Colors.white)),
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: _load,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          _WeekStrip(
+            weekStart: _weekStart,
+            selectedDay: _selectedDay,
+            onDaySelected: (day) => setState(() => _selectedDay = day),
+            onPrevWeek: _goToPrevWeek,
+            onNextWeek: _goToNextWeek,
+          ),
+          const Divider(height: 1),
+          Expanded(child: _buildBody()),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+        onPressed: () async {
+          final created = await Navigator.push<bool>(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ScheduleEventFormScreen(
+                users: _users,
+                initialDate: _selectedDay,
+              ),
+            ),
+          );
+          if (created == true) _load();
+        },
+        child: const Icon(Icons.add),
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.cloud_off, size: 48, color: Colors.red),
+              const SizedBox(height: 12),
+              Text(_error!, textAlign: TextAlign.center),
+              const SizedBox(height: 16),
+              ElevatedButton(onPressed: _load, child: const Text('Retry')),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final dayEvents = _eventsForSelectedDay;
+
+    if (dayEvents.isEmpty) {
+      return const Center(
+        child: Text('No events scheduled', style: TextStyle(color: Colors.grey)),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: ListView.builder(
+        padding: const EdgeInsets.only(top: 8, bottom: 100),
+        itemCount: dayEvents.length,
+        itemBuilder: (context, i) {
+          final event = dayEvents[i];
+          return _ScheduleEventCard(
+            event: event,
+            assignedNames: _assignedNames(event),
+            color: _parseColor(event.color),
+            formatTime: _formatTime,
+            onTap: () async {
+              final changed = await Navigator.push<bool>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ScheduleEventFormScreen(
+                    users: _users,
+                    existingEvent: event,
+                    initialDate: _selectedDay,
+                  ),
+                ),
+              );
+              if (changed == true) _load();
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Week strip widget
+// ---------------------------------------------------------------------------
+
+class _WeekStrip extends StatelessWidget {
+  final DateTime weekStart;
+  final DateTime selectedDay;
+  final ValueChanged<DateTime> onDaySelected;
+  final VoidCallback onPrevWeek;
+  final VoidCallback onNextWeek;
+
+  const _WeekStrip({
+    required this.weekStart,
+    required this.selectedDay,
+    required this.onDaySelected,
+    required this.onPrevWeek,
+    required this.onNextWeek,
+  });
+
+  static const _dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  @override
+  Widget build(BuildContext context) {
+    final today = DateTime.now();
+    return Container(
+      color: Colors.white,
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.chevron_left),
+            onPressed: onPrevWeek,
+            tooltip: 'Previous week',
+          ),
+          Expanded(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: List.generate(7, (i) {
+                final day = weekStart.add(Duration(days: i));
+                final isSelected = day.year == selectedDay.year &&
+                    day.month == selectedDay.month &&
+                    day.day == selectedDay.day;
+                final isToday = day.year == today.year &&
+                    day.month == today.month &&
+                    day.day == today.day;
+
+                return GestureDetector(
+                  onTap: () => onDaySelected(day),
+                  child: Container(
+                    width: 40,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isSelected ? kBrandGreen : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          _dayNames[i],
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: isSelected
+                                ? Colors.white
+                                : Colors.grey[600],
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '${day.day}',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: isSelected || isToday
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                            color: isSelected
+                                ? Colors.white
+                                : isToday
+                                    ? kBrandGreen
+                                    : Colors.black87,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.chevron_right),
+            onPressed: onNextWeek,
+            tooltip: 'Next week',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Schedule event card
+// ---------------------------------------------------------------------------
+
+class _ScheduleEventCard extends StatelessWidget {
+  final QbtScheduleEvent event;
+  final String assignedNames;
+  final Color color;
+  final String Function(DateTime) formatTime;
+  final VoidCallback onTap;
+
+  const _ScheduleEventCard({
+    required this.event,
+    required this.assignedNames,
+    required this.color,
+    required this.formatTime,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final startLocal = event.start.toLocal();
+    final endLocal = event.end.toLocal();
+    final sameTime = startLocal == endLocal;
+
+    final timeLabel = event.allDay
+        ? 'All day'
+        : sameTime
+            ? formatTime(startLocal)
+            : '${formatTime(startLocal)} – ${formatTime(endLocal)}';
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Color bar on left — matches TSheets event color
+              Container(width: 6, color: color),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Time + title row
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Time block
+                          SizedBox(
+                            width: 90,
+                            child: Text(
+                              timeLabel,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: color,
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: Text(
+                              event.title.isNotEmpty ? event.title : '(No title)',
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                          const Icon(Icons.chevron_right, color: Colors.grey, size: 18),
+                        ],
+                      ),
+                      if (assignedNames.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            const SizedBox(width: 90),
+                            const Icon(Icons.person_outline, size: 13, color: Colors.grey),
+                            const SizedBox(width: 3),
+                            Expanded(
+                              child: Text(
+                                assignedNames,
+                                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                      if (event.location.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            const SizedBox(width: 90),
+                            const Icon(Icons.location_on_outlined, size: 13, color: Colors.grey),
+                            const SizedBox(width: 3),
+                            Expanded(
+                              child: Text(
+                                event.location,
+                                style: const TextStyle(fontSize: 12, color: Colors.grey),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                      if (event.notes.isNotEmpty) ...[
+                        const SizedBox(height: 6),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const SizedBox(width: 90),
+                            Expanded(
+                              child: Text(
+                                event.notes,
+                                style: const TextStyle(fontSize: 13, color: Colors.black87),
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Schedule event form (create + edit)
+// ---------------------------------------------------------------------------
+
+class ScheduleEventFormScreen extends StatefulWidget {
+  final Map<String, QbtUser> users;
+  final QbtScheduleEvent? existingEvent;
+  final DateTime initialDate;
+
+  const ScheduleEventFormScreen({
+    super.key,
+    required this.users,
+    this.existingEvent,
+    required this.initialDate,
+  });
+
+  @override
+  State<ScheduleEventFormScreen> createState() => _ScheduleEventFormScreenState();
+}
+
+class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _titleCtrl;
+  late final TextEditingController _notesCtrl;
+  late final TextEditingController _locationCtrl;
+
+  late DateTime _date;
+  late TimeOfDay _startTime;
+  late TimeOfDay _endTime;
+  bool _allDay = false;
+  List<String> _selectedUserIds = [];
+  bool _saving = false;
+  bool _deleting = false;
+
+  // Color options mirroring TSheets palette
+  static const _colors = [
+    '#2196F3', // blue (default)
+    '#EF6C00', // orange
+    '#2F7D46', // green (brand)
+    '#888888', // grey
+    '#E53935', // red
+    '#8E24AA', // purple
+    '#00897B', // teal
+  ];
+  late String _selectedColor;
+
+  bool get _isEditing => widget.existingEvent != null;
+
+  @override
+  void initState() {
+    super.initState();
+    final e = widget.existingEvent;
+    _titleCtrl = TextEditingController(text: e?.title ?? '');
+    _notesCtrl = TextEditingController(text: e?.notes ?? '');
+    _locationCtrl = TextEditingController(text: e?.location ?? '');
+    _selectedColor = e?.color ?? '#2196F3';
+    _allDay = e?.allDay ?? false;
+    _selectedUserIds = List.from(e?.assignedUserIds ?? []);
+
+    if (e != null) {
+      final startLocal = e.start.toLocal();
+      final endLocal = e.end.toLocal();
+      _date = DateTime(startLocal.year, startLocal.month, startLocal.day);
+      _startTime = TimeOfDay.fromDateTime(startLocal);
+      _endTime = TimeOfDay.fromDateTime(endLocal);
+    } else {
+      _date = widget.initialDate;
+      _startTime = const TimeOfDay(hour: 8, minute: 0);
+      _endTime = const TimeOfDay(hour: 10, minute: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _notesCtrl.dispose();
+    _locationCtrl.dispose();
+    super.dispose();
+  }
+
+  DateTime _toDateTime(DateTime date, TimeOfDay time) =>
+      DateTime(date.year, date.month, date.day, time.hour, time.minute);
+
+  String _formatTimeOfDay(TimeOfDay t) {
+    final h = t.hour % 12 == 0 ? 12 : t.hour % 12;
+    final m = t.minute.toString().padLeft(2, '0');
+    final ampm = t.hour < 12 ? 'AM' : 'PM';
+    return '$h:$m $ampm';
+  }
+
+  Future<void> _pickDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2030),
+    );
+    if (picked != null) setState(() => _date = picked);
+  }
+
+  Future<void> _pickTime({required bool isStart}) async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: isStart ? _startTime : _endTime,
+    );
+    if (picked != null) {
+      setState(() {
+        if (isStart) {
+          _startTime = picked;
+          // Auto-advance end time if it's now before start
+          final startMin = picked.hour * 60 + picked.minute;
+          final endMin = _endTime.hour * 60 + _endTime.minute;
+          if (endMin <= startMin) {
+            final newEnd = startMin + 60;
+            _endTime = TimeOfDay(hour: newEnd ~/ 60 % 24, minute: newEnd % 60);
+          }
+        } else {
+          _endTime = picked;
+        }
+      });
+    }
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() => _saving = true);
+
+    final start = _allDay
+        ? DateTime(_date.year, _date.month, _date.day, 0, 0)
+        : _toDateTime(_date, _startTime);
+    final end = _allDay
+        ? DateTime(_date.year, _date.month, _date.day, 23, 59)
+        : _toDateTime(_date, _endTime);
+
+    final event = QbtScheduleEvent(
+      id: widget.existingEvent?.id ?? '',
+      title: _titleCtrl.text.trim(),
+      notes: _notesCtrl.text.trim(),
+      start: start,
+      end: end,
+      allDay: _allDay,
+      location: _locationCtrl.text.trim(),
+      color: _selectedColor,
+      assignedUserIds: _selectedUserIds,
+      active: true,
+    );
+
+    try {
+      if (_isEditing) {
+        await qbtUpdateScheduleEvent(event);
+      } else {
+        await qbtCreateScheduleEvent(event);
+      }
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString().replaceFirst('Exception: ', '')),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _delete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Event'),
+        content: const Text('Are you sure you want to delete this event?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    setState(() => _deleting = true);
+    try {
+      await qbtDeleteScheduleEvent(widget.existingEvent!.id);
+      if (!mounted) return;
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _deleting = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString().replaceFirst('Exception: ', '')),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sortedUsers = widget.users.values.toList()
+      ..sort((a, b) => a.displayName.compareTo(b.displayName));
+
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+        title: Text(_isEditing ? 'Edit Event' : 'New Event'),
+        actions: [
+          if (_isEditing)
+            IconButton(
+              icon: _deleting
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
+                    )
+                  : const Icon(Icons.delete_outline),
+              tooltip: 'Delete',
+              onPressed: _deleting ? null : _delete,
+            ),
+        ],
+      ),
+      body: Form(
+        key: _formKey,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            // Title
+            TextFormField(
+              controller: _titleCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Title *',
+                border: OutlineInputBorder(),
+              ),
+              validator: (v) =>
+                  (v == null || v.trim().isEmpty) ? 'Title is required' : null,
+              textCapitalization: TextCapitalization.sentences,
+            ),
+            const SizedBox(height: 16),
+
+            // Date
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.calendar_today, color: kBrandGreen),
+              title: const Text('Date'),
+              subtitle: Text(
+                  '${_date.month}/${_date.day}/${_date.year}'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: _pickDate,
+            ),
+            const Divider(height: 1),
+
+            // All day toggle
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('All Day'),
+              value: _allDay,
+              activeThumbColor: kBrandGreen,
+              onChanged: (v) => setState(() => _allDay = v),
+            ),
+            const Divider(height: 1),
+
+            // Start / end time (hidden when all day)
+            if (!_allDay) ...[
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.access_time, color: kBrandGreen),
+                title: const Text('Start time'),
+                subtitle: Text(_formatTimeOfDay(_startTime)),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _pickTime(isStart: true),
+              ),
+              const Divider(height: 1),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.access_time_filled, color: kBrandGreen),
+                title: const Text('End time'),
+                subtitle: Text(_formatTimeOfDay(_endTime)),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _pickTime(isStart: false),
+              ),
+              const Divider(height: 1),
+            ],
+
+            const SizedBox(height: 16),
+
+            // Location
+            TextFormField(
+              controller: _locationCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Location / Address',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.location_on_outlined),
+              ),
+              textCapitalization: TextCapitalization.words,
+            ),
+            const SizedBox(height: 16),
+
+            // Notes
+            TextFormField(
+              controller: _notesCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Notes',
+                border: OutlineInputBorder(),
+                alignLabelWithHint: true,
+              ),
+              maxLines: 5,
+              textCapitalization: TextCapitalization.sentences,
+            ),
+            const SizedBox(height: 16),
+
+            // Assign to
+            const Text('Assign to',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: sortedUsers.map((user) {
+                final selected = _selectedUserIds.contains(user.id);
+                return FilterChip(
+                  label: Text(user.displayName),
+                  selected: selected,
+                  selectedColor: kBrandGreen.withAlpha(40),
+                  checkmarkColor: kBrandGreen,
+                  onSelected: (v) {
+                    setState(() {
+                      if (v) {
+                        _selectedUserIds.add(user.id);
+                      } else {
+                        _selectedUserIds.remove(user.id);
+                      }
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16),
+
+            // Color
+            const Text('Color',
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: _colors.map((hex) {
+                Color c;
+                try {
+                  c = Color(int.parse('FF${hex.replaceAll('#', '')}', radix: 16));
+                } catch (_) {
+                  c = kBrandGreen;
+                }
+                final selected = _selectedColor == hex;
+                return GestureDetector(
+                  onTap: () => setState(() => _selectedColor = hex),
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: BoxDecoration(
+                      color: c,
+                      shape: BoxShape.circle,
+                      border: selected
+                          ? Border.all(color: Colors.black, width: 2.5)
+                          : null,
+                    ),
+                    child: selected
+                        ? const Icon(Icons.check, color: Colors.white, size: 18)
+                        : null,
+                  ),
+                );
+              }).toList(),
+            ),
+
+            const SizedBox(height: 24),
+
+            // Save button
+            ElevatedButton.icon(
+              onPressed: _saving ? null : _save,
+              icon: _saving
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.save),
+              label: Text(_saving ? 'Saving...' : 'Save Event'),
               style: ElevatedButton.styleFrom(
                 minimumSize: const Size.fromHeight(48),
                 backgroundColor: kBrandGreen,
