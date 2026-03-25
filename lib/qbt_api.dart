@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 /// =======================
@@ -187,14 +188,16 @@ Future<QbtScheduleEvent> qbtCreateScheduleEvent(QbtScheduleEvent event) async {
 Future<QbtScheduleEvent> qbtUpdateScheduleEvent(QbtScheduleEvent event) async {
   final uri = Uri.parse('$_qbtBase/schedule_events');
   final payload = event.toJson()..['id'] = int.parse(event.id);
+  final bodyStr = jsonEncode({'data': [payload]});
+  debugPrint('[QBT PUT] payload: $bodyStr');
   final resp = await http.put(
     uri,
     headers: _headers,
-    body: jsonEncode({'data': [payload]}),
+    body: bodyStr,
   );
+  debugPrint('[QBT PUT] status: ${resp.statusCode} body: ${resp.body}');
   _checkStatus(resp);
-  // Return the original event — the id is already known and the response
-  // structure varies; the save succeeded if _checkStatus didn't throw.
+  _checkTsheetsBodyErrors(resp.body);
   return event;
 }
 
@@ -224,5 +227,24 @@ void _checkStatus(http.Response resp) {
       message = body['error']?['message']?.toString() ?? message;
     } catch (_) {}
     throw Exception(message);
+  }
+}
+
+/// TSheets returns 200 even on field-level errors; check the body.
+void _checkTsheetsBodyErrors(String bodyStr) {
+  try {
+    final body = jsonDecode(bodyStr) as Map<String, dynamic>;
+    final events = body['results']?['schedule_events'] as Map<String, dynamic>?;
+    if (events != null) {
+      for (final entry in events.values) {
+        final errors = (entry as Map<String, dynamic>)['_errors'];
+        if (errors != null && (errors as List).isNotEmpty) {
+          throw Exception('TSheets error: $errors');
+        }
+      }
+    }
+  } catch (e) {
+    if (e is Exception) rethrow;
+    // JSON parse failure — ignore, not an error
   }
 }
