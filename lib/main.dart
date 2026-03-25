@@ -7126,7 +7126,8 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
       ),
     );
     if (result == true && mounted) {
-      Navigator.of(context).pop(); // back to list; it will refresh there
+      // Pop back — the caller (list or schedule detail) will reload on return
+      Navigator.of(context).pop(true);
     }
   }
 
@@ -9859,9 +9860,12 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                             IconButton(
                               icon: const Icon(Icons.open_in_new, size: 18),
                               tooltip: 'View lift',
-                              onPressed: () => Navigator.of(context).push(
-                                MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: _linkedLift!)),
-                              ),
+                              onPressed: () async {
+                                await Navigator.of(context).push(
+                                  MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: _linkedLift!)),
+                                );
+                                if (mounted) _loadMeta();
+                              },
                             ),
                             IconButton(
                               icon: const Icon(Icons.link_off, size: 18, color: Colors.red),
@@ -9870,9 +9874,12 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                             ),
                           ],
                         ),
-                        onTap: () => Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: _linkedLift!)),
-                        ),
+                        onTap: () async {
+                          await Navigator.of(context).push(
+                            MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: _linkedLift!)),
+                          );
+                          if (mounted) _loadMeta();
+                        },
                       )
                     : ListTile(
                         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
