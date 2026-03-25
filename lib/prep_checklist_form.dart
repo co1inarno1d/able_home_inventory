@@ -150,7 +150,7 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(16.0),
-                color: kBrandGreen.withOpacity(0.1),
+                color: kBrandGreen.withAlpha(25),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [

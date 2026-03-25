@@ -8222,10 +8222,9 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
 
     if (_selectedBrand == null ||
         _selectedSeries == null ||
-        _selectedOrientation == null ||
-        _selectedFoldType == null) {
+        _selectedOrientation == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please select brand, series, and type.')),
+        const SnackBar(content: Text('Please select brand, series, and orientation.')),
       );
       return;
     }
@@ -8362,7 +8361,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         brand: _selectedBrand!,
         series: _selectedSeries!,
         orientation: _selectedOrientation!,
-        foldType: _selectedFoldType!,
+        foldType: _selectedFoldType ?? '',
         condition: _condition,
         status: _status,
         preppedStatus: _preppedStatus,
@@ -8538,18 +8537,18 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
             DropdownButtonFormField<String>(
               value: _selectedFoldType,
               items: const [
-                DropdownMenuItem<String>(value: 'Folding', child: Text('Folding')),
-                DropdownMenuItem<String>(value: 'Non-Folding', child: Text('Non-Folding')),
-                DropdownMenuItem<String>(value: 'Perch', child: Text('Perch')),
-                DropdownMenuItem<String>(value: 'N/A', child: Text('N/A')),
+                DropdownMenuItem<String>(value: '', child: Text('— None —')),
+                DropdownMenuItem<String>(value: 'No Fold', child: Text('No Fold')),
+                DropdownMenuItem<String>(value: 'Auto Fold', child: Text('Auto Fold')),
+                DropdownMenuItem<String>(value: 'Manual Fold', child: Text('Manual Fold')),
               ],
               decoration: const InputDecoration(
-                labelText: 'Fold type',
+                labelText: 'Fold type (optional)',
                 border: OutlineInputBorder(),
               ),
               onChanged: (value) {
                 setState(() {
-                  _selectedFoldType = value;
+                  _selectedFoldType = value == '' ? null : value;
                 });
               },
             ),
@@ -8840,6 +8839,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   List<QbtScheduleEvent> _events = [];
   Map<String, QbtUser> _users = {};
+  Set<String> _completedIds = {};
   bool _loading = true;
   String? _error;
 
@@ -8866,11 +8866,13 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       final results = await Future.wait([
         qbtFetchScheduleEvents(start: _weekStart, end: _weekEnd),
         qbtFetchUsers(),
+        sbFetchCompletedEventIds(),
       ]);
       if (!mounted) return;
       setState(() {
         _events = results[0] as List<QbtScheduleEvent>;
         _users = results[1] as Map<String, QbtUser>;
+        _completedIds = results[2] as Set<String>;
         _loading = false;
       });
     } catch (e) {
@@ -8883,12 +8885,24 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   }
 
   List<QbtScheduleEvent> get _eventsForSelectedDay {
-    return _events.where((e) {
+    final filtered = _events.where((e) {
       final local = e.start.toLocal();
       return local.year == _selectedDay.year &&
           local.month == _selectedDay.month &&
           local.day == _selectedDay.day;
     }).toList();
+
+    // Sort by first assigned user's first name alphabetically
+    filtered.sort((a, b) {
+      final nameA = a.assignedUserIds.isNotEmpty
+          ? (_users[a.assignedUserIds.first]?.firstName ?? '')
+          : '';
+      final nameB = b.assignedUserIds.isNotEmpty
+          ? (_users[b.assignedUserIds.first]?.firstName ?? '')
+          : '';
+      return nameA.toLowerCase().compareTo(nameB.toLowerCase());
+    });
+    return filtered;
   }
 
   void _goToPrevWeek() {
@@ -9030,11 +9044,24 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         itemCount: dayEvents.length,
         itemBuilder: (context, i) {
           final event = dayEvents[i];
+          final color = _parseColor(event.color);
           return _ScheduleEventCard(
             event: event,
             assignedNames: _assignedNames(event),
-            color: _parseColor(event.color),
+            color: color,
             formatTime: _formatTime,
+            completed: _completedIds.contains(event.id),
+            onToggleComplete: () async {
+              final next = !_completedIds.contains(event.id);
+              setState(() {
+                if (next) {
+                  _completedIds.add(event.id);
+                } else {
+                  _completedIds.remove(event.id);
+                }
+              });
+              await sbSetEventCompleted(eventId: event.id, completed: next);
+            },
             onTap: () async {
               final changed = await Navigator.push<bool>(
                 context,
@@ -9043,7 +9070,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                     event: event,
                     users: _users,
                     assignedNames: _assignedNames(event),
-                    color: _parseColor(event.color),
+                    color: color,
                     formatTime: _formatTime,
                   ),
                 ),
@@ -9165,6 +9192,8 @@ class _ScheduleEventCard extends StatelessWidget {
   final String assignedNames;
   final Color color;
   final String Function(DateTime) formatTime;
+  final bool completed;
+  final VoidCallback onToggleComplete;
   final VoidCallback onTap;
 
   const _ScheduleEventCard({
@@ -9172,6 +9201,8 @@ class _ScheduleEventCard extends StatelessWidget {
     required this.assignedNames,
     required this.color,
     required this.formatTime,
+    required this.completed,
+    required this.onToggleComplete,
     required this.onTap,
   });
 
@@ -9194,90 +9225,137 @@ class _ScheduleEventCard extends StatelessWidget {
         ? Colors.black.withAlpha(140)
         : Colors.white.withAlpha(200);
 
+    final cardColor = completed ? color.withAlpha(120) : color;
+
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       clipBehavior: Clip.antiAlias,
-      elevation: 2,
+      elevation: completed ? 0 : 2,
       child: InkWell(
         onTap: onTap,
         child: Container(
-          color: color,
-          padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
+          color: cardColor,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              // Left: time + assigned name stacked
-              SizedBox(
-                width: 82,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
+              // Main row
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Text(
-                      timeLabel,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: textColor,
-                      ),
-                    ),
-                    if (assignedNames.isNotEmpty) ...[
-                      const SizedBox(height: 3),
-                      Text(
-                        assignedNames,
-                        style: TextStyle(fontSize: 11, color: subtleText),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-              // Divider line
-              Container(
-                width: 1,
-                height: 36,
-                color: textColor.withAlpha(60),
-              ),
-              const SizedBox(width: 10),
-              // Right: title + location
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      event.title.isNotEmpty ? event.title : '(No title)',
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.bold,
-                        color: textColor,
-                      ),
-                    ),
-                    if (event.location.isNotEmpty) ...[
-                      const SizedBox(height: 3),
-                      Row(
+                    // Left: time + assigned name stacked
+                    SizedBox(
+                      width: 82,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.location_on_outlined,
-                              size: 12, color: subtleText),
-                          const SizedBox(width: 3),
-                          Expanded(
-                            child: Text(
-                              event.location,
-                              style: TextStyle(fontSize: 12, color: subtleText),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                          Text(
+                            timeLabel,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                              color: textColor,
+                              decoration: completed
+                                  ? TextDecoration.lineThrough
+                                  : null,
                             ),
                           ),
+                          if (assignedNames.isNotEmpty) ...[
+                            const SizedBox(height: 3),
+                            Text(
+                              assignedNames,
+                              style: TextStyle(fontSize: 11, color: subtleText),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ],
                         ],
                       ),
-                    ],
+                    ),
+                    const SizedBox(width: 10),
+                    // Divider line
+                    Container(
+                      width: 1,
+                      height: 36,
+                      color: textColor.withAlpha(60),
+                    ),
+                    const SizedBox(width: 10),
+                    // Right: title + location
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            event.title.isNotEmpty ? event.title : '(No title)',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                              color: textColor,
+                              decoration: completed
+                                  ? TextDecoration.lineThrough
+                                  : null,
+                            ),
+                          ),
+                          if (event.location.isNotEmpty) ...[
+                            const SizedBox(height: 3),
+                            Row(
+                              children: [
+                                Icon(Icons.location_on_outlined,
+                                    size: 12, color: subtleText),
+                                const SizedBox(width: 3),
+                                Expanded(
+                                  child: Text(
+                                    event.location,
+                                    style: TextStyle(
+                                        fontSize: 12, color: subtleText),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    Icon(Icons.chevron_right, color: subtleText, size: 18),
                   ],
                 ),
               ),
-              Icon(Icons.chevron_right, color: subtleText, size: 18),
+
+              // Complete toggle bar at bottom
+              InkWell(
+                onTap: onToggleComplete,
+                child: Container(
+                  color: textColor.withAlpha(25),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                  child: Row(
+                    children: [
+                      Icon(
+                        completed
+                            ? Icons.check_circle
+                            : Icons.radio_button_unchecked,
+                        size: 16,
+                        color: completed ? textColor : subtleText,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        completed ? 'Completed' : 'Mark complete',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: completed ? textColor : subtleText,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ),
         ),
