@@ -183,7 +183,7 @@ Future<QbtScheduleEvent> qbtCreateScheduleEvent(QbtScheduleEvent event) async {
   return QbtScheduleEvent.fromJson(created);
 }
 
-/// Update an existing schedule event. Returns the updated event.
+/// Update an existing schedule event. Returns the original event (id preserved).
 Future<QbtScheduleEvent> qbtUpdateScheduleEvent(QbtScheduleEvent event) async {
   final uri = Uri.parse('$_qbtBase/schedule_events');
   final payload = event.toJson()..['id'] = int.parse(event.id);
@@ -193,12 +193,9 @@ Future<QbtScheduleEvent> qbtUpdateScheduleEvent(QbtScheduleEvent event) async {
     body: jsonEncode({'data': [payload]}),
   );
   _checkStatus(resp);
-
-  final body = jsonDecode(resp.body) as Map<String, dynamic>;
-  final eventsMap =
-      (body['results']?['schedule_events'] as Map<String, dynamic>?) ?? {};
-  final updated = eventsMap.values.first as Map<String, dynamic>;
-  return QbtScheduleEvent.fromJson(updated);
+  // Return the original event — the id is already known and the response
+  // structure varies; the save succeeded if _checkStatus didn't throw.
+  return event;
 }
 
 /// Delete (deactivate) a schedule event.
