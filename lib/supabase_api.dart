@@ -1127,6 +1127,46 @@ Future<LiftRecord?> sbFetchLiftById(String liftId) async {
   return raw == null ? null : LiftRecord.fromJson(raw);
 }
 
+/// Bulk-fetches all event job types and lift IDs from app_config in one query.
+/// Returns a map of eventId -> {'job_type': String?, 'lift_ids': List<String>}
+Future<Map<String, Map<String, dynamic>>> sbGetAllEventMeta() async {
+  final rows = await _sb
+      .from('app_config')
+      .select('key, value')
+      .or('key.like.event_job_type_%,key.like.event_lift_%');
+  final result = <String, Map<String, dynamic>>{};
+  for (final r in rows as List) {
+    final key = r['key'] as String;
+    final value = r['value'] as String?;
+    String? eventId;
+    String? field;
+    if (key.startsWith('event_job_type_')) {
+      eventId = key.substring('event_job_type_'.length);
+      field = 'job_type';
+    } else if (key.startsWith('event_lift_')) {
+      eventId = key.substring('event_lift_'.length);
+      field = 'lift_ids';
+    }
+    if (eventId == null || field == null) continue;
+    result.putIfAbsent(eventId, () => {'job_type': null, 'lift_ids': <String>[]});
+    if (field == 'job_type') {
+      result[eventId]!['job_type'] = value;
+    } else if (field == 'lift_ids' && value != null && value.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(value);
+        if (decoded is List) {
+          result[eventId]!['lift_ids'] = decoded.map((e) => e.toString()).toList();
+        } else {
+          result[eventId]!['lift_ids'] = [value];
+        }
+      } catch (_) {
+        result[eventId]!['lift_ids'] = [value];
+      }
+    }
+  }
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // PREP CHECKLIST TEMPLATES (hardcoded — rarely changes)
 // ---------------------------------------------------------------------------
