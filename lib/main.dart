@@ -9161,6 +9161,62 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 }
               });
               await sbSetEventCompleted(eventId: event.id, completed: next);
+              // Smart completion when marking complete from the card
+              if (next && mounted) {
+                final meta = await sbGetEventMeta(event.id);
+                final jobType = meta['job_type'] as String?;
+                final liftIds = (meta['lift_ids'] as List<String>?) ?? [];
+                if (jobType != null && liftIds.isNotEmpty && mounted) {
+                  final prefs = await SharedPreferences.getInstance();
+                  final userName = prefs.getString('user_name') ?? '';
+                  final userEmail = prefs.getString('user_email') ?? '';
+                  for (final liftId in liftIds) {
+                    final lift = await sbFetchLiftById(liftId);
+                    if (lift == null || !mounted) continue;
+                    String? newStatus;
+                    String dialogTitle = '';
+                    String dialogBody = '';
+                    String confirmLabel = '';
+                    if (jobType == 'Install') {
+                      newStatus = 'Installed';
+                      dialogTitle = 'Mark lift as Installed?';
+                      dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?';
+                      confirmLabel = 'Mark Installed';
+                    } else if (jobType == 'Removal') {
+                      newStatus = 'Removed';
+                      dialogTitle = 'Mark lift as Removed?';
+                      dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?';
+                      confirmLabel = 'Mark Removed';
+                    }
+                    if (newStatus != null && mounted) {
+                      final confirm = await showDialog<bool>(
+                        context: context,
+                        builder: (_) => AlertDialog(
+                          title: Text(dialogTitle),
+                          content: Text(dialogBody),
+                          actions: [
+                            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                            ElevatedButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                              child: Text(confirmLabel),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (confirm == true && mounted) {
+                        await sbMarkLiftStatus(
+                          liftId: lift.liftId,
+                          newStatus: newStatus,
+                          userEmail: userEmail,
+                          userName: userName,
+                          note: 'Marked $newStatus via schedule event: ${event.title}',
+                        );
+                      }
+                    }
+                  }
+                }
+              }
             },
             onTap: () async {
               final changed = await Navigator.push<bool>(
