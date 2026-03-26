@@ -9577,13 +9577,13 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       if (!mounted) return;
       switch (_jobType) {
         case 'Install':
-          if (lift.status == 'Assigned' && mounted) {
+          if (mounted) {
             final confirm = await showDialog<bool>(
               context: context,
               builder: (_) => AlertDialog(
                 title: const Text('Mark lift as Installed?'),
                 content: Text(
-                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed status?',
+                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?',
                 ),
                 actions: [
                   TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
@@ -9608,13 +9608,13 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           break;
 
         case 'Removal':
-          if (lift.status == 'Installed' && mounted) {
+          if (mounted) {
             final confirm = await showDialog<bool>(
               context: context,
               builder: (_) => AlertDialog(
                 title: const Text('Mark lift as Removed?'),
                 content: Text(
-                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed status?',
+                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?',
                 ),
                 actions: [
                   TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
