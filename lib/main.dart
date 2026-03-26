@@ -9557,11 +9557,13 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     });
     try {
       await sbSetEventCompleted(eventId: widget.event.id, completed: next);
+      debugPrint('[Complete] marked=$next linkedLifts=${_linkedLifts.length} jobType=$_jobType');
       // Smart completion: trigger downstream actions when marking complete
       if (next && _linkedLifts.isNotEmpty && mounted) {
         await _handleSmartCompletion();
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[Complete] ERROR: $e');
       if (mounted) setState(() => _completed = !next);
     } finally {
       if (mounted) setState(() => _savingComplete = false);
@@ -9569,11 +9571,13 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   }
 
   Future<void> _handleSmartCompletion() async {
+    debugPrint('[SmartComplete] jobType=$_jobType lifts=${_linkedLifts.map((l) => l.liftId).toList()}');
     final prefs = await SharedPreferences.getInstance();
     final userName = prefs.getString('user_name') ?? '';
     final userEmail = prefs.getString('user_email') ?? '';
 
     for (final lift in List<LiftRecord>.from(_linkedLifts)) {
+      debugPrint('[SmartComplete] processing lift=${lift.liftId} status=${lift.status}');
       if (!mounted) return;
       switch (_jobType) {
         case 'Install':
@@ -9595,7 +9599,9 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                 ],
               ),
             );
+            debugPrint('[SmartComplete] Install confirm=$confirm');
             if (confirm == true && mounted) {
+              debugPrint('[SmartComplete] calling sbMarkLiftStatus Installed for ${lift.liftId}');
               await sbMarkLiftStatus(
                 liftId: lift.liftId,
                 newStatus: 'Installed',
@@ -9603,6 +9609,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                 userName: userName,
                 note: 'Marked installed via schedule event: ${widget.event.title}',
               );
+              debugPrint('[SmartComplete] sbMarkLiftStatus done');
             }
           }
           break;
