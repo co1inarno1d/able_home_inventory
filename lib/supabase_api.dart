@@ -998,14 +998,20 @@ Future<void> sbMarkLiftStatus({
       .select()
       .eq('lift_id', liftId)
       .maybeSingle();
-  if (raw == null) return;
+  debugPrint('[sbMarkLiftStatus] liftId=$liftId raw=${raw == null ? "NOT FOUND" : "found"}');
+  if (raw == null) {
+    debugPrint('[sbMarkLiftStatus] lift not found, aborting');
+    return;
+  }
 
   final prev = LiftRecord.fromJson(raw as Map<String, dynamic>);
+  debugPrint('[sbMarkLiftStatus] updating status ${prev.status} -> $newStatus');
 
-  await _sb.from('lifts').update({
+  final updateResult = await _sb.from('lifts').update({
     'status': newStatus,
     'updated_at': DateTime.now().toIso8601String(),
-  }).eq('lift_id', liftId);
+  }).eq('lift_id', liftId).select();
+  debugPrint('[sbMarkLiftStatus] update result: $updateResult');
 
   await _sb.from('lift_history').insert({
     'timestamp': DateTime.now().toIso8601String(),
