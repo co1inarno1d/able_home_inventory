@@ -1061,15 +1061,30 @@ Future<void> sbSetEventCompleted({
 // SCHEDULE EVENT METADATA (job type + linked lift, stored in app_config)
 // ---------------------------------------------------------------------------
 
-Future<Map<String, String?>> sbGetEventMeta(String eventId) async {
+Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
   final rows = await _sb
       .from('app_config')
       .select('key, value')
       .or('key.eq.event_job_type_$eventId,key.eq.event_lift_$eventId');
   final map = {for (final r in rows as List) r['key'] as String: r['value'] as String?};
+  final liftRaw = map['event_lift_$eventId'];
+  List<String> liftIds = [];
+  if (liftRaw != null && liftRaw.isNotEmpty) {
+    try {
+      // New format: JSON array e.g. '["id1","id2"]'
+      final decoded = jsonDecode(liftRaw);
+      if (decoded is List) {
+        liftIds = decoded.map((e) => e.toString()).toList();
+      } else {
+        liftIds = [liftRaw]; // legacy single-id format
+      }
+    } catch (_) {
+      liftIds = [liftRaw]; // legacy single-id format
+    }
+  }
   return {
     'job_type': map['event_job_type_$eventId'],
-    'lift_id': map['event_lift_$eventId'],
+    'lift_ids': liftIds,
   };
 }
 
@@ -1085,13 +1100,13 @@ Future<void> sbSetEventJobType(String eventId, String? jobType) async {
   }
 }
 
-Future<void> sbSetEventLiftId(String eventId, String? liftId) async {
+Future<void> sbSetEventLiftIds(String eventId, List<String> liftIds) async {
   final key = 'event_lift_$eventId';
-  if (liftId == null || liftId.isEmpty) {
+  if (liftIds.isEmpty) {
     await _sb.from('app_config').delete().eq('key', key);
   } else {
     await _sb.from('app_config').upsert(
-      {'key': key, 'value': liftId, 'updated_at': DateTime.now().toIso8601String()},
+      {'key': key, 'value': jsonEncode(liftIds), 'updated_at': DateTime.now().toIso8601String()},
       onConflict: 'key',
     );
   }

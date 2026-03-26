@@ -9489,7 +9489,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   bool _savingComplete = false;
 
   String? _jobType;
-  LiftRecord? _linkedLift;
+  List<LiftRecord> _linkedLifts = [];
   bool _loadingMeta = true;
   bool _savingLift = false;
 
@@ -9512,35 +9512,39 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   Future<void> _loadMeta() async {
     final meta = await sbGetEventMeta(widget.event.id);
     if (!mounted) return;
-    final liftId = meta['lift_id'];
-    LiftRecord? lift;
-    if (liftId != null && liftId.isNotEmpty) {
-      lift = await sbFetchLiftById(liftId);
+    final liftIds = (meta['lift_ids'] as List<String>?) ?? [];
+    final lifts = <LiftRecord>[];
+    for (final id in liftIds) {
+      final l = await sbFetchLiftById(id);
+      if (l != null) lifts.add(l);
     }
     if (!mounted) return;
     setState(() {
-      _jobType = meta['job_type'];
-      _linkedLift = lift;
+      _jobType = meta['job_type'] as String?;
+      _linkedLifts = lifts;
       _loadingMeta = false;
     });
   }
 
   Future<void> _linkLift(LiftRecord lift) async {
+    if (_linkedLifts.any((l) => l.liftId == lift.liftId)) return;
     setState(() => _savingLift = true);
-    await sbSetEventLiftId(widget.event.id, lift.liftId);
+    final newIds = [..._linkedLifts.map((l) => l.liftId), lift.liftId];
+    await sbSetEventLiftIds(widget.event.id, newIds);
     if (!mounted) return;
     setState(() {
-      _linkedLift = lift;
+      _linkedLifts = [..._linkedLifts, lift];
       _savingLift = false;
     });
   }
 
-  Future<void> _unlinkLift() async {
+  Future<void> _unlinkLift(LiftRecord lift) async {
     setState(() => _savingLift = true);
-    await sbSetEventLiftId(widget.event.id, null);
+    final newIds = _linkedLifts.where((l) => l.liftId != lift.liftId).map((l) => l.liftId).toList();
+    await sbSetEventLiftIds(widget.event.id, newIds);
     if (!mounted) return;
     setState(() {
-      _linkedLift = null;
+      _linkedLifts = _linkedLifts.where((l) => l.liftId != lift.liftId).toList();
       _savingLift = false;
     });
   }
@@ -9554,7 +9558,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     try {
       await sbSetEventCompleted(eventId: widget.event.id, completed: next);
       // Smart completion: trigger downstream actions when marking complete
-      if (next && _linkedLift != null && mounted) {
+      if (next && _linkedLifts.isNotEmpty && mounted) {
         await _handleSmartCompletion();
       }
     } catch (_) {
@@ -9565,110 +9569,111 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   }
 
   Future<void> _handleSmartCompletion() async {
-    final lift = _linkedLift!;
     final prefs = await SharedPreferences.getInstance();
     final userName = prefs.getString('user_name') ?? '';
     final userEmail = prefs.getString('user_email') ?? '';
 
-    switch (_jobType) {
-      case 'Install':
-        if (lift.status == 'Assigned' && mounted) {
+    for (final lift in List<LiftRecord>.from(_linkedLifts)) {
+      if (!mounted) return;
+      switch (_jobType) {
+        case 'Install':
+          if (lift.status == 'Assigned' && mounted) {
+            final confirm = await showDialog<bool>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: const Text('Mark lift as Installed?'),
+                content: Text(
+                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed status?',
+                ),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                    child: const Text('Mark Installed'),
+                  ),
+                ],
+              ),
+            );
+            if (confirm == true && mounted) {
+              await sbMarkLiftStatus(
+                liftId: lift.liftId,
+                newStatus: 'Installed',
+                userEmail: userEmail,
+                userName: userName,
+                note: 'Marked installed via schedule event: ${widget.event.title}',
+              );
+            }
+          }
+          break;
+
+        case 'Removal':
+          if (lift.status == 'Installed' && mounted) {
+            final confirm = await showDialog<bool>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: const Text('Mark lift as Removed?'),
+                content: Text(
+                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed status?',
+                ),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                    child: const Text('Mark Removed'),
+                  ),
+                ],
+              ),
+            );
+            if (confirm == true && mounted) {
+              await sbMarkLiftStatus(
+                liftId: lift.liftId,
+                newStatus: 'Removed',
+                userEmail: userEmail,
+                userName: userName,
+                note: 'Marked removed via schedule event: ${widget.event.title}',
+              );
+            }
+          }
+          break;
+
+        case 'Service':
+        case 'Annual Service':
+          if (!mounted) return;
+          final serviceType = _jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
           final confirm = await showDialog<bool>(
             context: context,
             builder: (_) => AlertDialog(
-              title: const Text('Mark lift as Installed?'),
-              content: Text(
-                'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed status?',
-              ),
+              title: const Text('Log service record?'),
+              content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
               actions: [
                 TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
                 ElevatedButton(
                   onPressed: () => Navigator.pop(context, true),
                   style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                  child: const Text('Mark Installed'),
+                  child: const Text('Log Service'),
                 ),
               ],
             ),
           );
           if (confirm == true && mounted) {
-            await sbMarkLiftStatus(
-              liftId: lift.liftId,
-              newStatus: 'Installed',
-              userEmail: userEmail,
-              userName: userName,
-              note: 'Marked installed via schedule event: ${widget.event.title}',
-            );
-            await _loadMeta(); // refresh lift status
-          }
-        }
-        break;
-
-      case 'Removal':
-        if (lift.status == 'Installed' && mounted) {
-          final confirm = await showDialog<bool>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text('Mark lift as Removed?'),
-              content: Text(
-                'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed status?',
-              ),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                ElevatedButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                  child: const Text('Mark Removed'),
+            await Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => LiftServiceFormScreen(
+                  lift: lift,
+                  prefillServiceType: serviceType,
+                  prefillCustomerName: widget.event.title,
+                  prefillDate: formatDate(DateTime.now()),
+                  offerInvoicePhoto: true,
                 ),
-              ],
-            ),
-          );
-          if (confirm == true && mounted) {
-            await sbMarkLiftStatus(
-              liftId: lift.liftId,
-              newStatus: 'Removed',
-              userEmail: userEmail,
-              userName: userName,
-              note: 'Marked removed via schedule event: ${widget.event.title}',
+              ),
             );
-            await _loadMeta();
           }
-        }
-        break;
-
-      case 'Service':
-      case 'Annual Service':
-        if (!mounted) return;
-        final serviceType = _jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
-        final confirm = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('Log service record?'),
-            content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                child: const Text('Log Service'),
-              ),
-            ],
-          ),
-        );
-        if (confirm == true && mounted) {
-          await Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => LiftServiceFormScreen(
-                lift: lift,
-                prefillServiceType: serviceType,
-                prefillCustomerName: widget.event.title,
-                prefillDate: formatDate(DateTime.now()),
-                offerInvoicePhoto: true,
-              ),
-            ),
-          );
-        }
-        break;
+          break;
+      }
     }
+    if (mounted) await _loadMeta(); // refresh all lift statuses
   }
 
   Future<void> _openMaps(String location) async {
@@ -9812,7 +9817,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
             const SizedBox(height: 16),
           ],
 
-          // Linked lift section
+          // Linked lifts section
           Container(
             decoration: BoxDecoration(
               color: Colors.grey.withAlpha(12),
@@ -9828,69 +9833,72 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                       Text('Loading...', style: TextStyle(color: Colors.black45)),
                     ]),
                   )
-                : _linkedLift != null
-                    ? ListTile(
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                        leading: Icon(Icons.stairs, color: color),
+                : Column(
+                    children: [
+                      ..._linkedLifts.map((lift) => ListTile(
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                            leading: Icon(Icons.stairs, color: color),
+                            title: Text(
+                              '${lift.brand} ${lift.series}',
+                              style: const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (lift.serialNumber.isNotEmpty) Text('SN: ${lift.serialNumber}'),
+                                Text(
+                                  lift.status,
+                                  style: TextStyle(
+                                    color: lift.status == 'Installed'
+                                        ? Colors.green[700]
+                                        : lift.status == 'Assigned'
+                                            ? Colors.orange[700]
+                                            : Colors.black54,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                IconButton(
+                                  icon: const Icon(Icons.open_in_new, size: 18),
+                                  tooltip: 'View lift',
+                                  onPressed: () async {
+                                    await Navigator.of(context).push(
+                                      MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: lift)),
+                                    );
+                                    if (mounted) _loadMeta();
+                                  },
+                                ),
+                                IconButton(
+                                  icon: const Icon(Icons.link_off, size: 18, color: Colors.red),
+                                  tooltip: 'Remove link',
+                                  onPressed: _savingLift ? null : () => _unlinkLift(lift),
+                                ),
+                              ],
+                            ),
+                            onTap: () async {
+                              await Navigator.of(context).push(
+                                MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: lift)),
+                              );
+                              if (mounted) _loadMeta();
+                            },
+                          )),
+                      // Add lift button
+                      ListTile(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                        leading: Icon(
+                          _linkedLifts.isEmpty ? Icons.link : Icons.add_link,
+                          color: _linkedLifts.isEmpty ? Colors.grey[400] : color,
+                        ),
                         title: Text(
-                          '${_linkedLift!.brand} ${_linkedLift!.series}',
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (_linkedLift!.serialNumber.isNotEmpty)
-                              Text('SN: ${_linkedLift!.serialNumber}'),
-                            Text(
-                              _linkedLift!.status,
-                              style: TextStyle(
-                                color: _linkedLift!.status == 'Installed'
-                                    ? Colors.green[700]
-                                    : _linkedLift!.status == 'Assigned'
-                                        ? Colors.orange[700]
-                                        : Colors.black54,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.open_in_new, size: 18),
-                              tooltip: 'View lift',
-                              onPressed: () async {
-                                await Navigator.of(context).push(
-                                  MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: _linkedLift!)),
-                                );
-                                if (mounted) _loadMeta();
-                              },
-                            ),
-                            IconButton(
-                              icon: const Icon(Icons.link_off, size: 18, color: Colors.red),
-                              tooltip: 'Remove link',
-                              onPressed: _savingLift ? null : _unlinkLift,
-                            ),
-                          ],
-                        ),
-                        onTap: () async {
-                          await Navigator.of(context).push(
-                            MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: _linkedLift!)),
-                          );
-                          if (mounted) _loadMeta();
-                        },
-                      )
-                    : ListTile(
-                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                        leading: Icon(Icons.link, color: Colors.grey[400]),
-                        title: Text(
-                          'Link a lift',
-                          style: TextStyle(color: Colors.grey[600]),
-                        ),
-                        subtitle: Text(
-                          'Connect this event to a stairlift',
-                          style: TextStyle(fontSize: 12, color: Colors.grey[400]),
+                          _linkedLifts.isEmpty ? 'Link a lift' : 'Add another lift',
+                          style: TextStyle(
+                            color: _linkedLifts.isEmpty ? Colors.grey[600] : color,
+                            fontWeight: _linkedLifts.isEmpty ? FontWeight.normal : FontWeight.w500,
+                          ),
                         ),
                         trailing: _savingLift
                             ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
@@ -9905,6 +9913,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                                 if (lift != null) await _linkLift(lift);
                               },
                       ),
+                    ],
+                  ),
           ),
 
           const SizedBox(height: 20),
