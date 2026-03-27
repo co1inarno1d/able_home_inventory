@@ -102,6 +102,7 @@ class QbtScheduleEvent {
         'end': end.toUtc().toIso8601String(),
         'all_day': allDay,
         'location': location,
+        'color': color,
         'draft': false,
         'assigned_user_ids': assignedUserIds.join(','),
       };

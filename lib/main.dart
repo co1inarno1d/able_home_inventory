@@ -9506,6 +9506,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   bool _savingComplete = false;
 
   String? _jobType;
+  bool _savingJobType = false;
   List<LiftRecord> _linkedLifts = [];
   bool _loadingMeta = true;
   bool _savingLift = false;
@@ -9927,28 +9928,62 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
 
           const SizedBox(height: 20),
 
-          // Job type badge
-          if (_jobType != null && _jobType!.isNotEmpty) ...[
-            Row(
-              children: [
-                Icon(Icons.work_outline, size: 16, color: color),
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: color.withAlpha(30),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: color.withAlpha(80)),
-                  ),
-                  child: Text(
-                    _jobType!,
-                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color),
-                  ),
+          // Job type row — always shown, tappable to set/change
+          Row(
+            children: [
+              Icon(Icons.work_outline, size: 16, color: color),
+              const SizedBox(width: 6),
+              Text(
+                'Job Type',
+                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.grey[600]),
+              ),
+              const SizedBox(width: 8),
+              if (_loadingMeta)
+                const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+              else
+                DropdownButton<String>(
+                  value: (_jobType != null && const ['Install', 'Removal', 'Service', 'Annual Service', 'Reminder', 'Other'].contains(_jobType))
+                      ? _jobType
+                      : null,
+                  hint: Text('Set type', style: TextStyle(color: Colors.grey[500], fontSize: 13)),
+                  underline: const SizedBox(),
+                  isDense: true,
+                  items: [
+                    const DropdownMenuItem(value: null, child: Text('— None —', style: TextStyle(color: Colors.grey))),
+                    ...['Install', 'Removal', 'Service', 'Annual Service', 'Reminder', 'Other']
+                        .map((t) => DropdownMenuItem(value: t, child: Text(t))),
+                  ],
+                  onChanged: _savingJobType ? null : (val) async {
+                    setState(() {
+                      _jobType = val;
+                      _savingJobType = true;
+                    });
+                    await sbSetEventJobType(widget.event.id, val);
+                    if (mounted) setState(() => _savingJobType = false);
+                  },
+                  selectedItemBuilder: (_) => [
+                    const SizedBox.shrink(),
+                    ...['Install', 'Removal', 'Service', 'Annual Service', 'Reminder', 'Other'].map((t) =>
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: color.withAlpha(30),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: color.withAlpha(80)),
+                        ),
+                        child: Text(t, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-            const SizedBox(height: 16),
-          ],
+              if (_savingJobType)
+                const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
 
           // Linked lifts section
           Container(
@@ -10383,13 +10418,13 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
   static const _colorOptions = [
     '#2196F3', // blue
     '#EF6C00', // orange
-    '#2F7D46', // green
+    '#43A047', // green
     '#888888', // grey
-    '#E53935', // red
-    '#8E24AA', // purple
-    '#00897B', // teal
-    '#F9A825', // yellow
-    '#000000', // black
+    '#8A2731', // dark red
+    '#9C27B0', // purple
+    '#827717', // olive/dark yellow
+    '#F8C499', // peach
+    '#010101', // black
   ];
 
   bool get _isEditing => widget.existingEvent != null;
@@ -10738,7 +10773,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
                           : null,
                     ),
                     child: selected
-                        ? const Icon(Icons.check, color: Colors.white, size: 18)
+                        ? Icon(Icons.check, color: c.computeLuminance() > 0.35 ? Colors.black87 : Colors.white, size: 18)
                         : null,
                   ),
                 );
