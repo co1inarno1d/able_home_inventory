@@ -2924,6 +2924,36 @@ class _JobsScreenState extends State<JobsScreen>
                 note: 'Marked $newStatus via schedule event: ${event.title}',
               );
             }
+          } else if ((jobType == 'Service' || jobType == 'Annual Service') && mounted) {
+            final serviceType = jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
+            final confirm = await showDialog<bool>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: const Text('Log service record?'),
+                content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                    child: const Text('Log Service'),
+                  ),
+                ],
+              ),
+            );
+            if (confirm == true && mounted) {
+              await Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => LiftServiceFormScreen(
+                    lift: lift,
+                    prefillServiceType: serviceType,
+                    prefillCustomerName: event.title,
+                    prefillDate: formatDate(DateTime.now()),
+                    offerInvoicePhoto: true,
+                  ),
+                ),
+              );
+            }
           }
         }
       }
@@ -9114,6 +9144,36 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                           note: 'Marked $newStatus via schedule event: ${event.title}',
                         );
                       }
+                    } else if ((jobType == 'Service' || jobType == 'Annual Service') && mounted) {
+                      final serviceType = jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
+                      final confirm = await showDialog<bool>(
+                        context: context,
+                        builder: (_) => AlertDialog(
+                          title: const Text('Log service record?'),
+                          content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
+                          actions: [
+                            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                            ElevatedButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                              child: const Text('Log Service'),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (confirm == true && mounted) {
+                        await Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => LiftServiceFormScreen(
+                              lift: lift,
+                              prefillServiceType: serviceType,
+                              prefillCustomerName: event.title,
+                              prefillDate: formatDate(DateTime.now()),
+                              offerInvoicePhoto: true,
+                            ),
+                          ),
+                        );
+                      }
                     }
                   }
                 }
@@ -9450,6 +9510,9 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   bool _loadingMeta = true;
   bool _savingLift = false;
 
+  List<String> _eventPhotoUrls = [];
+  bool _uploadingPhoto = false;
+
   @override
   void initState() {
     super.initState();
@@ -9475,12 +9538,105 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       final l = await sbFetchLiftById(id);
       if (l != null) lifts.add(l);
     }
+    final photos = await sbFetchEventPhotos(widget.event.id);
     if (!mounted) return;
     setState(() {
       _jobType = meta['job_type'] as String?;
       _linkedLifts = lifts;
       _loadingMeta = false;
+      _eventPhotoUrls = photos;
     });
+  }
+
+  void _viewPhoto(BuildContext ctx, String url) {
+    Navigator.of(ctx).push(MaterialPageRoute(
+      builder: (_) => _PhotoViewScreen(url: url),
+    ));
+  }
+
+  Future<void> _addEventPhoto() async {
+    final ImageSource source;
+    if (kIsWeb) {
+      source = ImageSource.gallery;
+    } else {
+      final picked = await showModalBottomSheet<ImageSource>(
+        context: context,
+        builder: (ctx) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('Take photo'),
+                onTap: () => Navigator.of(ctx).pop(ImageSource.camera),
+              ),
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: const Text('Choose from library'),
+                onTap: () => Navigator.of(ctx).pop(ImageSource.gallery),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (picked == null || !mounted) return;
+      source = picked;
+    }
+
+    final picker = ImagePicker();
+    final imageFile = await picker.pickImage(source: source, imageQuality: 90);
+    if (imageFile == null || !mounted) return;
+
+    setState(() => _uploadingPhoto = true);
+    try {
+      await sbUploadEventPhoto(
+        eventId: widget.event.id,
+        imageFile: imageFile,
+        linkedLiftIds: _linkedLifts.map((l) => l.liftId).toList(),
+      );
+      final urls = await sbFetchEventPhotos(widget.event.id);
+      if (mounted) {
+        setState(() {
+          _eventPhotoUrls = urls;
+          _uploadingPhoto = false;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Photo added')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _uploadingPhoto = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Upload failed: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteEventPhoto(String url) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: 'Delete photo?',
+      content: 'This cannot be undone.',
+    );
+    if (!confirmed || !mounted) return;
+
+    try {
+      await sbDeleteEventPhoto(
+        eventId: widget.event.id,
+        fileUrl: url,
+        linkedLiftIds: _linkedLifts.map((l) => l.liftId).toList(),
+      );
+      final urls = await sbFetchEventPhotos(widget.event.id);
+      if (mounted) setState(() => _eventPhotoUrls = urls);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Delete failed: $e')),
+        );
+      }
+    }
   }
 
   Future<void> _linkLift(LiftRecord lift) async {
@@ -10004,6 +10160,106 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
             ),
           ],
 
+          const SizedBox(height: 20),
+
+          // Photos section
+          Row(
+            children: [
+              Icon(Icons.photo_library_outlined, color: color, size: 20),
+              const SizedBox(width: 8),
+              Text(
+                'Photos',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[600],
+                ),
+              ),
+              const Spacer(),
+              TextButton.icon(
+                onPressed: _uploadingPhoto ? null : _addEventPhoto,
+                icon: _uploadingPhoto
+                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                    : Icon(Icons.add_a_photo, size: 16, color: color),
+                label: Text('Add photo', style: TextStyle(color: color, fontSize: 13)),
+              ),
+            ],
+          ),
+          if (_eventPhotoUrls.isEmpty && !_uploadingPhoto)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                'No photos yet',
+                style: TextStyle(color: Colors.grey[500], fontSize: 13),
+              ),
+            )
+          else
+            SizedBox(
+              height: 100,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: _eventPhotoUrls.length + (_uploadingPhoto ? 1 : 0),
+                itemBuilder: (context, index) {
+                  if (_uploadingPhoto && index == _eventPhotoUrls.length) {
+                    return Container(
+                      width: 100,
+                      margin: const EdgeInsets.only(right: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade200,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Center(child: CircularProgressIndicator()),
+                    );
+                  }
+                  final url = _eventPhotoUrls[index];
+                  return GestureDetector(
+                    onTap: () => _viewPhoto(context, url),
+                    onLongPress: () => _deleteEventPhoto(url),
+                    child: Stack(
+                      children: [
+                        Container(
+                          width: 100,
+                          margin: const EdgeInsets.only(right: 8),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Image.network(
+                              url,
+                              fit: BoxFit.cover,
+                              loadingBuilder: (_, child, progress) => progress == null
+                                  ? child
+                                  : Container(
+                                      color: Colors.grey.shade200,
+                                      child: const Center(child: CircularProgressIndicator()),
+                                    ),
+                              errorBuilder: (_, __, e) => Container(
+                                color: Colors.grey.shade200,
+                                child: const Icon(Icons.broken_image, color: Colors.grey),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          top: 4,
+                          right: 12,
+                          child: GestureDetector(
+                            onTap: () => _deleteEventPhoto(url),
+                            child: Container(
+                              decoration: const BoxDecoration(
+                                color: Colors.black54,
+                                shape: BoxShape.circle,
+                              ),
+                              padding: const EdgeInsets.all(3),
+                              child: const Icon(Icons.close, color: Colors.white, size: 14),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+
           const SizedBox(height: 32),
 
           // Edit button
@@ -10133,6 +10389,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
     '#8E24AA', // purple
     '#00897B', // teal
     '#F9A825', // yellow
+    '#000000', // black
   ];
 
   bool get _isEditing => widget.existingEvent != null;

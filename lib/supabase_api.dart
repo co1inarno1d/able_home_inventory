@@ -678,6 +678,131 @@ Future<List<String>> sbFetchLiftPhotos({required String liftId}) async {
 }
 
 // ---------------------------------------------------------------------------
+// SCHEDULE EVENT PHOTOS
+// ---------------------------------------------------------------------------
+
+Future<List<String>> sbFetchEventPhotos(String eventId) async {
+  final row = await _sb
+      .from('app_config')
+      .select('value')
+      .eq('key', 'event_photos_$eventId')
+      .maybeSingle();
+  if (row == null) return [];
+  try {
+    final decoded = jsonDecode(row['value'] as String);
+    if (decoded is List) return decoded.map((e) => e.toString()).toList();
+  } catch (_) {}
+  return [];
+}
+
+Future<String> sbUploadEventPhoto({
+  required String eventId,
+  required XFile imageFile,
+  List<String> linkedLiftIds = const [],
+}) async {
+  final Uint8List imageBytes;
+  if (kIsWeb) {
+    imageBytes = await imageFile.readAsBytes();
+  } else {
+    final compressed = await FlutterImageCompress.compressWithFile(
+      imageFile.path,
+      minWidth: 1200,
+      minHeight: 1200,
+      quality: 85,
+      format: CompressFormat.jpeg,
+      keepExif: false,
+    );
+    if (compressed == null) throw Exception('Image compression failed');
+    imageBytes = compressed;
+  }
+
+  final fileName = 'events/$eventId/${DateTime.now().millisecondsSinceEpoch}.jpg';
+  await _sb.storage.from(_photosBucket).uploadBinary(
+        fileName,
+        imageBytes,
+        fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: false),
+      );
+  final url = _sb.storage.from(_photosBucket).getPublicUrl(fileName);
+
+  // Save URL to app_config
+  final existing = await sbFetchEventPhotos(eventId);
+  existing.add(url);
+  await _sb.from('app_config').upsert(
+    {
+      'key': 'event_photos_$eventId',
+      'value': jsonEncode(existing),
+      'updated_at': DateTime.now().toIso8601String(),
+    },
+    onConflict: 'key',
+  );
+
+  // Also append to each linked lift's photo_urls
+  for (final liftId in linkedLiftIds) {
+    final liftRow = await _sb
+        .from('lifts')
+        .select('photo_urls')
+        .eq('lift_id', liftId)
+        .maybeSingle();
+    final current = List<String>.from(
+        (liftRow?['photo_urls'] as List<dynamic>?) ?? []);
+    current.add(url);
+    await _sb.from('lifts').update({
+      'photo_urls': current,
+      'updated_at': DateTime.now().toIso8601String(),
+    }).eq('lift_id', liftId);
+  }
+
+  return url;
+}
+
+Future<void> sbDeleteEventPhoto({
+  required String eventId,
+  required String fileUrl,
+  List<String> linkedLiftIds = const [],
+}) async {
+  // Delete from storage
+  final uri = Uri.parse(fileUrl);
+  final pathSegments = uri.pathSegments;
+  final bucketIndex = pathSegments.indexOf(_photosBucket);
+  if (bucketIndex >= 0 && bucketIndex < pathSegments.length - 1) {
+    final storagePath = pathSegments.sublist(bucketIndex + 1).join('/');
+    await _sb.storage.from(_photosBucket).remove([storagePath]);
+  }
+
+  // Remove from app_config list
+  final existing = await sbFetchEventPhotos(eventId);
+  existing.remove(fileUrl);
+  if (existing.isEmpty) {
+    await _sb.from('app_config').delete().eq('key', 'event_photos_$eventId');
+  } else {
+    await _sb.from('app_config').upsert(
+      {
+        'key': 'event_photos_$eventId',
+        'value': jsonEncode(existing),
+        'updated_at': DateTime.now().toIso8601String(),
+      },
+      onConflict: 'key',
+    );
+  }
+
+  // Remove from linked lifts' photo_urls
+  for (final liftId in linkedLiftIds) {
+    final liftRow = await _sb
+        .from('lifts')
+        .select('photo_urls')
+        .eq('lift_id', liftId)
+        .maybeSingle();
+    final current = List<String>.from(
+        (liftRow?['photo_urls'] as List<dynamic>?) ?? []);
+    current.remove(fileUrl);
+    await _sb.from('lifts').update({
+      'photo_urls': current,
+      'updated_at': DateTime.now().toIso8601String(),
+    }).eq('lift_id', liftId);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // PICKUP LIST
 // ---------------------------------------------------------------------------
 
