@@ -134,53 +134,69 @@ Future<Map<String, QbtUser>> qbtFetchUsers() async {
 
 /// Fetch all schedule events for the given date range (inclusive).
 /// [start] and [end] are local dates — we extend end by 1 day to be inclusive.
+/// Automatically fetches all pages from the TSheets API.
 Future<List<QbtScheduleEvent>> qbtFetchScheduleEvents({
   required DateTime start,
   required DateTime end,
 }) async {
-  // QBT needs ISO-8601 with time component
   final startIso = '${_dateOnly(start)}T00:00:00+00:00';
   final endIso = '${_dateOnly(end)}T23:59:59+00:00';
 
-  final uri = Uri.parse(
-    '$_qbtBase/schedule_events'
-    '?schedule_calendar_ids=$_calendarId'
-    '&start=${Uri.encodeComponent(startIso)}'
-    '&end=${Uri.encodeComponent(endIso)}'
-    '&active=both'
-    '&per_page=200',
-  );
+  final allEvents = <QbtScheduleEvent>[];
+  int page = 1;
 
-  final resp = await http.get(uri, headers: _headers);
-  _checkStatus(resp);
+  while (true) {
+    final uri = Uri.parse(
+      '$_qbtBase/schedule_events'
+      '?schedule_calendar_ids=$_calendarId'
+      '&start=${Uri.encodeComponent(startIso)}'
+      '&end=${Uri.encodeComponent(endIso)}'
+      '&active=both'
+      '&per_page=200'
+      '&page=$page',
+    );
 
-  final body = jsonDecode(resp.body) as Map<String, dynamic>;
-  final eventsMap =
-      (body['results']?['schedule_events'] as Map<String, dynamic>?) ?? {};
+    final resp = await http.get(uri, headers: _headers);
+    _checkStatus(resp);
 
-  final events = eventsMap.values
-      .map((e) => QbtScheduleEvent.fromJson(e as Map<String, dynamic>))
-      .where((e) => e.active)
-      .toList();
+    final body = jsonDecode(resp.body) as Map<String, dynamic>;
+    final eventsMap =
+        (body['results']?['schedule_events'] as Map<String, dynamic>?) ?? {};
 
-  // Sort by start time
-  events.sort((a, b) => a.start.compareTo(b.start));
-  return events;
+    allEvents.addAll(
+      eventsMap.values
+          .map((e) => QbtScheduleEvent.fromJson(e as Map<String, dynamic>))
+          .where((e) => e.active),
+    );
+
+    if (body['more'] != true) break;
+    page++;
+  }
+
+  allEvents.sort((a, b) => a.start.compareTo(b.start));
+  return allEvents;
 }
 
 /// Create a new schedule event. Returns the created event.
 Future<QbtScheduleEvent> qbtCreateScheduleEvent(QbtScheduleEvent event) async {
   final uri = Uri.parse('$_qbtBase/schedule_events');
+  final bodyStr = jsonEncode({'data': [event.toJson()]});
+  debugPrint('[QBT POST] payload: $bodyStr');
   final resp = await http.post(
     uri,
     headers: _headers,
-    body: jsonEncode({'data': [event.toJson()]}),
+    body: bodyStr,
   );
+  debugPrint('[QBT POST] status: ${resp.statusCode} body: ${resp.body}');
   _checkStatus(resp);
+  _checkTsheetsBodyErrors(resp.body);
 
   final body = jsonDecode(resp.body) as Map<String, dynamic>;
   final eventsMap =
       (body['results']?['schedule_events'] as Map<String, dynamic>?) ?? {};
+  if (eventsMap.isEmpty) {
+    throw Exception('TSheets did not return a created event');
+  }
   final created = eventsMap.values.first as Map<String, dynamic>;
   return QbtScheduleEvent.fromJson(created);
 }
