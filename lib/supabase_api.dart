@@ -28,6 +28,7 @@ import 'main.dart'
         RemovalJobRecord,
         ServiceJobRecord,
         StairliftItem,
+        WebLeadRecord,
         normalizeDrivePhotoUrl;
 
 // ---------------------------------------------------------------------------
@@ -1421,4 +1422,25 @@ Map<String, dynamic> sbGetPrepChecklistTemplate({
     'checklist_type': checklistType,
     'fields': _prepChecklistTemplates[checklistType]!,
   };
+}
+
+// ---------------------------------------------------------------------------
+// WEB LEADS
+// ---------------------------------------------------------------------------
+
+Future<List<WebLeadRecord>> sbFetchWebLeads() async {
+  final raw = await _sb
+      .from('web_leads')
+      .select()
+      .order('created_at', ascending: false);
+  return (raw as List)
+      .map((r) => WebLeadRecord.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+Future<void> sbUpdateWebLeadStatus({
+  required int id,
+  required String status,
+}) async {
+  await _sb.from('web_leads').update({'status': status}).eq('id', id);
 }

@@ -1354,6 +1354,46 @@ class RemovalJobRecord {
 }
 
 // =======================
+// WEB LEAD MODEL
+// =======================
+
+class WebLeadRecord {
+  final int id;
+  final DateTime createdAt;
+  final String name;
+  final String email;
+  final String phone;
+  final String message;
+  final String source;
+  final String status;
+
+  WebLeadRecord({
+    required this.id,
+    required this.createdAt,
+    required this.name,
+    required this.email,
+    required this.phone,
+    required this.message,
+    required this.source,
+    required this.status,
+  });
+
+  factory WebLeadRecord.fromJson(Map<String, dynamic> json) {
+    String s(dynamic v) => v?.toString() ?? '';
+    return WebLeadRecord(
+      id: (json['id'] as num).toInt(),
+      createdAt: DateTime.parse(json['created_at'].toString()),
+      name: s(json['name']),
+      email: s(json['email']),
+      phone: s(json['phone']),
+      message: s(json['message']),
+      source: s(json['source']),
+      status: s(json['status']),
+    );
+  }
+}
+
+// =======================
 // ANNUALS SCREEN
 // =======================
 
@@ -2765,13 +2805,14 @@ class _JobsScreenState extends State<JobsScreen>
   Map<String, Map<String, dynamic>> _allMeta = {};
   Set<String> _completedIds = {};
   Map<String, List<LiftRecord>> _liftsByEvent = {};
+  List<WebLeadRecord> _webLeads = [];
   bool _loading = true;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this);
     _load();
   }
 
@@ -2795,6 +2836,7 @@ class _JobsScreenState extends State<JobsScreen>
         qbtFetchUsers(),
         sbGetAllEventMeta(),
         sbFetchCompletedEventIds(),
+        sbFetchWebLeads(),
       ]);
       if (!mounted) return;
       final events = results[0] as List<QbtScheduleEvent>;
@@ -2825,6 +2867,7 @@ class _JobsScreenState extends State<JobsScreen>
         _users = results[1] as Map<String, QbtUser>;
         _allMeta = allMeta;
         _completedIds = results[3] as Set<String>;
+        _webLeads = results[4] as List<WebLeadRecord>;
         _liftsByEvent = liftsByEvent;
         _loading = false;
       });
@@ -2979,6 +3022,7 @@ class _JobsScreenState extends State<JobsScreen>
             Tab(text: 'Installs'),
             Tab(text: 'Removals'),
             Tab(text: 'Service'),
+            Tab(text: 'Web Leads'),
           ],
         ),
       ),
@@ -3025,6 +3069,7 @@ class _JobsScreenState extends State<JobsScreen>
                       parseEventColor: _parseEventColor,
                       assignedNames: _assignedNames,
                     ),
+                    _WebLeadsTab(leads: _webLeads, onRefresh: _load),
                   ],
                 ),
       floatingActionButton: FloatingActionButton.extended(
@@ -3875,6 +3920,139 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// =======================
+// WEB LEADS TAB
+// =======================
+
+class _WebLeadsTab extends StatelessWidget {
+  final List<WebLeadRecord> leads;
+  final VoidCallback onRefresh;
+
+  const _WebLeadsTab({required this.leads, required this.onRefresh});
+
+  @override
+  Widget build(BuildContext context) {
+    if (leads.isEmpty) {
+      return const Center(
+        child: Text('No web leads yet.', style: TextStyle(color: Colors.grey)),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: () async => onRefresh(),
+      child: ListView.builder(
+        padding: const EdgeInsets.all(12),
+        itemCount: leads.length,
+        itemBuilder: (context, i) =>
+            _WebLeadCard(lead: leads[i], onRefresh: onRefresh),
+      ),
+    );
+  }
+}
+
+class _WebLeadCard extends StatelessWidget {
+  final WebLeadRecord lead;
+  final VoidCallback onRefresh;
+
+  const _WebLeadCard({required this.lead, required this.onRefresh});
+
+  Color get _statusColor {
+    switch (lead.status) {
+      case 'Contacted':
+        return Colors.blue;
+      case 'Closed':
+        return Colors.grey;
+      default:
+        return kBrandGreen;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dt = lead.createdAt.toLocal();
+    final dateStr = '${dt.month}/${dt.day}/${dt.year}';
+
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Text(
+                    lead.name,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.bold, fontSize: 16),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _statusColor.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(12),
+                    border:
+                        Border.all(color: _statusColor.withOpacity(0.4)),
+                  ),
+                  child: Text(
+                    lead.status,
+                    style: TextStyle(
+                        color: _statusColor,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(lead.email,
+                style: const TextStyle(color: Colors.blue, fontSize: 13)),
+            if (lead.phone.isNotEmpty)
+              Text(lead.phone,
+                  style: const TextStyle(fontSize: 13)),
+            const SizedBox(height: 6),
+            Text(
+              lead.message,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  '$dateStr · ${lead.source == 'hero_form' ? 'Hero Form' : 'Contact Form'}',
+                  style:
+                      const TextStyle(color: Colors.grey, fontSize: 11),
+                ),
+                PopupMenuButton<String>(
+                  onSelected: (status) async {
+                    await sbUpdateWebLeadStatus(
+                        id: lead.id, status: status);
+                    onRefresh();
+                  },
+                  itemBuilder: (_) => ['New', 'Contacted', 'Closed']
+                      .map((s) =>
+                          PopupMenuItem(value: s, child: Text(s)))
+                      .toList(),
+                  child: const Text('Update Status',
+                      style:
+                          TextStyle(color: Colors.blue, fontSize: 12)),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );
