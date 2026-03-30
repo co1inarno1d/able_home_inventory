@@ -612,7 +612,7 @@ const _seriesOrder = [
 /// Hardcoded series per brand for the Lifts filter.
 const Map<String, List<String>> _seriesByBrandHardcoded = {
   'Acorn': ['T700', '130', '120', 'Outdoor T700', 'Outdoor 130', 'Outdoor 120'],
-  'Brooks': ['T700', '130', 'Outdoor T700', 'Outdoor 130'],
+  'Brooks': ['T700', '130', '120', 'Outdoor T700', 'Outdoor 130', 'Outdoor 120'],
   'Bruno': ['Elan 3050', 'Elan 3000', 'Elite', 'Outdoor Elite'],
   'Harmar': ['SL300', 'SL600'],
 };
@@ -3327,12 +3327,15 @@ class _InstallsTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final oneWeekAgo = now.subtract(const Duration(days: 7));
+    final oneWeekAhead = now.add(const Duration(days: 7));
     final pending = events
-        .where((e) => !completedIds.contains(e.id))
+        .where((e) => !completedIds.contains(e.id) && !e.start.isAfter(oneWeekAhead))
         .toList()
       ..sort((a, b) => a.start.compareTo(b.start));
     final completed = events
-        .where((e) => completedIds.contains(e.id))
+        .where((e) => completedIds.contains(e.id) && e.start.isAfter(oneWeekAgo))
         .toList()
       ..sort((a, b) => b.start.compareTo(a.start));
 
@@ -3415,12 +3418,15 @@ class _RemovalsTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final oneWeekAgo = now.subtract(const Duration(days: 7));
+    final oneWeekAhead = now.add(const Duration(days: 7));
     final pending = events
-        .where((e) => !completedIds.contains(e.id))
+        .where((e) => !completedIds.contains(e.id) && !e.start.isAfter(oneWeekAhead))
         .toList()
       ..sort((a, b) => a.start.compareTo(b.start));
     final completed = events
-        .where((e) => completedIds.contains(e.id))
+        .where((e) => completedIds.contains(e.id) && e.start.isAfter(oneWeekAgo))
         .toList()
       ..sort((a, b) => b.start.compareTo(a.start));
 
@@ -3517,12 +3523,15 @@ class _ServiceTabState extends State<_ServiceTab> {
           e.location.toLowerCase().contains(_search.toLowerCase());
     }).toList();
 
+    final now = DateTime.now();
+    final oneWeekAgo = now.subtract(const Duration(days: 7));
+    final oneWeekAhead = now.add(const Duration(days: 7));
     final pending = filtered
-        .where((e) => !widget.completedIds.contains(e.id))
+        .where((e) => !widget.completedIds.contains(e.id) && !e.start.isAfter(oneWeekAhead))
         .toList()
       ..sort((a, b) => a.start.compareTo(b.start));
     final completed = filtered
-        .where((e) => widget.completedIds.contains(e.id))
+        .where((e) => widget.completedIds.contains(e.id) && e.start.isAfter(oneWeekAgo))
         .toList()
       ..sort((a, b) => b.start.compareTo(a.start));
 
@@ -5609,6 +5618,12 @@ class _LiftsScreenState extends State<LiftsScreen> {
 
             // Search filter (applies to multiple fields)
             if (_search.isNotEmpty) {
+              // Normalize queries like "bin 24", "bin#24", "bin# 24" → just "24"
+              String effectiveSearch = _search;
+              final binPattern = RegExp(r'^bin\s*#?\s*(\w+)$', caseSensitive: false);
+              final binMatch = binPattern.firstMatch(_search.trim());
+              if (binMatch != null) effectiveSearch = binMatch.group(1)!.toLowerCase();
+
               final haystack = [
                 l.serialNumber,
                 l.binNumber,
@@ -5617,7 +5632,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 l.currentLocation,
                 l.currentJob,
               ].join(' ').toLowerCase();
-              if (!haystack.contains(_search)) return false;
+              if (!haystack.contains(effectiveSearch)) return false;
             }
 
             return true;
@@ -5625,9 +5640,15 @@ class _LiftsScreenState extends State<LiftsScreen> {
 
           // Search ranking: exact bin/serial matches float to top
           if (_search.isNotEmpty) {
+            // Normalize for ranking too
+            String effectiveSearch = _search;
+            final binPattern = RegExp(r'^bin\s*#?\s*(\w+)$', caseSensitive: false);
+            final binMatch = binPattern.firstMatch(_search.trim());
+            if (binMatch != null) effectiveSearch = binMatch.group(1)!.toLowerCase();
+
             filtered.sort((a, b) {
               int rank(LiftRecord r) {
-                final s = _search;
+                final s = effectiveSearch;
                 if (r.binNumber.toLowerCase() == s) return 0;
                 if (r.serialNumber.toLowerCase() == s) return 1;
                 if (r.binNumber.toLowerCase().startsWith(s)) return 2;
@@ -6780,6 +6801,8 @@ class _StairliftQuantitiesScreenState
 
             final brand = parts[0];
             final series = parts[1];
+            // Skip fold items — those are tracked in the Folding Rails screen
+            if (series.trim().toLowerCase().contains('fold')) continue;
             final orientation = parts[2];
             final condition = parts[3];
             final currentQty = counts[key] ?? 0;
@@ -9585,16 +9608,27 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     }
 
     final picker = ImagePicker();
-    final imageFile = await picker.pickImage(source: source, imageQuality: 90);
-    if (imageFile == null || !mounted) return;
+    final List<XFile> imageFiles;
+    if (source == ImageSource.gallery) {
+      imageFiles = await picker.pickMultiImage(imageQuality: 90);
+    } else {
+      final single = await picker.pickImage(source: source, imageQuality: 90);
+      imageFiles = single != null ? [single] : [];
+    }
+    if (imageFiles.isEmpty || !mounted) return;
 
     setState(() => _uploadingPhoto = true);
     try {
-      await sbUploadEventPhoto(
-        eventId: widget.event.id,
-        imageFile: imageFile,
-        linkedLiftIds: _linkedLifts.map((l) => l.liftId).toList(),
-      );
+      for (final imageFile in imageFiles) {
+        await sbUploadEventPhoto(
+          eventId: widget.event.id,
+          imageFile: imageFile,
+          linkedLiftIds: _linkedLifts.map((l) => l.liftId).toList(),
+          eventTitle: widget.event.title,
+          eventDate: widget.event.start,
+          eventLocation: widget.event.location,
+        );
+      }
       final urls = await sbFetchEventPhotos(widget.event.id);
       if (mounted) {
         setState(() {
@@ -9602,7 +9636,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           _uploadingPhoto = false;
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Photo added')),
+          SnackBar(content: Text(imageFiles.length == 1 ? 'Photo added' : '${imageFiles.length} photos added')),
         );
       }
     } catch (e) {
@@ -9645,14 +9679,17 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     setState(() => _savingLift = true);
     final newIds = [..._linkedLifts.map((l) => l.liftId), lift.liftId];
     await sbSetEventLiftIds(widget.event.id, newIds);
-    final prefs = await SharedPreferences.getInstance();
-    await sbMarkLiftStatus(
-      liftId: lift.liftId,
-      newStatus: 'Assigned',
-      userEmail: prefs.getString('user_email') ?? '',
-      userName: prefs.getString('user_name') ?? '',
-      note: 'Assigned to schedule event: ${widget.event.title}',
-    );
+    // Only set status to Assigned for Install jobs; Service/Removal leave status unchanged
+    if (_jobType == 'Install') {
+      final prefs = await SharedPreferences.getInstance();
+      await sbMarkLiftStatus(
+        liftId: lift.liftId,
+        newStatus: 'Assigned',
+        userEmail: prefs.getString('user_email') ?? '',
+        userName: prefs.getString('user_name') ?? '',
+        note: 'Assigned to schedule event: ${widget.event.title}',
+      );
+    }
     if (!mounted) return;
     await _loadMeta(); // refresh to get updated lift status
   }
@@ -9661,14 +9698,17 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     setState(() => _savingLift = true);
     final newIds = _linkedLifts.where((l) => l.liftId != lift.liftId).map((l) => l.liftId).toList();
     await sbSetEventLiftIds(widget.event.id, newIds);
-    final prefs = await SharedPreferences.getInstance();
-    await sbMarkLiftStatus(
-      liftId: lift.liftId,
-      newStatus: 'In Stock',
-      userEmail: prefs.getString('user_email') ?? '',
-      userName: prefs.getString('user_name') ?? '',
-      note: 'Unlinked from schedule event: ${widget.event.title}',
-    );
+    // Only revert to In Stock when unlinking from an Install job
+    if (_jobType == 'Install') {
+      final prefs = await SharedPreferences.getInstance();
+      await sbMarkLiftStatus(
+        liftId: lift.liftId,
+        newStatus: 'In Stock',
+        userEmail: prefs.getString('user_email') ?? '',
+        userName: prefs.getString('user_name') ?? '',
+        note: 'Unlinked from schedule event: ${widget.event.title}',
+      );
+    }
     if (!mounted) return;
     setState(() {
       _linkedLifts = _linkedLifts.where((l) => l.liftId != lift.liftId).toList();

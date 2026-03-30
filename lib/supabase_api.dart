@@ -699,6 +699,9 @@ Future<String> sbUploadEventPhoto({
   required String eventId,
   required XFile imageFile,
   List<String> linkedLiftIds = const [],
+  String eventTitle = '',
+  DateTime? eventDate,
+  String eventLocation = '',
 }) async {
   final Uint8List imageBytes;
   if (kIsWeb) {
@@ -716,7 +719,22 @@ Future<String> sbUploadEventPhoto({
     imageBytes = compressed;
   }
 
-  final fileName = 'events/$eventId/${DateTime.now().millisecondsSinceEpoch}.jpg';
+  // Build a descriptive folder/filename: events/JobTitle_YYYY-MM-DD/location_N.jpg
+  String sanitize(String s) =>
+      s.trim().replaceAll(RegExp(r'[^\w\s-]'), '').replaceAll(RegExp(r'\s+'), '_');
+
+  final folderTitle = sanitize(eventTitle.isNotEmpty ? eventTitle : eventId);
+  final dateStr = eventDate != null
+      ? '${eventDate.year}-${eventDate.month.toString().padLeft(2, '0')}-${eventDate.day.toString().padLeft(2, '0')}'
+      : DateTime.now().toIso8601String().substring(0, 10);
+  final locationLabel = sanitize(eventLocation.isNotEmpty ? eventLocation : 'photo');
+  final folderPath = 'events/${folderTitle}_$dateStr';
+
+  // Fetch existing photos once — used for index and for saving the updated list
+  final existing = await sbFetchEventPhotos(eventId);
+  final index = existing.length + 1;
+
+  final fileName = '$folderPath/${locationLabel}_$index.jpg';
   await _sb.storage.from(_photosBucket).uploadBinary(
         fileName,
         imageBytes,
@@ -725,7 +743,6 @@ Future<String> sbUploadEventPhoto({
   final url = _sb.storage.from(_photosBucket).getPublicUrl(fileName);
 
   // Save URL to app_config
-  final existing = await sbFetchEventPhotos(eventId);
   existing.add(url);
   await _sb.from('app_config').upsert(
     {
