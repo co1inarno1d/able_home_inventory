@@ -17,6 +17,10 @@ import 'supabase_api.dart';
 
 /// Brand color
 const Color kBrandGreen = Color(0xFF2F7D46);
+const Color kBrandGreenDark = Color(0xFF1A4728);
+const Color kSurface = Color(0xFFF0F2F0);
+const Color kCardSurface = Color(0xFFFFFFFF);
+const Color kHeaderText = Color(0xFFE8F5E9);
 
 /// Format a DateTime to a readable date string (MM/DD/YYYY)
 String formatDate(DateTime? date) {
@@ -78,68 +82,105 @@ class AbleHomeInventoryApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(
           seedColor: kBrandGreen,
           brightness: Brightness.light,
+          surface: kSurface,
         ),
+        scaffoldBackgroundColor: kSurface,
         useMaterial3: true,
-        textTheme: GoogleFonts.interTextTheme(),
+        textTheme: GoogleFonts.nunitoTextTheme(),
         appBarTheme: AppBarTheme(
-          backgroundColor: kBrandGreen,
+          backgroundColor: kBrandGreenDark,
           foregroundColor: Colors.white,
           elevation: 0,
           centerTitle: false,
-          titleTextStyle: GoogleFonts.inter(
+          titleTextStyle: GoogleFonts.nunito(
             color: Colors.white,
-            fontSize: 18,
-            fontWeight: FontWeight.w600,
-            letterSpacing: -0.2,
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.3,
           ),
           iconTheme: const IconThemeData(color: Colors.white),
           actionsIconTheme: const IconThemeData(color: Colors.white),
+          toolbarHeight: 60,
         ),
         cardTheme: CardThemeData(
-          elevation: 2,
-          shadowColor: Colors.black.withValues(alpha: 0.08),
+          elevation: 0,
+          color: kCardSurface,
+          shadowColor: Colors.transparent,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(14),
+            side: BorderSide(color: Colors.grey.shade200, width: 1),
           ),
           margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
         ),
-        floatingActionButtonTheme: const FloatingActionButtonThemeData(
+        floatingActionButtonTheme: FloatingActionButtonThemeData(
           backgroundColor: kBrandGreen,
           foregroundColor: Colors.white,
+          elevation: 3,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         ),
         bottomNavigationBarTheme: BottomNavigationBarThemeData(
-          selectedItemColor: kBrandGreen,
-          unselectedItemColor: Colors.grey.shade500,
-          backgroundColor: Colors.white,
-          elevation: 8,
+          selectedItemColor: Colors.white,
+          unselectedItemColor: Colors.white.withValues(alpha: 0.45),
+          backgroundColor: kBrandGreenDark,
+          elevation: 0,
           type: BottomNavigationBarType.fixed,
-          selectedLabelStyle: GoogleFonts.inter(
-            fontSize: 11,
-            fontWeight: FontWeight.w600,
-          ),
-          unselectedLabelStyle: GoogleFonts.inter(
-            fontSize: 11,
-            fontWeight: FontWeight.w400,
-          ),
+          selectedLabelStyle: GoogleFonts.nunito(fontSize: 11, fontWeight: FontWeight.w700),
+          unselectedLabelStyle: GoogleFonts.nunito(fontSize: 11, fontWeight: FontWeight.w400),
         ),
         inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: Colors.white,
           border: OutlineInputBorder(
             borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: Colors.grey.shade300),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: BorderSide(color: Colors.grey.shade300),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(10),
+            borderSide: const BorderSide(color: kBrandGreen, width: 2),
           ),
           contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          hintStyle: GoogleFonts.nunito(color: Colors.grey.shade400, fontSize: 14),
+          prefixIconColor: Colors.grey.shade400,
         ),
         chipTheme: ChipThemeData(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
-          ),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          labelStyle: GoogleFonts.nunito(fontSize: 12, fontWeight: FontWeight.w600),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          side: BorderSide(color: Colors.grey.shade300),
         ),
-        dividerTheme: DividerThemeData(
-          color: Colors.grey.shade200,
-          thickness: 1,
+        dividerTheme: DividerThemeData(color: Colors.grey.shade200, thickness: 1, space: 1),
+        listTileTheme: ListTileThemeData(
+          tileColor: kCardSurface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+        ),
+        tabBarTheme: TabBarThemeData(
+          labelStyle: GoogleFonts.nunito(fontSize: 13, fontWeight: FontWeight.w700),
+          unselectedLabelStyle: GoogleFonts.nunito(fontSize: 13, fontWeight: FontWeight.w500),
+          indicatorColor: Colors.white,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white.withValues(alpha: 0.55),
+          dividerColor: Colors.transparent,
         ),
       ),
-      home: const HomeShell(),
+      home: const _ResponsiveShell(),
     );
+  }
+}
+
+/// On wide screens (desktop/tablet): centers the app in a max-width container
+/// with a clean dark green sidebar accent. On mobile: full screen.
+class _ResponsiveShell extends StatelessWidget {
+  const _ResponsiveShell();
+
+  @override
+  Widget build(BuildContext context) {
+    // Full screen on all sizes — no phone frame on desktop
+    return const HomeShell();
   }
 }
 
@@ -834,13 +875,18 @@ class _PrepScreenState extends State<PrepScreen> {
               ? lifts
               : lifts.where((l) => l.status.trim() == _statusFilter).toList();
 
-          // Group filtered lifts by prep status
+          // Group filtered lifts by prep status; assigned lifts sort to top within each group
+          int assignedFirst(LiftRecord a, LiftRecord b) {
+            final aAssigned = a.status.toLowerCase() == 'assigned' ? 0 : 1;
+            final bAssigned = b.status.toLowerCase() == 'assigned' ? 0 : 1;
+            return aAssigned.compareTo(bAssigned);
+          }
           final needsPrepping = filtered
               .where((l) => l.preppedStatus.toLowerCase() == 'needs prepping')
-              .toList();
+              .toList()..sort(assignedFirst);
           final needsRepair = filtered
               .where((l) => l.preppedStatus.toLowerCase() == 'needs repair')
-              .toList();
+              .toList()..sort(assignedFirst);
 
           return RefreshIndicator(
             onRefresh: () async {
@@ -1586,7 +1632,7 @@ class _AnnualsScreenState extends State<AnnualsScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Annuals'),
-        backgroundColor: kBrandGreen,
+        backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
         actions: [
           IconButton(
@@ -1961,7 +2007,7 @@ class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(r.customerName),
-        backgroundColor: kBrandGreen,
+        backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
         actions: [
           IconButton(
@@ -2485,7 +2531,7 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(isEditing ? 'Edit Annual' : 'Add Annual'),
-        backgroundColor: kBrandGreen,
+        backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
       ),
       body: Form(
@@ -2984,9 +3030,13 @@ class _JobsScreenState extends State<JobsScreen>
   }
 
   List<QbtScheduleEvent> _eventsForType(List<String> types) {
+    final now = DateTime.now();
+    final windowStart = DateTime(now.year, now.month, now.day).subtract(const Duration(days: 7));
+    final windowEnd = DateTime(now.year, now.month, now.day, 23, 59, 59).add(const Duration(days: 7));
     return _events.where((e) {
+      final eventDate = e.start.toLocal();
+      if (eventDate.isBefore(windowStart) || eventDate.isAfter(windowEnd)) return false;
       String? jobType = _allMeta[e.id]?['job_type'] as String?;
-      // Fall back to title inference when no type is stored
       if (jobType == null || jobType.isEmpty) {
         jobType = _inferJobTypeFromTitle(e.title);
       }
@@ -3119,7 +3169,7 @@ class _JobsScreenState extends State<JobsScreen>
     return Scaffold(
       appBar: AppBar(
         title: const Text('Jobs'),
-        backgroundColor: kBrandGreen,
+        backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
         actions: [
           IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
@@ -3917,7 +3967,7 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(isEditing ? 'Edit Removal Job' : 'Add Removal Job'),
-        backgroundColor: kBrandGreen,
+        backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
       ),
       body: Form(
@@ -4083,87 +4133,140 @@ class _WebLeadCard extends StatelessWidget {
     }
   }
 
+  Future<void> _confirmDelete(BuildContext context) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete lead?'),
+        content: Text('Remove the lead from ${lead.name}? This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade600, foregroundColor: Colors.white),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await sbDeleteWebLead(id: lead.id);
+      onRefresh();
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final dt = lead.createdAt.toLocal();
     final dateStr = '${dt.month}/${dt.day}/${dt.year}';
 
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Expanded(
-                  child: Text(
-                    lead.name,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 16),
-                    overflow: TextOverflow.ellipsis,
+    return Dismissible(
+      key: ValueKey(lead.id),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 20),
+        decoration: BoxDecoration(
+          color: Colors.red.shade600,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: const Icon(Icons.delete_outline, color: Colors.white, size: 26),
+      ),
+      confirmDismiss: (_) async {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Delete lead?'),
+            content: Text('Remove the lead from ${lead.name}? This cannot be undone.'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade600, foregroundColor: Colors.white),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed == true) {
+          await sbDeleteWebLead(id: lead.id);
+          onRefresh();
+        }
+        return false; // list refreshes via onRefresh
+      },
+      child: Card(
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      lead.name,
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-                ),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _statusColor.withOpacity(0.15),
-                    borderRadius: BorderRadius.circular(12),
-                    border:
-                        Border.all(color: _statusColor.withOpacity(0.4)),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _statusColor.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: _statusColor.withValues(alpha: 0.4)),
+                    ),
+                    child: Text(
+                      lead.status,
+                      style: TextStyle(color: _statusColor, fontSize: 12, fontWeight: FontWeight.w600),
+                    ),
                   ),
-                  child: Text(
-                    lead.status,
-                    style: TextStyle(
-                        color: _statusColor,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(lead.email, style: const TextStyle(color: Colors.blue, fontSize: 13)),
+              if (lead.phone.isNotEmpty)
+                Text(lead.phone, style: const TextStyle(fontSize: 13)),
+              const SizedBox(height: 6),
+              Text(
+                lead.message,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    '$dateStr · ${lead.source == 'hero_form' ? 'Hero Form' : 'Contact Form'}',
+                    style: const TextStyle(color: Colors.grey, fontSize: 11),
                   ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(lead.email,
-                style: const TextStyle(color: Colors.blue, fontSize: 13)),
-            if (lead.phone.isNotEmpty)
-              Text(lead.phone,
-                  style: const TextStyle(fontSize: 13)),
-            const SizedBox(height: 6),
-            Text(
-              lead.message,
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 13),
-            ),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  '$dateStr · ${lead.source == 'hero_form' ? 'Hero Form' : 'Contact Form'}',
-                  style:
-                      const TextStyle(color: Colors.grey, fontSize: 11),
-                ),
-                PopupMenuButton<String>(
-                  onSelected: (status) async {
-                    await sbUpdateWebLeadStatus(
-                        id: lead.id, status: status);
-                    onRefresh();
-                  },
-                  itemBuilder: (_) => ['New', 'Contacted', 'Closed']
-                      .map((s) =>
-                          PopupMenuItem(value: s, child: Text(s)))
-                      .toList(),
-                  child: const Text('Update Status',
-                      style:
-                          TextStyle(color: Colors.blue, fontSize: 12)),
-                ),
-              ],
-            ),
-          ],
+                  Row(
+                    children: [
+                      PopupMenuButton<String>(
+                        onSelected: (status) async {
+                          await sbUpdateWebLeadStatus(id: lead.id, status: status);
+                          onRefresh();
+                        },
+                        itemBuilder: (_) => ['New', 'Contacted', 'Closed']
+                            .map((s) => PopupMenuItem(value: s, child: Text(s)))
+                            .toList(),
+                        child: const Text('Update Status', style: TextStyle(color: Colors.blue, fontSize: 12)),
+                      ),
+                      const SizedBox(width: 12),
+                      GestureDetector(
+                        onTap: () => _confirmDelete(context),
+                        child: Icon(Icons.delete_outline, size: 18, color: Colors.red.shade400),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -4330,7 +4433,7 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(isEditing ? 'Edit Service Job' : 'Add Service Job'),
-        backgroundColor: kBrandGreen,
+        backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
       ),
       body: Form(
@@ -4501,37 +4604,79 @@ class _HomeShellState extends State<HomeShell> {
         index: _selectedIndex,
         children: _pages,
       ),
-      bottomNavigationBar: BottomNavigationBar(
+      bottomNavigationBar: _FloatingNavBar(
         currentIndex: _selectedIndex,
         onTap: _onItemTapped,
-        type: BottomNavigationBarType.fixed,
-        selectedItemColor: kBrandGreen,
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.list_alt),
-            label: 'Lifts',
+      ),
+    );
+  }
+}
+
+class _FloatingNavBar extends StatelessWidget {
+  final int currentIndex;
+  final ValueChanged<int> onTap;
+
+  const _FloatingNavBar({required this.currentIndex, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final items = [
+      (Icons.list_alt_rounded, 'Lifts'),
+      (Icons.stairs_rounded, 'Ramps'),
+      (Icons.calendar_month_rounded, 'Schedule'),
+      (Icons.work_rounded, 'Jobs'),
+      (Icons.build_rounded, 'Prep'),
+    ];
+
+    return Container(
+      color: kBrandGreenDark,
+      child: SafeArea(
+        top: false,
+        child: SizedBox(
+          height: 62,
+          child: Row(
+            children: List.generate(items.length, (i) {
+              final selected = i == currentIndex;
+              final (icon, label) = items[i];
+              return Expanded(
+                child: GestureDetector(
+                  onTap: () => onTap(i),
+                  behavior: HitTestBehavior.opaque,
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        curve: Curves.easeOut,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+                        decoration: selected
+                            ? BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(10),
+                              )
+                            : const BoxDecoration(),
+                        child: Icon(
+                          icon,
+                          size: 22,
+                          color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        label,
+                        style: GoogleFonts.nunito(
+                          fontSize: 10,
+                          fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+                          color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }),
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.stairs),
-            label: 'Ramps',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.calendar_today),
-            label: 'Schedule',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.work_outline),
-            label: 'Jobs',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.build),
-            label: 'Prep',
-          ),
-          // BottomNavigationBarItem(
-          //   icon: Icon(Icons.check_box),
-          //   label: 'Pickup',
-          // ),
-        ],
+        ),
       ),
     );
   }
@@ -5687,6 +5832,29 @@ class LiftsScreen extends StatefulWidget {
   State<LiftsScreen> createState() => _LiftsScreenState();
 }
 
+/// Small pill badge used in lift cards and elsewhere.
+class _StatusPill extends StatelessWidget {
+  final String label;
+  final Color color;
+  const _StatusPill({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Text(
+        label,
+        style: GoogleFonts.nunito(fontSize: 11, fontWeight: FontWeight.w700, color: color),
+      ),
+    );
+  }
+}
+
 class _LiftsScreenState extends State<LiftsScreen> {
   late Future<List<LiftRecord>> _future;
   String _search = '';
@@ -5981,12 +6149,6 @@ class _LiftsScreenState extends State<LiftsScreen> {
                       itemBuilder: (context, index) {
                         final l = filtered[index];
                         final status = l.status.isEmpty ? 'Unknown' : l.status;
-                        final loc = l.currentLocation.isEmpty
-                            ? 'Location: N/A'
-                            : 'Location: ${l.currentLocation}';
-                        final job = l.currentJob.isEmpty
-                            ? 'Job: N/A'
-                            : 'Job: ${l.currentJob}';
 
                         // Determine clean status text color
                         Color? cbColor;
@@ -5996,74 +6158,148 @@ class _LiftsScreenState extends State<LiftsScreen> {
                           cbColor = Colors.red.shade700;
                         }
 
-                        return Card(
-                          margin: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 4),
-                          child: ListTile(
-                            onTap: () async {
-                              final deleted = await Navigator.of(context).push<bool>(
-                                MaterialPageRoute(
-                                  builder: (_) => LiftDetailScreen(
-                                    lift: l,
-                                  ),
-                                ),
-                              );
-                              if (deleted == true) _refresh();
-                            },
-                            title: Text(
-                              [
-                                l.brand,
-                                if (l.series.isNotEmpty) l.series,
-                                if (l.orientation.isNotEmpty &&
-                                    l.orientation.toLowerCase() != 'n/a')
-                                  l.orientation,
-                              ].join(' – '),
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
-                              ),
+                        // Status accent color
+                        final Color accentColor = switch (l.status.toLowerCase()) {
+                          'in stock'   => kBrandGreen,
+                          'assigned'   => Colors.amber.shade700,
+                          'installed'  => Colors.blue.shade600,
+                          'removed'    => Colors.grey.shade500,
+                          'scrapped'   => Colors.red.shade400,
+                          _            => Colors.grey.shade400,
+                        };
+
+                        return GestureDetector(
+                          onTap: () async {
+                            final deleted = await Navigator.of(context).push<bool>(
+                              MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: l)),
+                            );
+                            if (deleted == true) _refresh();
+                          },
+                          child: Container(
+                            margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                            decoration: BoxDecoration(
+                              color: kCardSurface,
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(color: Colors.grey.shade200),
                             ),
-                            subtitle: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text('SN: ${l.serialNumber.isNotEmpty ? l.serialNumber : 'N/A'}'),
-                                if (l.condition.trim().toLowerCase().startsWith('used') && l.binNumber.isNotEmpty)
-                                  Text(
-                                    'Bin: ${l.binNumber}',
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      color: Colors.blueGrey,
+                            child: IntrinsicHeight(
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  // Left accent bar
+                                  Container(
+                                    width: 5,
+                                    decoration: BoxDecoration(
+                                      color: accentColor,
+                                      borderRadius: const BorderRadius.only(
+                                        topLeft: Radius.circular(14),
+                                        bottomLeft: Radius.circular(14),
+                                      ),
                                     ),
                                   ),
-                                Text('Status: $status'),
-                                Text(loc),
-                                Text(job),
-                                if (l.preppedStatus.isNotEmpty)
-                                  Text(
-                                    'Prep: ${l.preppedStatus}',
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      color: l.preppedStatus == 'Needs repair'
-                                          ? Colors.red.shade700
-                                          : l.preppedStatus == 'Needs prepping'
-                                              ? Colors.orange.shade700
-                                              : l.preppedStatus == 'Prepped'
-                                                  ? Colors.green.shade700
-                                                  : null,
-                                      fontWeight: FontWeight.w600,
+                                  // Content
+                                  Expanded(
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: Text(
+                                                  [
+                                                    l.brand,
+                                                    if (l.series.isNotEmpty) l.series,
+                                                    if (l.orientation.isNotEmpty && l.orientation.toLowerCase() != 'n/a') l.orientation,
+                                                  ].join(' · '),
+                                                  style: GoogleFonts.nunito(fontWeight: FontWeight.w700, fontSize: 15),
+                                                ),
+                                              ),
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                                                decoration: BoxDecoration(
+                                                  color: accentColor.withValues(alpha: 0.12),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                ),
+                                                child: Text(
+                                                  status,
+                                                  style: GoogleFonts.nunito(
+                                                    fontSize: 11,
+                                                    fontWeight: FontWeight.w700,
+                                                    color: accentColor,
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          const SizedBox(height: 6),
+                                          Row(
+                                            children: [
+                                              Text(
+                                                'SN: ${l.serialNumber.isNotEmpty ? l.serialNumber : 'N/A'}',
+                                                style: GoogleFonts.nunito(fontSize: 13, color: Colors.grey.shade600),
+                                              ),
+                                              if (l.condition.trim().toLowerCase().startsWith('used') && l.binNumber.isNotEmpty) ...[
+                                                const SizedBox(width: 12),
+                                                Text(
+                                                  'Bin ${l.binNumber}',
+                                                  style: GoogleFonts.nunito(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.blueGrey.shade700),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                          if (l.currentLocation.isNotEmpty) ...[
+                                            const SizedBox(height: 3),
+                                            Text(
+                                              'Location: ${l.currentLocation}',
+                                              style: GoogleFonts.nunito(fontSize: 13, color: Colors.grey.shade600),
+                                            ),
+                                          ],
+                                          if (l.currentJob.isNotEmpty) ...[
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              'Job: ${l.currentJob}',
+                                              style: GoogleFonts.nunito(fontSize: 13, color: Colors.grey.shade600),
+                                            ),
+                                          ],
+                                          if (l.notes.isNotEmpty) ...[
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              'Notes: ${l.notes}',
+                                              style: GoogleFonts.nunito(fontSize: 12, color: Colors.grey.shade500),
+                                              maxLines: 2,
+                                              overflow: TextOverflow.ellipsis,
+                                            ),
+                                          ],
+                                          if (l.preppedStatus.isNotEmpty || l.cleanBatteriesStatus.isNotEmpty) ...[
+                                            const SizedBox(height: 8),
+                                            Row(
+                                              children: [
+                                                if (l.preppedStatus.isNotEmpty)
+                                                  _StatusPill(
+                                                    label: l.preppedStatus,
+                                                    color: l.preppedStatus == 'Needs repair'
+                                                        ? Colors.red.shade600
+                                                        : l.preppedStatus == 'Needs prepping'
+                                                            ? Colors.orange.shade700
+                                                            : Colors.green.shade700,
+                                                  ),
+                                                if (l.cleanBatteriesStatus.isNotEmpty) ...[
+                                                  const SizedBox(width: 6),
+                                                  _StatusPill(label: l.cleanBatteriesStatus, color: cbColor ?? Colors.grey),
+                                                ],
+                                              ],
+                                            ),
+                                          ],
+                                        ],
+                                      ),
                                     ),
                                   ),
-                                if (l.cleanBatteriesStatus.isNotEmpty)
-                                  Text(
-                                    'Clean',
-                                    style: TextStyle(
-                                      fontSize: 13,
-                                      color: cbColor,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                if (l.notes.isNotEmpty)
-                                  Text('Notes: ${l.notes}'),
-                              ],
+                                  const Icon(Icons.chevron_right, color: Color(0xFFCCCCCC), size: 20),
+                                  const SizedBox(width: 8),
+                                ],
+                              ),
                             ),
                           ),
                         );
@@ -9290,7 +9526,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: kBrandGreen,
+        backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
         title: const Text('Schedule', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
@@ -10952,7 +11188,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: kBrandGreen,
+        backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
         title: Text(_isEditing ? 'Edit Event' : 'New Event'),
         actions: [
