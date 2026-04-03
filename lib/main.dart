@@ -17,6 +17,9 @@ import 'supabase_api.dart';
 
 /// Brand color
 const Color kBrandGreen = Color(0xFF2F7D46);
+const Color kBrandGreenDark = Color(0xFF1E5C32);
+const Color kSurface = Color(0xFFF5F7F5);
+const Color kCardSurface = Color(0xFFFFFFFF);
 
 /// Format a DateTime to a readable date string (MM/DD/YYYY)
 String formatDate(DateTime? date) {
@@ -78,67 +81,141 @@ class AbleHomeInventoryApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(
           seedColor: kBrandGreen,
           brightness: Brightness.light,
+          surface: kSurface,
         ),
+        scaffoldBackgroundColor: kSurface,
         useMaterial3: true,
-        textTheme: GoogleFonts.interTextTheme(),
+        textTheme: GoogleFonts.spaceGroteskTextTheme(),
         appBarTheme: AppBarTheme(
-          backgroundColor: kBrandGreen,
+          backgroundColor: kBrandGreenDark,
           foregroundColor: Colors.white,
           elevation: 0,
           centerTitle: false,
-          titleTextStyle: GoogleFonts.inter(
+          titleTextStyle: GoogleFonts.spaceGrotesk(
             color: Colors.white,
-            fontSize: 18,
-            fontWeight: FontWeight.w600,
-            letterSpacing: -0.2,
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.5,
           ),
           iconTheme: const IconThemeData(color: Colors.white),
           actionsIconTheme: const IconThemeData(color: Colors.white),
+          toolbarHeight: 58,
         ),
         cardTheme: CardThemeData(
-          elevation: 2,
-          shadowColor: Colors.black.withValues(alpha: 0.08),
+          elevation: 0,
+          color: kCardSurface,
+          shadowColor: Colors.transparent,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: Colors.grey.shade200, width: 1),
           ),
-          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+          margin: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
         ),
-        floatingActionButtonTheme: const FloatingActionButtonThemeData(
+        floatingActionButtonTheme: FloatingActionButtonThemeData(
           backgroundColor: kBrandGreen,
           foregroundColor: Colors.white,
+          elevation: 4,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
         ),
         bottomNavigationBarTheme: BottomNavigationBarThemeData(
           selectedItemColor: kBrandGreen,
-          unselectedItemColor: Colors.grey.shade500,
+          unselectedItemColor: Colors.grey.shade400,
           backgroundColor: Colors.white,
-          elevation: 8,
+          elevation: 0,
           type: BottomNavigationBarType.fixed,
-          selectedLabelStyle: GoogleFonts.inter(
+          selectedLabelStyle: GoogleFonts.spaceGrotesk(
             fontSize: 11,
-            fontWeight: FontWeight.w600,
+            fontWeight: FontWeight.w700,
           ),
-          unselectedLabelStyle: GoogleFonts.inter(
+          unselectedLabelStyle: GoogleFonts.spaceGrotesk(
             fontSize: 11,
-            fontWeight: FontWeight.w400,
+            fontWeight: FontWeight.w500,
           ),
         ),
         inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: Colors.white,
           border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.grey.shade300),
           ),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.grey.shade300),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: kBrandGreen, width: 2),
+          ),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          labelStyle: GoogleFonts.spaceGrotesk(color: Colors.grey.shade600),
         ),
         chipTheme: ChipThemeData(
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(20),
           ),
+          labelStyle: GoogleFonts.spaceGrotesk(fontSize: 12, fontWeight: FontWeight.w600),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         ),
         dividerTheme: DividerThemeData(
           color: Colors.grey.shade200,
           thickness: 1,
+          space: 1,
+        ),
+        listTileTheme: ListTileThemeData(
+          tileColor: kCardSurface,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        ),
+        tabBarTheme: TabBarThemeData(
+          labelStyle: GoogleFonts.spaceGrotesk(fontSize: 13, fontWeight: FontWeight.w700),
+          unselectedLabelStyle: GoogleFonts.spaceGrotesk(fontSize: 13, fontWeight: FontWeight.w500),
+          indicatorColor: Colors.white,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white.withValues(alpha: 0.65),
+          dividerColor: Colors.transparent,
         ),
       ),
-      home: const HomeShell(),
+      home: const _ResponsiveShell(),
+    );
+  }
+}
+
+/// Constrains the app to a max width on wide screens (desktop/tablet),
+/// centered with a subtle shadow to mimic a mobile frame on desktop.
+class _ResponsiveShell extends StatelessWidget {
+  const _ResponsiveShell();
+
+  @override
+  Widget build(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    // On mobile / narrow, just show the shell directly
+    if (width < 600) return const HomeShell();
+    // On desktop/tablet: center + constrain + frame
+    return Scaffold(
+      backgroundColor: const Color(0xFFE8EDE9),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: Container(
+            decoration: BoxDecoration(
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.18),
+                  blurRadius: 40,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: const HomeShell(),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -4501,37 +4578,88 @@ class _HomeShellState extends State<HomeShell> {
         index: _selectedIndex,
         children: _pages,
       ),
-      bottomNavigationBar: BottomNavigationBar(
+      bottomNavigationBar: _FloatingNavBar(
         currentIndex: _selectedIndex,
         onTap: _onItemTapped,
-        type: BottomNavigationBarType.fixed,
-        selectedItemColor: kBrandGreen,
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.list_alt),
-            label: 'Lifts',
+      ),
+    );
+  }
+}
+
+class _FloatingNavBar extends StatelessWidget {
+  final int currentIndex;
+  final ValueChanged<int> onTap;
+
+  const _FloatingNavBar({required this.currentIndex, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final items = [
+      (Icons.list_alt_rounded, 'Lifts'),
+      (Icons.stairs_rounded, 'Ramps'),
+      (Icons.calendar_month_rounded, 'Schedule'),
+      (Icons.work_rounded, 'Jobs'),
+      (Icons.build_rounded, 'Prep'),
+    ];
+
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: Colors.grey.shade200, width: 1)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.06),
+            blurRadius: 16,
+            offset: const Offset(0, -4),
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.stairs),
-            label: 'Ramps',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.calendar_today),
-            label: 'Schedule',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.work_outline),
-            label: 'Jobs',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.build),
-            label: 'Prep',
-          ),
-          // BottomNavigationBarItem(
-          //   icon: Icon(Icons.check_box),
-          //   label: 'Pickup',
-          // ),
         ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: List.generate(items.length, (i) {
+              final selected = i == currentIndex;
+              final (icon, label) = items[i];
+              return GestureDetector(
+                onTap: () => onTap(i),
+                behavior: HitTestBehavior.opaque,
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 200),
+                  curve: Curves.easeInOut,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: selected
+                      ? BoxDecoration(
+                          color: kBrandGreen.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(14),
+                        )
+                      : const BoxDecoration(),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        icon,
+                        size: 22,
+                        color: selected ? kBrandGreen : Colors.grey.shade400,
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        label,
+                        style: GoogleFonts.spaceGrotesk(
+                          fontSize: 10,
+                          fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                          color: selected ? kBrandGreen : Colors.grey.shade400,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }),
+          ),
+        ),
       ),
     );
   }
