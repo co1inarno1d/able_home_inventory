@@ -695,9 +695,17 @@ class _PrepScreenState extends State<PrepScreen> {
   }
 
   Future<void> _openPrepChecklist(LiftRecord lift) async {
+    // Load any existing in-progress checklist so the user can resume
+    PrepChecklist? existing;
+    if (lift.serialNumber.isNotEmpty) {
+      final checklists = await sbFetchPrepChecklists(serialNumber: lift.serialNumber);
+      if (checklists.isNotEmpty) existing = checklists.first;
+    }
+    if (!mounted) return;
+
     final result = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
-        builder: (_) => PrepChecklistFormScreen(lift: lift),
+        builder: (_) => PrepChecklistFormScreen(lift: lift, existingChecklist: existing),
       ),
     );
 
@@ -877,28 +885,57 @@ class _PrepScreenState extends State<PrepScreen> {
             ),
           )
         else
-          ...lifts.map((lift) => Card(
-                margin: const EdgeInsets.symmetric(vertical: 4),
-                child: ListTile(
-                  onTap: onTap != null ? () => onTap(lift) : null,
-                  title: Text(
-                    '${lift.brand}${lift.series.isNotEmpty ? ' – ${lift.series}' : ''}',
-                    style: const TextStyle(fontWeight: FontWeight.w600),
-                  ),
-                  subtitle: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('SN: ${lift.serialNumber.isNotEmpty ? lift.serialNumber : 'N/A'}'),
-                      if (lift.currentLocation.isNotEmpty)
-                        Text('Location: ${lift.currentLocation}'),
-                      Text('Status: ${lift.status.isEmpty ? 'Unknown' : lift.status}'),
-                    ],
-                  ),
-                  trailing: onTap != null
-                      ? const Icon(Icons.chevron_right)
+          ...lifts.map((lift) {
+                final isAssigned = lift.status.trim().toLowerCase() == 'assigned';
+                return Card(
+                  margin: const EdgeInsets.symmetric(vertical: 4),
+                  color: isAssigned ? Colors.amber.shade50 : null,
+                  shape: isAssigned
+                      ? RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: BorderSide(color: Colors.amber.shade300, width: 1),
+                        )
                       : null,
-                ),
-              )),
+                  child: ListTile(
+                    onTap: onTap != null ? () => onTap(lift) : null,
+                    title: Text(
+                      '${lift.brand}${lift.series.isNotEmpty ? ' – ${lift.series}' : ''}',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('SN: ${lift.serialNumber.isNotEmpty ? lift.serialNumber : 'N/A'}'),
+                        if (lift.currentLocation.isNotEmpty)
+                          Text('Location: ${lift.currentLocation}'),
+                        Row(
+                          children: [
+                            Text('Status: ${lift.status.isEmpty ? 'Unknown' : lift.status}'),
+                            if (isAssigned) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: Colors.amber.shade100,
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: Colors.amber.shade400),
+                                ),
+                                child: Text(
+                                  'Assigned to job',
+                                  style: TextStyle(fontSize: 10, color: Colors.amber.shade800, fontWeight: FontWeight.w600),
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ],
+                    ),
+                    trailing: onTap != null
+                        ? const Icon(Icons.chevron_right)
+                        : null,
+                  ),
+                );
+              }),
       ],
     );
   }
@@ -2876,9 +2913,22 @@ class _JobsScreenState extends State<JobsScreen>
     }
   }
 
+  /// Infers job type from an event title (Install / Service / Removal only).
+  String? _inferJobTypeFromTitle(String title) {
+    final t = title.toLowerCase();
+    if (t.contains('install')) return 'Install';
+    if (t.contains('removal') || t.contains('remove')) return 'Removal';
+    if (t.contains('service') || t.contains('annual')) return 'Service';
+    return null;
+  }
+
   List<QbtScheduleEvent> _eventsForType(List<String> types) {
     return _events.where((e) {
-      final jobType = _allMeta[e.id]?['job_type'] as String?;
+      String? jobType = _allMeta[e.id]?['job_type'] as String?;
+      // Fall back to title inference when no type is stored
+      if (jobType == null || jobType.isEmpty) {
+        jobType = _inferJobTypeFromTitle(e.title);
+      }
       return jobType != null && types.contains(jobType);
     }).toList();
   }
@@ -9731,6 +9781,16 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     });
   }
 
+  /// Infers job type from an event title when no type has been manually set.
+  /// Only matches Install, Service, or Removal — the three types common in TSheets titles.
+  String? _inferJobTypeFromTitle(String title) {
+    final t = title.toLowerCase();
+    if (t.contains('install')) return 'Install';
+    if (t.contains('removal') || t.contains('remove')) return 'Removal';
+    if (t.contains('service') || t.contains('annual')) return 'Service';
+    return null;
+  }
+
   Future<void> _loadMeta() async {
     final meta = await sbGetEventMeta(widget.event.id);
     if (!mounted) return;
@@ -9742,8 +9802,22 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     }
     final photos = await sbFetchEventPhotos(widget.event.id);
     if (!mounted) return;
+
+    String? jobType = meta['job_type'] as String?;
+
+    // If no job type is set, try to infer it from the event title
+    if ((jobType == null || jobType.isEmpty) && widget.event.title.isNotEmpty) {
+      final inferred = _inferJobTypeFromTitle(widget.event.title);
+      if (inferred != null) {
+        jobType = inferred;
+        // Persist the inferred type so it shows correctly everywhere
+        await sbSetEventJobType(widget.event.id, inferred);
+      }
+    }
+
+    if (!mounted) return;
     setState(() {
-      _jobType = meta['job_type'] as String?;
+      _jobType = jobType;
       _linkedLifts = lifts;
       _loadingMeta = false;
       _eventPhotoUrls = photos;

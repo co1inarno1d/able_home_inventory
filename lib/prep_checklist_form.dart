@@ -27,16 +27,18 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
   final Map<String, bool> _checklistItems = {};
   final TextEditingController _notesController = TextEditingController();
   bool _saving = false;
+  String? _savedChecklistId;
 
   @override
   void initState() {
     super.initState();
     _templateFuture = _loadTemplate();
 
-    // If editing existing checklist, populate the values
+    // If resuming an existing checklist, populate the values
     if (widget.existingChecklist != null) {
       _checklistItems.addAll(widget.existingChecklist!.checklistItems);
       _notesController.text = widget.existingChecklist!.notes;
+      _savedChecklistId = widget.existingChecklist!.checklistId;
     }
   }
 
@@ -55,10 +57,8 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
         .join(' ');
   }
 
-  Future<void> _saveChecklist() async {
-    setState(() {
-      _saving = true;
-    });
+  Future<bool> _saveChecklist({bool andClose = false}) async {
+    setState(() => _saving = true);
 
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -66,8 +66,8 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
       final userEmail = prefs.getString('user_email') ?? '';
 
       final checklistData = {
-        if (widget.existingChecklist != null)
-          'checklist_id': widget.existingChecklist!.checklistId,
+        if (_savedChecklistId != null)
+          'checklist_id': _savedChecklistId,
         'lift_id': widget.lift.liftId,
         'serial_number': widget.lift.serialNumber,
         'brand': widget.lift.brand,
@@ -79,26 +79,27 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
         ..._checklistItems,
       };
 
-      await sbSavePrepChecklist(checklistData: checklistData);
+      final savedId = await sbSavePrepChecklist(checklistData: checklistData);
+      if (mounted) setState(() => _savedChecklistId = savedId);
 
-      if (!mounted) return;
+      if (!mounted) return false;
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Prep checklist saved successfully')),
-      );
-
-      Navigator.of(context).pop(true);
+      if (andClose) {
+        Navigator.of(context).pop(true);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Progress saved')),
+        );
+      }
+      return true;
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Error saving checklist: $e')),
       );
+      return false;
     } finally {
-      if (mounted) {
-        setState(() {
-          _saving = false;
-        });
-      }
+      if (mounted) setState(() => _saving = false);
     }
   }
 
@@ -224,7 +225,7 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
                 ),
               ),
 
-              // Save button
+              // Save buttons
               Container(
                 padding: const EdgeInsets.all(16.0),
                 decoration: BoxDecoration(
@@ -237,23 +238,32 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
                     ),
                   ],
                 ),
-                child: ElevatedButton(
-                  onPressed: _saving ? null : _saveChecklist,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: kBrandGreen,
-                    foregroundColor: Colors.white,
-                    minimumSize: const Size(double.infinity, 48),
-                  ),
-                  child: _saving
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Colors.white,
-                          ),
-                        )
-                      : const Text('Save Prep Checklist'),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: _saving ? null : () => _saveChecklist(andClose: false),
+                        style: OutlinedButton.styleFrom(
+                          minimumSize: const Size(double.infinity, 48),
+                        ),
+                        child: _saving
+                            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                            : const Text('Save Progress'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: _saving ? null : () => _saveChecklist(andClose: true),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: kBrandGreen,
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size(double.infinity, 48),
+                        ),
+                        child: const Text('Save & Close'),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
