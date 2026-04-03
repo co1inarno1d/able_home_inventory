@@ -1,11 +1,11 @@
 {
-    "name": "able_home_inventory",
-    "short_name": "able_home_inventory",
+    "name": "Able Home Accessibility",
+    "short_name": "Able Home",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#2F7D46",
+    "theme_color": "#2F7D46",
+    "description": "Able Home Accessibility inventory and job management.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
