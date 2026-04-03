@@ -1445,3 +1445,7 @@ Future<void> sbUpdateWebLeadStatus({
 }) async {
   await _sb.from('web_leads').update({'status': status}).eq('id', id);
 }
+
+Future<void> sbDeleteWebLead({required int id}) async {
+  await _sb.from('web_leads').delete().eq('id', id);
+}
