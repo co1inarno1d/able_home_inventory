@@ -10145,7 +10145,7 @@ class _InitialsAvatar extends StatelessWidget {
     'Christopher Doherty':  Color(0xFFE65100), // Orange
     'James Doherty':        Color(0xFF00C853), // Bright green
     'Ryan Clark':           Color(0xFF8B0000), // Crimson red
-    'Connor':               Color(0xFF6D6E00), // Olive green
+    'Connor Hibbard':       Color(0xFF6D6E00), // Olive green
     'Harrington Riendeau':  Color(0xFF00AEEF), // Sky blue
     'Liam Arnold':          Color(0xFF6A1B9A), // Purple
     'Stephen Tremblay':     Color(0xFFD32F2F), // Bright red
