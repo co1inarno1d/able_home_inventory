@@ -9598,29 +9598,44 @@ class ScheduleScreen extends StatefulWidget {
 }
 
 class _ScheduleScreenState extends State<ScheduleScreen> {
-  DateTime _selectedDay = DateTime.now();
-  // The week we're displaying — Monday of current week
-  late DateTime _weekStart;
-
   List<QbtScheduleEvent> _events = [];
   Map<String, QbtUser> _users = {};
   Set<String> _completedIds = {};
   bool _loading = true;
   String? _error;
 
+  String _searchQuery = '';
+  final TextEditingController _searchController = TextEditingController();
+  bool _searchActive = false;
+
+  final ScrollController _scrollController = ScrollController();
+  final Map<String, GlobalKey> _dayKeys = {};
+
+  static const int _daysBefore = 7;
+  static const int _daysAfter = 60;
+
+  DateTime get _rangeStart {
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day).subtract(const Duration(days: _daysBefore));
+  }
+
+  DateTime get _rangeEnd {
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day).add(const Duration(days: _daysAfter));
+  }
+
   @override
   void initState() {
     super.initState();
-    _weekStart = _mondayOf(DateTime.now());
     _load();
   }
 
-  DateTime _mondayOf(DateTime d) {
-    final diff = d.weekday - 1; // Monday = 1
-    return DateTime(d.year, d.month, d.day - diff);
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _scrollController.dispose();
+    super.dispose();
   }
-
-  DateTime get _weekEnd => _weekStart.add(const Duration(days: 6));
 
   Future<void> _load() async {
     setState(() {
@@ -9629,7 +9644,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     });
     try {
       final results = await Future.wait([
-        qbtFetchScheduleEvents(start: _weekStart, end: _weekEnd),
+        qbtFetchScheduleEvents(start: _rangeStart, end: _rangeEnd),
         qbtFetchUsers(),
         sbFetchCompletedEventIds(),
       ]);
@@ -9640,6 +9655,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         _completedIds = results[2] as Set<String>;
         _loading = false;
       });
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToToday());
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -9649,70 +9665,68 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     }
   }
 
-  List<QbtScheduleEvent> get _eventsForSelectedDay {
-    final filtered = _events.where((e) {
-      final local = e.start.toLocal();
-      return local.year == _selectedDay.year &&
-          local.month == _selectedDay.month &&
-          local.day == _selectedDay.day;
+  String _dayKey(DateTime d) {
+    final local = d.toLocal();
+    return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')}';
+  }
+
+  void _scrollToToday() {
+    final key = _dayKey(DateTime.now());
+    final gk = _dayKeys[key];
+    if (gk?.currentContext != null) {
+      Scrollable.ensureVisible(
+        gk!.currentContext!,
+        alignment: 0.0,
+        duration: const Duration(milliseconds: 400),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  List<QbtScheduleEvent> get _filteredEvents {
+    if (_searchQuery.isEmpty) return _events;
+    final q = _searchQuery.toLowerCase();
+    return _events.where((e) {
+      if (e.title.toLowerCase().contains(q)) return true;
+      if (e.notes.toLowerCase().contains(q)) return true;
+      if (e.location.toLowerCase().contains(q)) return true;
+      for (final id in e.assignedUserIds) {
+        final name = _users[id]?.displayName ?? '';
+        if (name.toLowerCase().contains(q)) return true;
+      }
+      return false;
     }).toList();
-
-    // Sort by first assigned user's first name alphabetically
-    filtered.sort((a, b) {
-      final nameA = a.assignedUserIds.isNotEmpty
-          ? (_users[a.assignedUserIds.first]?.firstName ?? '')
-          : '';
-      final nameB = b.assignedUserIds.isNotEmpty
-          ? (_users[b.assignedUserIds.first]?.firstName ?? '')
-          : '';
-      return nameA.toLowerCase().compareTo(nameB.toLowerCase());
-    });
-    return filtered;
   }
 
-  void _goToPrevWeek() {
-    setState(() {
-      _weekStart = _weekStart.subtract(const Duration(days: 7));
-      // Keep selected day in sync with new week
-      _selectedDay = _weekStart;
-    });
-    _load();
-  }
-
-  void _goToNextWeek() {
-    setState(() {
-      _weekStart = _weekStart.add(const Duration(days: 7));
-      _selectedDay = _weekStart;
-    });
-    _load();
-  }
-
-  void _goToPrevDay() {
-    final prev = _selectedDay.subtract(const Duration(days: 1));
-    setState(() => _selectedDay = prev);
-    if (prev.isBefore(_weekStart)) {
-      setState(() => _weekStart = _mondayOf(prev));
-      _load();
+  /// Flat list of alternating [String dayKey, QbtScheduleEvent, ...] for ListView.
+  List<dynamic> get _listItems {
+    final events = _filteredEvents;
+    final Map<String, List<QbtScheduleEvent>> grouped = {};
+    for (final e in events) {
+      final key = _dayKey(e.start);
+      grouped.putIfAbsent(key, () => []).add(e);
     }
-  }
-
-  void _goToNextDay() {
-    final next = _selectedDay.add(const Duration(days: 1));
-    setState(() => _selectedDay = next);
-    if (next.isAfter(_weekStart.add(const Duration(days: 6)))) {
-      setState(() => _weekStart = _mondayOf(next));
-      _load();
+    final sortedDays = grouped.keys.toList()..sort();
+    final items = <dynamic>[];
+    for (final day in sortedDays) {
+      items.add(day);
+      final dayEvents = grouped[day]!;
+      dayEvents.sort((a, b) => a.start.compareTo(b.start));
+      items.addAll(dayEvents);
     }
+    return items;
   }
 
-  void _goToToday() {
-    final today = DateTime.now();
-    setState(() {
-      _weekStart = _mondayOf(today);
-      _selectedDay = DateTime(today.year, today.month, today.day);
-    });
-    _load();
+  String _formatDayHeader(String dayKey) {
+    final parts = dayKey.split('-');
+    final dt = DateTime(int.parse(parts[0]), int.parse(parts[1]), int.parse(parts[2]));
+    const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December'];
+    return '${dayNames[dt.weekday - 1]}, ${monthNames[dt.month - 1]} ${dt.day}, ${dt.year}';
   }
+
+  bool _isToday(String dayKey) => dayKey == _dayKey(DateTime.now());
 
   Color _parseColor(String hex) {
     try {
@@ -9738,50 +9752,188 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         .join(', ');
   }
 
+  Future<void> _onToggleComplete(QbtScheduleEvent event) async {
+    final next = !_completedIds.contains(event.id);
+    setState(() {
+      if (next) {
+        _completedIds.add(event.id);
+      } else {
+        _completedIds.remove(event.id);
+      }
+    });
+    await sbSetEventCompleted(eventId: event.id, completed: next);
+    if (next && mounted) {
+      final meta = await sbGetEventMeta(event.id);
+      final jobType = meta['job_type'] as String?;
+      final liftIds = (meta['lift_ids'] as List<String>?) ?? [];
+
+      final isRampType = jobType == 'Install' || jobType == 'Removal';
+      if (isRampType && liftIds.isEmpty && eventIsRampJob(event) && mounted) {
+        final isInstall = jobType == 'Install';
+        final confirm = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
+            content: Text(
+              isInstall
+                  ? 'Select the ramps and quantities used on this job to deduct them from inventory.'
+                  : 'Select the ramps and quantities recovered on this job to add them back to inventory.',
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                child: const Text('Open Form'),
+              ),
+            ],
+          ),
+        );
+        if (confirm == true && mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => JobAdjustmentScreen(
+                initialJobRef: event.title,
+                initialTabIndex: isInstall ? 0 : 1,
+              ),
+            ),
+          );
+        }
+      }
+
+      if (jobType != null && liftIds.isNotEmpty && mounted) {
+        final prefs = await SharedPreferences.getInstance();
+        final userName = prefs.getString('user_name') ?? '';
+        final userEmail = prefs.getString('user_email') ?? '';
+        for (final liftId in liftIds) {
+          final lift = await sbFetchLiftById(liftId);
+          if (lift == null || !mounted) continue;
+          String? newStatus;
+          String dialogTitle = '';
+          String dialogBody = '';
+          String confirmLabel = '';
+          if (jobType == 'Install') {
+            newStatus = 'Installed';
+            dialogTitle = 'Mark lift as Installed?';
+            dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?';
+            confirmLabel = 'Mark Installed';
+          } else if (jobType == 'Removal') {
+            newStatus = 'Removed';
+            dialogTitle = 'Mark lift as Removed?';
+            dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?';
+            confirmLabel = 'Mark Removed';
+          }
+          if (newStatus != null && mounted) {
+            final confirm = await showDialog<bool>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: Text(dialogTitle),
+                content: Text(dialogBody),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                    child: Text(confirmLabel),
+                  ),
+                ],
+              ),
+            );
+            if (confirm == true && mounted) {
+              await sbMarkLiftStatus(
+                liftId: lift.liftId,
+                newStatus: newStatus,
+                userEmail: userEmail,
+                userName: userName,
+                note: 'Marked $newStatus via schedule event: ${event.title}',
+              );
+            }
+          } else if ((jobType == 'Service' || jobType == 'Annual Service') && mounted) {
+            final serviceType = jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
+            final confirm = await showDialog<bool>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: const Text('Log service record?'),
+                content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                    child: const Text('Log Service'),
+                  ),
+                ],
+              ),
+            );
+            if (confirm == true && mounted) {
+              await Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => LiftServiceFormScreen(
+                    lift: lift,
+                    prefillServiceType: serviceType,
+                    prefillCustomerName: event.title,
+                    prefillDate: formatDate(DateTime.now()),
+                    offerInvoicePhoto: true,
+                  ),
+                ),
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFF1A1A1A),
       appBar: AppBar(
         backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
-        title: const Text('Schedule', style: TextStyle(fontWeight: FontWeight.bold)),
+        title: _searchActive
+            ? TextField(
+                controller: _searchController,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  hintText: 'Search jobs...',
+                  hintStyle: TextStyle(color: Colors.white60),
+                  border: InputBorder.none,
+                ),
+                onChanged: (v) => setState(() => _searchQuery = v),
+              )
+            : const Text('Schedule', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
-          TextButton(
-            onPressed: _goToToday,
-            child: const Text('Today', style: TextStyle(color: Colors.white)),
-          ),
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh',
-            onPressed: _load,
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          _WeekStrip(
-            weekStart: _weekStart,
-            selectedDay: _selectedDay,
-            onDaySelected: (day) => setState(() => _selectedDay = day),
-            onPrevWeek: _goToPrevWeek,
-            onNextWeek: _goToNextWeek,
-          ),
-          const Divider(height: 1),
-          Expanded(
-            child: GestureDetector(
-              onHorizontalDragEnd: (d) {
-                final v = d.primaryVelocity ?? 0;
-                if (v < -300) {
-                  _goToNextDay();
-                } else if (v > 300) {
-                  _goToPrevDay();
-                }
-              },
-              child: _buildBody(),
+          if (_searchActive)
+            IconButton(
+              icon: const Icon(Icons.close),
+              tooltip: 'Cancel',
+              onPressed: () => setState(() {
+                _searchActive = false;
+                _searchQuery = '';
+                _searchController.clear();
+              }),
+            )
+          else ...[
+            IconButton(
+              icon: const Icon(Icons.search),
+              tooltip: 'Search',
+              onPressed: () => setState(() => _searchActive = true),
             ),
-          ),
+            TextButton(
+              onPressed: _scrollToToday,
+              child: const Text('Today', style: TextStyle(color: Colors.white)),
+            ),
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Refresh',
+              onPressed: _load,
+            ),
+          ],
         ],
       ),
+      body: _buildBody(),
       floatingActionButton: FloatingActionButton(
         backgroundColor: kBrandGreen,
         foregroundColor: Colors.white,
@@ -9791,7 +9943,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             MaterialPageRoute(
               builder: (_) => ScheduleEventFormScreen(
                 users: _users,
-                initialDate: _selectedDay,
+                initialDate: DateTime.now(),
               ),
             ),
           );
@@ -9804,7 +9956,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   Widget _buildBody() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Center(child: CircularProgressIndicator(color: Colors.white));
     }
     if (_error != null) {
       return Center(
@@ -9815,7 +9967,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             children: [
               const Icon(Icons.cloud_off, size: 48, color: Colors.red),
               const SizedBox(height: 12),
-              Text(_error!, textAlign: TextAlign.center),
+              Text(_error!, textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white70)),
               const SizedBox(height: 16),
               ElevatedButton(onPressed: _load, child: const Text('Retry')),
             ],
@@ -9824,161 +9977,54 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       );
     }
 
-    final dayEvents = _eventsForSelectedDay;
+    final items = _listItems;
 
-    if (dayEvents.isEmpty) {
-      return const Center(
-        child: Text('No events scheduled', style: TextStyle(color: Colors.grey)),
+    if (items.isEmpty) {
+      return Center(
+        child: Text(
+          _searchQuery.isNotEmpty ? 'No matching jobs' : 'No events scheduled',
+          style: const TextStyle(color: Colors.grey),
+        ),
       );
     }
 
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView.builder(
-        padding: const EdgeInsets.only(top: 8, bottom: 100),
-        itemCount: dayEvents.length,
+        controller: _scrollController,
+        padding: const EdgeInsets.only(bottom: 100),
+        itemCount: items.length,
         itemBuilder: (context, i) {
-          final event = dayEvents[i];
+          final item = items[i];
+
+          if (item is String) {
+            // Date header row
+            final isToday = _isToday(item);
+            _dayKeys.putIfAbsent(item, () => GlobalKey());
+            return Container(
+              key: _dayKeys[item],
+              padding: const EdgeInsets.fromLTRB(16, 22, 16, 8),
+              child: Text(
+                isToday ? 'Today — ${_formatDayHeader(item)}' : _formatDayHeader(item),
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: isToday ? kBrandGreen : Colors.grey[500],
+                  letterSpacing: 0.3,
+                ),
+              ),
+            );
+          }
+
+          final event = item as QbtScheduleEvent;
           final color = _parseColor(event.color);
           return _ScheduleEventCard(
             event: event,
-            assignedNames: _assignedNames(event),
+            users: _users,
             color: color,
             formatTime: _formatTime,
             completed: _completedIds.contains(event.id),
-            onToggleComplete: () async {
-              final next = !_completedIds.contains(event.id);
-              setState(() {
-                if (next) {
-                  _completedIds.add(event.id);
-                } else {
-                  _completedIds.remove(event.id);
-                }
-              });
-              await sbSetEventCompleted(eventId: event.id, completed: next);
-              // Smart completion when marking complete from the card
-              if (next && mounted) {
-                final meta = await sbGetEventMeta(event.id);
-                final jobType = meta['job_type'] as String?;
-                final liftIds = (meta['lift_ids'] as List<String>?) ?? [];
-
-                // Ramp job (install or removal): no linked lifts, but event contains "ramp"
-                final isRampType = jobType == 'Install' || jobType == 'Removal';
-                if (isRampType && liftIds.isEmpty && eventIsRampJob(event) && mounted) {
-                  final isInstall = jobType == 'Install';
-                  final confirm = await showDialog<bool>(
-                    context: context,
-                    builder: (_) => AlertDialog(
-                      title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
-                      content: Text(
-                        isInstall
-                            ? 'Select the ramps and quantities used on this job to deduct them from inventory.'
-                            : 'Select the ramps and quantities recovered on this job to add them back to inventory.',
-                      ),
-                      actions: [
-                        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                        ElevatedButton(
-                          onPressed: () => Navigator.pop(context, true),
-                          style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                          child: const Text('Open Form'),
-                        ),
-                      ],
-                    ),
-                  );
-                  if (confirm == true && mounted) {
-                    await Navigator.of(context).push(
-                      MaterialPageRoute(
-                        builder: (_) => JobAdjustmentScreen(
-                          initialJobRef: event.title,
-                          initialTabIndex: isInstall ? 0 : 1,
-                        ),
-                      ),
-                    );
-                  }
-                }
-
-                if (jobType != null && liftIds.isNotEmpty && mounted) {
-                  final prefs = await SharedPreferences.getInstance();
-                  final userName = prefs.getString('user_name') ?? '';
-                  final userEmail = prefs.getString('user_email') ?? '';
-                  for (final liftId in liftIds) {
-                    final lift = await sbFetchLiftById(liftId);
-                    if (lift == null || !mounted) continue;
-                    String? newStatus;
-                    String dialogTitle = '';
-                    String dialogBody = '';
-                    String confirmLabel = '';
-                    if (jobType == 'Install') {
-                      newStatus = 'Installed';
-                      dialogTitle = 'Mark lift as Installed?';
-                      dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?';
-                      confirmLabel = 'Mark Installed';
-                    } else if (jobType == 'Removal') {
-                      newStatus = 'Removed';
-                      dialogTitle = 'Mark lift as Removed?';
-                      dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?';
-                      confirmLabel = 'Mark Removed';
-                    }
-                    if (newStatus != null && mounted) {
-                      final confirm = await showDialog<bool>(
-                        context: context,
-                        builder: (_) => AlertDialog(
-                          title: Text(dialogTitle),
-                          content: Text(dialogBody),
-                          actions: [
-                            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                            ElevatedButton(
-                              onPressed: () => Navigator.pop(context, true),
-                              style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                              child: Text(confirmLabel),
-                            ),
-                          ],
-                        ),
-                      );
-                      if (confirm == true && mounted) {
-                        await sbMarkLiftStatus(
-                          liftId: lift.liftId,
-                          newStatus: newStatus,
-                          userEmail: userEmail,
-                          userName: userName,
-                          note: 'Marked $newStatus via schedule event: ${event.title}',
-                        );
-                      }
-                    } else if ((jobType == 'Service' || jobType == 'Annual Service') && mounted) {
-                      final serviceType = jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
-                      final confirm = await showDialog<bool>(
-                        context: context,
-                        builder: (_) => AlertDialog(
-                          title: const Text('Log service record?'),
-                          content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
-                          actions: [
-                            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                            ElevatedButton(
-                              onPressed: () => Navigator.pop(context, true),
-                              style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                              child: const Text('Log Service'),
-                            ),
-                          ],
-                        ),
-                      );
-                      if (confirm == true && mounted) {
-                        await Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => LiftServiceFormScreen(
-                              lift: lift,
-                              prefillServiceType: serviceType,
-                              prefillCustomerName: event.title,
-                              prefillDate: formatDate(DateTime.now()),
-                              offerInvoicePhoto: true,
-                            ),
-                          ),
-                        );
-                      }
-                    }
-                  }
-                }
-              }
-            },
+            onToggleComplete: () => _onToggleComplete(event),
             onTap: () async {
               final changed = await Navigator.push<bool>(
                 context,
@@ -10000,119 +10046,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Week strip widget
-// ---------------------------------------------------------------------------
-
-class _WeekStrip extends StatelessWidget {
-  final DateTime weekStart;
-  final DateTime selectedDay;
-  final ValueChanged<DateTime> onDaySelected;
-  final VoidCallback onPrevWeek;
-  final VoidCallback onNextWeek;
-
-  const _WeekStrip({
-    required this.weekStart,
-    required this.selectedDay,
-    required this.onDaySelected,
-    required this.onPrevWeek,
-    required this.onNextWeek,
-  });
-
-  static const _dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-
-  @override
-  Widget build(BuildContext context) {
-    final today = DateTime.now();
-    return GestureDetector(
-      onHorizontalDragEnd: (d) {
-        final v = d.primaryVelocity ?? 0;
-        if (v < -300) {
-          onNextWeek();
-        } else if (v > 300) {
-          onPrevWeek();
-        }
-      },
-      child: Container(
-        color: Colors.white,
-        child: Row(
-          children: [
-            IconButton(
-              icon: const Icon(Icons.chevron_left),
-              onPressed: onPrevWeek,
-              tooltip: 'Previous week',
-            ),
-            Expanded(
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: List.generate(7, (i) {
-                  final day = weekStart.add(Duration(days: i));
-                  final isSelected = day.year == selectedDay.year &&
-                      day.month == selectedDay.month &&
-                      day.day == selectedDay.day;
-                  final isToday = day.year == today.year &&
-                      day.month == today.month &&
-                      day.day == today.day;
-
-                  return GestureDetector(
-                    onTap: () => onDaySelected(day),
-                    child: Container(
-                      width: 40,
-                      padding: const EdgeInsets.symmetric(vertical: 8),
-                      decoration: BoxDecoration(
-                        color: isSelected ? kBrandGreen : Colors.transparent,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            _dayNames[i],
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: isSelected
-                                  ? Colors.white
-                                  : Colors.grey[600],
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '${day.day}',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: isSelected || isToday
-                                  ? FontWeight.bold
-                                  : FontWeight.normal,
-                              color: isSelected
-                                  ? Colors.white
-                                  : isToday
-                                      ? kBrandGreen
-                                      : Colors.black87,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  );
-                }),
-              ),
-            ),
-            IconButton(
-              icon: const Icon(Icons.chevron_right),
-              onPressed: onNextWeek,
-              tooltip: 'Next week',
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Schedule event card
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Initials avatar — shows 1-2 initials of a name in a small colored circle
@@ -10192,7 +10125,7 @@ class _InitialsAvatar extends StatelessWidget {
 
 class _ScheduleEventCard extends StatelessWidget {
   final QbtScheduleEvent event;
-  final String assignedNames;
+  final Map<String, QbtUser> users;
   final Color color;
   final String Function(DateTime) formatTime;
   final bool completed;
@@ -10201,13 +10134,74 @@ class _ScheduleEventCard extends StatelessWidget {
 
   const _ScheduleEventCard({
     required this.event,
-    required this.assignedNames,
+    required this.users,
     required this.color,
     required this.formatTime,
     required this.completed,
     required this.onToggleComplete,
     required this.onTap,
   });
+
+  Widget _buildAvatarStack(Color eventColor) {
+    final ids = event.assignedUserIds;
+    if (ids.isEmpty) return const SizedBox.shrink();
+
+    const double size = 30;
+    const double overlap = 9;
+
+    final names = ids.map((id) => users[id]?.displayName ?? '?').toList();
+    final maxShow = names.length > 3 ? 2 : names.length;
+    final extra = names.length - maxShow;
+    final slotCount = maxShow + (extra > 0 ? 1 : 0);
+    final totalWidth = size + (slotCount - 1) * (size - overlap);
+
+    return SizedBox(
+      width: totalWidth,
+      height: size,
+      child: Stack(
+        children: [
+          for (int i = 0; i < maxShow; i++)
+            Positioned(
+              left: i * (size - overlap).toDouble(),
+              child: Container(
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: eventColor, width: 1.5),
+                ),
+                child: _InitialsAvatar(
+                  name: names[i],
+                  size: size,
+                  backgroundColor: const Color(0xFF2E2E2E),
+                  textColor: Colors.white,
+                ),
+              ),
+            ),
+          if (extra > 0)
+            Positioned(
+              left: maxShow * (size - overlap).toDouble(),
+              child: Container(
+                width: size,
+                height: size,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2E2E2E),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: eventColor, width: 1.5),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  '+$extra',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -10221,138 +10215,91 @@ class _ScheduleEventCard extends StatelessWidget {
             ? formatTime(startLocal)
             : '${formatTime(startLocal)} – ${formatTime(endLocal)}';
 
-    // Determine if the background color is dark enough to need white text
-    final luminance = color.computeLuminance();
-    final textColor = luminance > 0.35 ? Colors.black87 : Colors.white;
-    final subtleText = luminance > 0.35
-        ? Colors.black.withAlpha(140)
-        : Colors.white.withAlpha(200);
+    final cardColor = completed ? color.withAlpha(100) : color;
 
-    final cardColor = completed ? color.withAlpha(120) : color;
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      clipBehavior: Clip.antiAlias,
-      elevation: completed ? 0 : 2,
-      child: InkWell(
-        onTap: onTap,
-        child: Container(
-          color: cardColor,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Main row
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    // Left: time + initials avatar row
-                    SizedBox(
-                      width: 82,
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            timeLabel,
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                              color: textColor,
-                              decoration: completed
-                                  ? TextDecoration.lineThrough
-                                  : null,
-                            ),
-                          ),
-                          if (assignedNames.isNotEmpty) ...[
-                            const SizedBox(height: 5),
-                            Wrap(
-                              spacing: 4,
-                              children: assignedNames
-                                  .split(', ')
-                                  .map((name) => Tooltip(
-                                        message: name,
-                                        child: _InitialsAvatar(
-                                          name: name,
-                                          size: 26,
-                                          backgroundColor: Colors.white.withValues(alpha: 0.92),
-                                          textColor: color,
-                                        ),
-                                      ))
-                                  .toList(),
-                            ),
-                          ],
-                        ],
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 0, vertical: 1),
+      child: Material(
+        color: cardColor,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                // Left: title + time
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        event.title.isNotEmpty ? event.title : '(No title)',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                          decoration: completed ? TextDecoration.lineThrough : null,
+                          decorationColor: Colors.white70,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                    const SizedBox(width: 10),
-                    // Divider line
-                    Container(
-                      width: 1,
-                      height: 36,
-                      color: textColor.withAlpha(60),
-                    ),
-                    const SizedBox(width: 10),
-                    // Right: title + location
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(
-                            event.title.isNotEmpty ? event.title : '(No title)',
-                            style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.bold,
-                              color: textColor,
-                              decoration: completed
-                                  ? TextDecoration.lineThrough
-                                  : null,
-                            ),
-                          ),
-                          if (event.location.isNotEmpty) ...[
-                            const SizedBox(height: 3),
-                            Row(
-                              children: [
-                                Icon(Icons.location_on_outlined,
-                                    size: 12, color: subtleText),
-                                const SizedBox(width: 3),
-                                Expanded(
-                                  child: Text(
-                                    event.location,
-                                    style: TextStyle(
-                                        fontSize: 12, color: subtleText),
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    // Complete toggle icon on the right
-                    GestureDetector(
-                      onTap: onToggleComplete,
-                      behavior: HitTestBehavior.opaque,
-                      child: Padding(
-                        padding: const EdgeInsets.fromLTRB(8, 4, 4, 4),
-                        child: Icon(
-                          completed
-                              ? Icons.check_circle
-                              : Icons.radio_button_unchecked,
-                          size: 26,
-                          color: completed ? textColor : subtleText,
+                      const SizedBox(height: 3),
+                      Text(
+                        timeLabel,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.white.withAlpha(200),
+                          decoration: completed ? TextDecoration.lineThrough : null,
+                          decorationColor: Colors.white60,
                         ),
                       ),
-                    ),
-                  ],
+                      if (event.location.isNotEmpty) ...[
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            Icon(Icons.location_on_outlined,
+                                size: 11, color: Colors.white.withAlpha(160)),
+                            const SizedBox(width: 2),
+                            Expanded(
+                              child: Text(
+                                event.location,
+                                style: TextStyle(
+                                    fontSize: 11,
+                                    color: Colors.white.withAlpha(160)),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
-              ),
-            ],
+                const SizedBox(width: 10),
+                // Right: avatar stack
+                _buildAvatarStack(cardColor),
+                const SizedBox(width: 8),
+                // Complete toggle
+                GestureDetector(
+                  onTap: onToggleComplete,
+                  behavior: HitTestBehavior.opaque,
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(6, 4, 4, 4),
+                    child: Icon(
+                      completed ? Icons.check_circle : Icons.radio_button_unchecked,
+                      size: 26,
+                      color: completed
+                          ? Colors.white
+                          : Colors.white.withAlpha(140),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
