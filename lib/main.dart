@@ -9611,18 +9611,22 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   final ScrollController _scrollController = ScrollController();
   final Map<String, GlobalKey> _dayKeys = {};
 
-  static const int _daysBefore = 7;
-  static const int _daysAfter = 60;
+  // Live TSheets window: last 7 days through 60 days ahead
+  static const int _liveWindowDays = 7;
+  static const int _daysAhead = 60;
 
-  DateTime get _rangeStart {
+  DateTime get _liveRangeStart {
     final now = DateTime.now();
-    return DateTime(now.year, now.month, now.day).subtract(const Duration(days: _daysBefore));
+    return DateTime(now.year, now.month, now.day)
+        .subtract(Duration(days: _liveWindowDays));
   }
 
-  DateTime get _rangeEnd {
+  DateTime get _liveRangeEnd {
     final now = DateTime.now();
-    return DateTime(now.year, now.month, now.day).add(const Duration(days: _daysAfter));
+    return DateTime(now.year, now.month, now.day).add(const Duration(days: _daysAhead));
   }
+
+  DateTime get _archiveCutoff => _liveRangeStart;
 
   @override
   void initState() {
@@ -9644,15 +9648,20 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     });
     try {
       final results = await Future.wait([
-        qbtFetchScheduleEvents(start: _rangeStart, end: _rangeEnd),
+        qbtFetchScheduleEvents(start: _liveRangeStart, end: _liveRangeEnd),
+        sbFetchScheduleHistory(before: _archiveCutoff),
         qbtFetchUsers(),
         sbFetchCompletedEventIds(),
       ]);
       if (!mounted) return;
+      final liveEvents = results[0] as List<QbtScheduleEvent>;
+      final archivedEvents = results[1] as List<QbtScheduleEvent>;
+      final merged = [...archivedEvents, ...liveEvents]
+        ..sort((a, b) => a.start.compareTo(b.start));
       setState(() {
-        _events = results[0] as List<QbtScheduleEvent>;
-        _users = results[1] as Map<String, QbtUser>;
-        _completedIds = results[2] as Set<String>;
+        _events = merged;
+        _users = results[2] as Map<String, QbtUser>;
+        _completedIds = results[3] as Set<String>;
         _loading = false;
       });
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToToday(animate: false));

@@ -15,6 +15,8 @@ import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import 'qbt_api.dart' show QbtScheduleEvent;
+
 import 'main.dart'
     show
         AnnualRecord,
@@ -1450,4 +1452,41 @@ Future<void> sbUpdateWebLeadStatus({
 
 Future<void> sbDeleteWebLead({required int id}) async {
   await _sb.from('web_leads').delete().eq('id', id);
+}
+
+// ---------------------------------------------------------------------------
+// SCHEDULE HISTORY
+// ---------------------------------------------------------------------------
+
+/// Fetch archived schedule events with start_time before [before].
+/// Returns events as [QbtScheduleEvent] objects so they integrate
+/// seamlessly with live TSheets data in the app.
+Future<List<QbtScheduleEvent>> sbFetchScheduleHistory({
+  required DateTime before,
+}) async {
+  final raw = await _sb
+      .from('schedule_history')
+      .select()
+      .lt('start_time', before.toUtc().toIso8601String())
+      .order('start_time', ascending: true);
+
+  return (raw as List).map((r) {
+    final m = r as Map<String, dynamic>;
+    final rawIds = m['assigned_user_ids']?.toString() ?? '';
+    final assignedIds = rawIds.isNotEmpty
+        ? rawIds.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList()
+        : <String>[];
+    return QbtScheduleEvent(
+      id: m['tsheets_id']?.toString() ?? '',
+      title: m['title']?.toString() ?? '',
+      notes: m['notes']?.toString() ?? '',
+      start: DateTime.parse(m['start_time'] as String),
+      end: DateTime.parse(m['end_time'] as String),
+      allDay: m['all_day'] == true,
+      location: m['location']?.toString() ?? '',
+      color: m['color']?.toString() ?? '#2196F3',
+      assignedUserIds: assignedIds,
+      active: m['active'] != false,
+    );
+  }).toList();
 }

@@ -263,6 +263,46 @@ create index if not exists removal_jobs_lift_id_idx on removal_jobs(lift_id);
 -- from annuals;
 
 -- ---------------------------------------------------------------
+-- SCHEDULE HISTORY (archived TSheets events older than 7 days)
+-- ---------------------------------------------------------------
+create table if not exists schedule_history (
+  tsheets_id        text primary key,
+  title             text not null default '',
+  notes             text not null default '',
+  start_time        timestamptz not null,
+  end_time          timestamptz not null,
+  all_day           boolean not null default false,
+  location          text not null default '',
+  color             text not null default '#2196F3',
+  assigned_user_ids text not null default '',  -- comma-separated TSheets user IDs
+  active            boolean not null default true,
+  archived_at       timestamptz not null default now()
+);
+
+create index if not exists schedule_history_start_idx on schedule_history(start_time);
+
+-- ---------------------------------------------------------------
+-- NIGHTLY CRON: archive old TSheets events into schedule_history
+--
+-- Run this SQL once in the Supabase SQL Editor to register the cron job.
+-- Requires the pg_cron and pg_net extensions (enabled in Supabase by default).
+--
+-- select cron.schedule(
+--   'archive-schedule-nightly',
+--   '0 5 * * *',  -- 5:00 AM UTC daily (1 AM ET)
+--   $$
+--   select net.http_post(
+--     url := 'https://kaujczbhtajqfrjgbxft.supabase.co/functions/v1/archive-schedule',
+--     headers := '{"Authorization": "Bearer <SERVICE_ROLE_KEY>"}'::jsonb
+--   )
+--   $$
+-- );
+--
+-- Replace <SERVICE_ROLE_KEY> with your project's service role key.
+-- View/manage jobs: select * from cron.job;
+-- ---------------------------------------------------------------
+
+-- ---------------------------------------------------------------
 -- ROW LEVEL SECURITY
 -- Allow full access via anon key (internal tool, no auth needed)
 -- ---------------------------------------------------------------
@@ -278,6 +318,7 @@ alter table annuals              enable row level security;
 alter table annuals_history      enable row level security;
 alter table service_jobs         enable row level security;
 alter table removal_jobs         enable row level security;
+alter table schedule_history     enable row level security;
 
 -- Allow all operations for anonymous users (internal tool)
 create policy "allow_all" on lifts                for all using (true) with check (true);
@@ -292,6 +333,7 @@ create policy "allow_all" on annuals              for all using (true) with chec
 create policy "allow_all" on annuals_history      for all using (true) with check (true);
 create policy "allow_all" on service_jobs         for all using (true) with check (true);
 create policy "allow_all" on removal_jobs         for all using (true) with check (true);
+create policy "allow_all" on schedule_history     for all using (true) with check (true);
 
 -- ---------------------------------------------------------------
 -- STORAGE BUCKET POLICIES (for lift photos)
