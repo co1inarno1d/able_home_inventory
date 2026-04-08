@@ -9655,7 +9655,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         _completedIds = results[2] as Set<String>;
         _loading = false;
       });
-      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToToday());
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToToday(animate: false));
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -9670,16 +9670,30 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')}';
   }
 
-  void _scrollToToday() {
-    final key = _dayKey(DateTime.now());
-    final gk = _dayKeys[key];
-    if (gk?.currentContext != null) {
-      Scrollable.ensureVisible(
-        gk!.currentContext!,
-        alignment: 0.0,
+  /// Scroll to today by estimating pixel offset from the top of the list.
+  /// Scrollable.ensureVisible can't be used because lazy ListView items
+  /// off-screen are not in the render tree when _load() completes.
+  void _scrollToToday({bool animate = true}) {
+    if (!_scrollController.hasClients) return;
+    final items = _listItems;
+    final todayKey = _dayKey(DateTime.now());
+    double offset = 0;
+    for (final item in items) {
+      if (item is String) {
+        if (item == todayKey) break;
+        offset += 46.0; // estimated date header row height
+      } else {
+        offset += 70.0; // estimated event card height
+      }
+    }
+    if (animate) {
+      _scrollController.animateTo(
+        offset,
         duration: const Duration(milliseconds: 400),
         curve: Curves.easeInOut,
       );
+    } else {
+      _scrollController.jumpTo(offset);
     }
   }
 
@@ -10007,10 +10021,10 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               child: Text(
                 isToday ? 'Today — ${_formatDayHeader(item)}' : _formatDayHeader(item),
                 style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: isToday ? kBrandGreen : Colors.grey[600],
-                  letterSpacing: 0.3,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: isToday ? kBrandGreen : Colors.grey[700],
+                  letterSpacing: 0.1,
                 ),
               ),
             );
@@ -10155,10 +10169,12 @@ class _ScheduleEventCard extends StatelessWidget {
     final slotCount = maxShow + (extra > 0 ? 1 : 0);
     final totalWidth = size + (slotCount - 1) * (size - overlap);
 
+    // Add 4px padding so border rings aren't clipped at the edges
     return SizedBox(
-      width: totalWidth,
-      height: size,
+      width: totalWidth + 4,
+      height: size + 4,
       child: Stack(
+        clipBehavior: Clip.none,
         children: [
           for (int i = 0; i < maxShow; i++)
             Positioned(
