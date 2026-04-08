@@ -9887,7 +9887,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: const Color(0xFFF0F0F0),
       appBar: AppBar(
         backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
@@ -10009,7 +10009,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w600,
-                  color: isToday ? kBrandGreen : Colors.grey[500],
+                  color: isToday ? kBrandGreen : Colors.grey[600],
                   letterSpacing: 0.3,
                 ),
               ),
@@ -10215,7 +10215,7 @@ class _ScheduleEventCard extends StatelessWidget {
             ? formatTime(startLocal)
             : '${formatTime(startLocal)} – ${formatTime(endLocal)}';
 
-    final cardColor = completed ? color.withAlpha(100) : color;
+    final cardColor = completed ? Color.lerp(color, Colors.white, 0.45)! : color;
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 0, vertical: 1),
