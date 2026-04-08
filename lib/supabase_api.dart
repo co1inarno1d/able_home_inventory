@@ -213,7 +213,7 @@ Future<LiftRecord?> sbCheckDuplicateSerial(String serialNumber) async {
   return LiftRecord.fromJson(raw as Map<String, dynamic>);
 }
 
-Future<void> sbUpsertLift({
+Future<String> sbUpsertLift({
   required String userEmail,
   required String userName,
   String? liftId,
@@ -309,6 +309,8 @@ Future<void> sbUpsertLift({
     'user_email': userEmail,
     'user_name': userName,
   });
+
+  return resolvedLiftId;
 }
 
 Future<void> sbDeleteLift({

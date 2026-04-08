@@ -174,7 +174,39 @@ Future<List<QbtScheduleEvent>> qbtFetchScheduleEvents({
   }
 
   allEvents.sort((a, b) => a.start.compareTo(b.start));
-  return allEvents;
+
+  // TSheets creates a separate event record for each assigned user on the same job.
+  // Deduplicate by (title + start + end): keep the first event's ID, merge all user IDs.
+  final Map<String, int> dedupIndex = {};
+  final deduped = <QbtScheduleEvent>[];
+  for (final event in allEvents) {
+    final key = '${event.title}|${event.start.millisecondsSinceEpoch}|${event.end.millisecondsSinceEpoch}';
+    if (dedupIndex.containsKey(key)) {
+      final idx = dedupIndex[key]!;
+      final existing = deduped[idx];
+      final mergedIds = [
+        ...existing.assignedUserIds,
+        ...event.assignedUserIds.where((id) => !existing.assignedUserIds.contains(id)),
+      ];
+      deduped[idx] = QbtScheduleEvent(
+        id: existing.id,
+        title: existing.title,
+        notes: existing.notes,
+        start: existing.start,
+        end: existing.end,
+        allDay: existing.allDay,
+        location: existing.location,
+        color: existing.color,
+        assignedUserIds: mergedIds,
+        active: existing.active,
+      );
+    } else {
+      dedupIndex[key] = deduped.length;
+      deduped.add(event);
+    }
+  }
+
+  return deduped;
 }
 
 /// Create a new schedule event. Returns the created event.

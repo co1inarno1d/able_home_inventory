@@ -28,6 +28,13 @@ String formatDate(DateTime? date) {
   return '${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}/${date.year}';
 }
 
+/// Returns true if the schedule event is a ramp job (title or notes contains "ramp").
+/// Used to trigger the Job Adjustment form instead of the lift status flow.
+bool eventIsRampJob(QbtScheduleEvent event) {
+  final combined = '${event.title} ${event.notes}'.toLowerCase();
+  return combined.contains('ramp');
+}
+
 /// Convert any Drive URL format to the thumbnail format that Flutter can load.
 /// The /uc?export=view endpoint no longer serves image bytes reliably.
 String normalizeDrivePhotoUrl(String url) {
@@ -3081,6 +3088,42 @@ class _JobsScreenState extends State<JobsScreen>
       final meta = _allMeta[event.id];
       final jobType = meta?['job_type'] as String?;
       final liftIds = (meta?['lift_ids'] as List?)?.cast<String>() ?? [];
+
+      // Ramp job (install or removal): no linked lifts, but event contains "ramp"
+      final isRampType = jobType == 'Install' || jobType == 'Removal';
+      if (isRampType && liftIds.isEmpty && eventIsRampJob(event) && mounted) {
+        final isInstall = jobType == 'Install';
+        final confirm = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
+            content: Text(
+              isInstall
+                  ? 'Select the ramps and quantities used on this job to deduct them from inventory.'
+                  : 'Select the ramps and quantities recovered on this job to add them back to inventory.',
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                child: const Text('Open Form'),
+              ),
+            ],
+          ),
+        );
+        if (confirm == true && mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => JobAdjustmentScreen(
+                initialJobRef: event.title,
+                initialTabIndex: isInstall ? 0 : 1,
+              ),
+            ),
+          );
+        }
+      }
+
       if (jobType != null && liftIds.isNotEmpty && mounted) {
         final prefs = await SharedPreferences.getInstance();
         final userName = prefs.getString('user_name') ?? '';
@@ -3354,19 +3397,20 @@ class _JobEventCard extends StatelessWidget {
                     style:
                         TextStyle(fontSize: 12, color: Colors.grey[600])),
               ]),
-              // Assigned names
+              // Assigned names — shown as initials avatars
               if (assignedNames.isNotEmpty) ...[
-                const SizedBox(height: 2),
-                Row(children: [
-                  Icon(Icons.person_outline,
-                      size: 13, color: Colors.grey[500]),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(assignedNames,
-                        style: TextStyle(
-                            fontSize: 12, color: Colors.grey[600])),
-                  ),
-                ]),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: assignedNames
+                      .split(', ')
+                      .map((name) => Tooltip(
+                            message: name,
+                            child: _InitialsAvatar(name: name, size: 30),
+                          ))
+                      .toList(),
+                ),
               ],
               // Location
               if (event.location.isNotEmpty) ...[
@@ -5493,7 +5537,17 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
 /// =======================
 
 class JobAdjustmentScreen extends StatefulWidget {
-  const JobAdjustmentScreen({super.key});
+  /// When provided, pre-fills the job reference field (e.g. from a schedule event title).
+  final String? initialJobRef;
+
+  /// Which tab to open first. 0 = Install (default), 1 = Removal.
+  final int initialTabIndex;
+
+  const JobAdjustmentScreen({
+    super.key,
+    this.initialJobRef,
+    this.initialTabIndex = 0,
+  });
 
   @override
   State<JobAdjustmentScreen> createState() => _JobAdjustmentScreenState();
@@ -5506,6 +5560,7 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
   bool _submitting = false;
 
   late TabController _tabController; // 0 = Install, 1 = Removal
+  late TextEditingController _jobRefController;
   String _installCondition = 'New';
   String _jobRef = '';
 
@@ -5513,7 +5568,21 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
   void initState() {
     super.initState();
     _future = sbFetchInventory();
-    _tabController = TabController(length: 2, vsync: this);
+    _tabController = TabController(
+      length: 2,
+      vsync: this,
+      initialIndex: widget.initialTabIndex.clamp(0, 1),
+    );
+    final initial = widget.initialJobRef ?? '';
+    _jobRef = initial;
+    _jobRefController = TextEditingController(text: initial);
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    _jobRefController.dispose();
+    super.dispose();
   }
 
   String _keyFor(String itemId, String condition) => '$itemId|$condition';
@@ -5766,10 +5835,37 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
           final data = snapshot.data!;
           return Column(
             children: [
+              // Instruction banner — shown when opened from a schedule event
+              if (widget.initialJobRef != null)
+                Container(
+                  margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: kBrandGreen.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: kBrandGreen.withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.info_outline, size: 18, color: kBrandGreen),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          isInstall
+                              ? 'Select the ramp sections and quantities installed for this job. Each item entered will be deducted from inventory.'
+                              : 'Select the ramp sections and quantities recovered from this job. Each item entered will be added back to inventory.',
+                          style: TextStyle(fontSize: 13, color: Colors.grey.shade700, height: 1.4),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               Padding(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 child: TextField(
+                  controller: _jobRefController,
                   decoration: const InputDecoration(
                     labelText: 'Job reference (e.g., customer name / location)',
                     border: OutlineInputBorder(),
@@ -6000,7 +6096,6 @@ class _LiftsScreenState extends State<LiftsScreen> {
 
           // All filter lists are hardcoded so options always appear
           const statuses = ['In Stock', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
-          const prepStatuses = ['Needs prepping', 'Needs repair', 'Prepped'];
           const brands = ['Acorn', 'Brooks', 'Bruno', 'Harmar'];
           const orientations = ['Left', 'Right', 'N/A'];
 
@@ -6123,7 +6218,6 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 brands: brands,
                 series: allSeries,
                 orientations: orientations,
-                prepStatuses: prepStatuses,
                 conditions: const [
                   'New', 'Used',
                   'Used - Like New', 'Used - Standard', 'Used - Not Great', 'Used - Shit',
@@ -6326,7 +6420,6 @@ class _LiftsScreenState extends State<LiftsScreen> {
     required List<String> brands,
     required List<String> series,
     required List<String> orientations,
-    required List<String> prepStatuses,
     required List<String> conditions,
   }) {
     return Column(
@@ -6370,10 +6463,10 @@ class _LiftsScreenState extends State<LiftsScreen> {
                       value: _brandFilter,
                       hint: 'Brand',
                       items: brands,
+                      // Only clear series when brand changes — orientation is independent
                       onChanged: (value) => setState(() {
                         _brandFilter = value;
                         _seriesFilter = null;
-                        _orientationFilter = null;
                       }),
                     ),
                   ),
@@ -6383,16 +6476,14 @@ class _LiftsScreenState extends State<LiftsScreen> {
                       value: series.contains(_seriesFilter) ? _seriesFilter : null,
                       hint: 'Series',
                       items: series,
-                      onChanged: (value) => setState(() {
-                        _seriesFilter = value;
-                        _orientationFilter = null;
-                      }),
+                      // Series and orientation are fully independent — don't clear each other
+                      onChanged: (value) => setState(() => _seriesFilter = value),
                     ),
                   ),
                 ],
               ),
               const SizedBox(height: 8),
-              // Row 2: Status, Orientation, Prep Status
+              // Row 2: Status, Orientation
               Row(
                 children: [
                   Expanded(
@@ -6410,15 +6501,6 @@ class _LiftsScreenState extends State<LiftsScreen> {
                       hint: 'Orientation',
                       items: orientations,
                       onChanged: (value) => setState(() => _orientationFilter = value),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: _buildCompactDropdown(
-                      value: prepStatuses.contains(_prepStatusFilter) ? _prepStatusFilter : null,
-                      hint: 'Prep',
-                      items: prepStatuses,
-                      onChanged: (value) => setState(() => _prepStatusFilter = value),
                     ),
                   ),
                 ],
@@ -8902,7 +8984,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
     });
 
     try {
-      await sbUpsertLift(
+      final previousStatus = widget.existing?.status ?? '';
+      final savedLiftId = await sbUpsertLift(
         userEmail: userEmail,
         userName: userName,
         liftId: widget.existing?.liftId,
@@ -8931,6 +9014,41 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
           content: Text(_isEditing ? 'Lift updated' : 'New lift added'),
         ),
       );
+
+      // If status was changed to Assigned, offer to link to a schedule job
+      final statusChangedToAssigned = _status == 'Assigned' && previousStatus != 'Assigned';
+      final isNewAssigned = !_isEditing && _status == 'Assigned';
+      if ((statusChangedToAssigned || isNewAssigned) && mounted) {
+        final linkNow = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Attach to a schedule job?'),
+            content: const Text(
+              'This lift is now Assigned. Would you like to link it to an upcoming install job in the schedule?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Later'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                child: const Text('Link to Job'),
+              ),
+            ],
+          ),
+        );
+        if (linkNow == true && mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => _LinkLiftToJobScreen(liftId: savedLiftId),
+            ),
+          );
+        }
+      }
+
+      if (!mounted) return;
       Navigator.of(context).pop(true);
     } catch (e) {
       if (!mounted) return;
@@ -9645,6 +9763,42 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 final meta = await sbGetEventMeta(event.id);
                 final jobType = meta['job_type'] as String?;
                 final liftIds = (meta['lift_ids'] as List<String>?) ?? [];
+
+                // Ramp job (install or removal): no linked lifts, but event contains "ramp"
+                final isRampType = jobType == 'Install' || jobType == 'Removal';
+                if (isRampType && liftIds.isEmpty && eventIsRampJob(event) && mounted) {
+                  final isInstall = jobType == 'Install';
+                  final confirm = await showDialog<bool>(
+                    context: context,
+                    builder: (_) => AlertDialog(
+                      title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
+                      content: Text(
+                        isInstall
+                            ? 'Select the ramps and quantities used on this job to deduct them from inventory.'
+                            : 'Select the ramps and quantities recovered on this job to add them back to inventory.',
+                      ),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+                        ElevatedButton(
+                          onPressed: () => Navigator.pop(context, true),
+                          style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                          child: const Text('Open Form'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (confirm == true && mounted) {
+                    await Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => JobAdjustmentScreen(
+                          initialJobRef: event.title,
+                          initialTabIndex: isInstall ? 0 : 1,
+                        ),
+                      ),
+                    );
+                  }
+                }
+
                 if (jobType != null && liftIds.isNotEmpty && mounted) {
                   final prefs = await SharedPreferences.getInstance();
                   final userName = prefs.getString('user_name') ?? '';
@@ -9862,6 +10016,72 @@ class _WeekStrip extends StatelessWidget {
 // Schedule event card
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Initials avatar — shows 1-2 initials of a name in a small colored circle
+// ---------------------------------------------------------------------------
+
+class _InitialsAvatar extends StatelessWidget {
+  final String name;
+  final double size;
+  final Color? backgroundColor;
+  final Color? textColor;
+
+  const _InitialsAvatar({
+    required this.name,
+    this.size = 28,
+    this.backgroundColor,
+    this.textColor,
+  });
+
+  /// Extract up to 2 initials from a display name.
+  String get _initials {
+    final parts = name.trim().split(RegExp(r'\s+'));
+    if (parts.isEmpty || parts.first.isEmpty) return '?';
+    if (parts.length == 1) return parts.first[0].toUpperCase();
+    return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
+  }
+
+  /// Stable color derived from the name string.
+  Color get _defaultColor {
+    const colors = [
+      Color(0xFF1565C0), // blue
+      Color(0xFF2E7D32), // green
+      Color(0xFF6A1B9A), // purple
+      Color(0xFFBF360C), // deep orange
+      Color(0xFF00695C), // teal
+      Color(0xFF4527A0), // deep purple
+      Color(0xFF558B2F), // light green
+      Color(0xFF00838F), // cyan
+    ];
+    final hash = name.codeUnits.fold(0, (sum, c) => sum + c);
+    return colors[hash % colors.length];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = backgroundColor ?? _defaultColor;
+    final fg = textColor ?? Colors.white;
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: bg,
+        shape: BoxShape.circle,
+      ),
+      alignment: Alignment.center,
+      child: Text(
+        _initials,
+        style: TextStyle(
+          color: fg,
+          fontSize: size * 0.38,
+          fontWeight: FontWeight.bold,
+          height: 1,
+        ),
+      ),
+    );
+  }
+}
+
 class _ScheduleEventCard extends StatelessWidget {
   final QbtScheduleEvent event;
   final String assignedNames;
@@ -9920,7 +10140,7 @@ class _ScheduleEventCard extends StatelessWidget {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    // Left: time + assigned name stacked
+                    // Left: time + initials avatar row
                     SizedBox(
                       width: 82,
                       child: Column(
@@ -9939,12 +10159,21 @@ class _ScheduleEventCard extends StatelessWidget {
                             ),
                           ),
                           if (assignedNames.isNotEmpty) ...[
-                            const SizedBox(height: 3),
-                            Text(
-                              assignedNames,
-                              style: TextStyle(fontSize: 11, color: subtleText),
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
+                            const SizedBox(height: 5),
+                            Wrap(
+                              spacing: 4,
+                              children: assignedNames
+                                  .split(', ')
+                                  .map((name) => Tooltip(
+                                        message: name,
+                                        child: _InitialsAvatar(
+                                          name: name,
+                                          size: 26,
+                                          backgroundColor: Colors.white.withValues(alpha: 0.92),
+                                          textColor: color,
+                                        ),
+                                      ))
+                                  .toList(),
                             ),
                           ],
                         ],
@@ -10274,9 +10503,22 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     try {
       await sbSetEventCompleted(eventId: widget.event.id, completed: next);
       debugPrint('[Complete] marked=$next linkedLifts=${_linkedLifts.length} jobType=$_jobType');
-      // Smart completion: trigger downstream actions when marking complete
-      if (next && _linkedLifts.isNotEmpty && mounted) {
+      // Smart completion: trigger downstream actions when marking complete.
+      // Fires when lifts are linked, OR when it's a ramp install (no lifts linked but ramp detected).
+      final isRamp = eventIsRampJob(widget.event);
+      final isRampJob = next && isRamp && (_jobType == 'Install' || _jobType == 'Removal') && _linkedLifts.isEmpty;
+      if (next && (_linkedLifts.isNotEmpty || isRampJob) && mounted) {
         await _handleSmartCompletion();
+      }
+      // Warn if completing a service job with no lift linked
+      final isServiceType = _jobType == 'Service' || _jobType == 'Annual Service';
+      if (next && isServiceType && _linkedLifts.isEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No lift linked — use the Link Lift button to attach one so a service record can be logged.'),
+            duration: Duration(seconds: 5),
+          ),
+        );
       }
     } catch (e) {
       debugPrint('[Complete] ERROR: $e');
@@ -10291,6 +10533,43 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     final prefs = await SharedPreferences.getInstance();
     final userName = prefs.getString('user_name') ?? '';
     final userEmail = prefs.getString('user_email') ?? '';
+
+    // Ramp job (install or removal): no linked lifts, but the job title/notes contains "ramp"
+    final isRampType = _jobType == 'Install' || _jobType == 'Removal';
+    if (isRampType && _linkedLifts.isEmpty && eventIsRampJob(widget.event)) {
+      if (!mounted) return;
+      final isInstall = _jobType == 'Install';
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
+          content: Text(
+            isInstall
+                ? 'Select the ramps and quantities used on this job to deduct them from inventory.'
+                : 'Select the ramps and quantities recovered on this job to add them back to inventory.',
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+              child: const Text('Open Form'),
+            ),
+          ],
+        ),
+      );
+      if (confirm == true && mounted) {
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => JobAdjustmentScreen(
+              initialJobRef: widget.event.title,
+              initialTabIndex: isInstall ? 0 : 1,
+            ),
+          ),
+        );
+      }
+      return;
+    }
 
     for (final lift in List<LiftRecord>.from(_linkedLifts)) {
       debugPrint('[SmartComplete] processing lift=${lift.liftId} status=${lift.status}');
@@ -10955,6 +11234,300 @@ class _DetailRow extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Link lift to a schedule job (shown after marking a lift as Assigned)
+// ---------------------------------------------------------------------------
+
+class _LinkLiftToJobScreen extends StatefulWidget {
+  /// The ID of the lift to link.
+  final String liftId;
+
+  const _LinkLiftToJobScreen({required this.liftId});
+
+  @override
+  State<_LinkLiftToJobScreen> createState() => _LinkLiftToJobScreenState();
+}
+
+class _LinkLiftToJobScreenState extends State<_LinkLiftToJobScreen> {
+  bool _loading = true;
+  String? _error;
+  List<QbtScheduleEvent> _installEvents = [];
+  Map<String, QbtUser> _users = {};
+  String? _linkingEventId;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final now = DateTime.now();
+      final results = await Future.wait([
+        qbtFetchScheduleEvents(
+          start: now.subtract(const Duration(days: 7)),
+          end: now.add(const Duration(days: 30)),
+        ),
+        qbtFetchUsers(),
+      ]);
+      final events = results[0] as List<QbtScheduleEvent>;
+      final users = results[1] as Map<String, QbtUser>;
+
+      // Only show Install-type events (by title inference)
+      final installEvents = events.where((e) {
+        final t = e.title.toLowerCase();
+        return t.contains('install') && !t.contains('removal') && !t.contains('remove');
+      }).toList();
+
+      if (!mounted) return;
+      setState(() {
+        _installEvents = installEvents;
+        _users = users;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  String _formatEventDate(QbtScheduleEvent event) {
+    final local = event.start.toLocal();
+    final h = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final m = local.minute.toString().padLeft(2, '0');
+    final ampm = local.hour < 12 ? 'AM' : 'PM';
+    return '${local.month}/${local.day}/${local.year}  $h:$m $ampm';
+  }
+
+  String _assignedNames(QbtScheduleEvent event) {
+    if (event.assignedUserIds.isEmpty) return '';
+    return event.assignedUserIds
+        .map((id) => _users[id]?.displayName ?? 'Unknown')
+        .join(', ');
+  }
+
+  Future<void> _linkToEvent(QbtScheduleEvent event) async {
+    setState(() => _linkingEventId = event.id);
+    try {
+      // Fetch current lift IDs linked to this event
+      final meta = await sbGetEventMeta(event.id);
+      final currentIds = (meta['lift_ids'] as List<String>?) ?? [];
+      if (!currentIds.contains(widget.liftId)) {
+        await sbSetEventLiftIds(event.id, [...currentIds, widget.liftId]);
+      }
+      // Ensure job type is set to Install
+      final jobType = meta['job_type'] as String?;
+      if (jobType == null || jobType.isEmpty) {
+        await sbSetEventJobType(event.id, 'Install');
+      }
+      if (!mounted) return;
+      // Navigate to the event detail so user can see the link
+      await Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) => ScheduleEventDetailScreen(
+            event: event,
+            users: _users,
+            assignedNames: _assignedNames(event),
+            color: _parseEventColor(event),
+            formatTime: (dt) {
+              final local = dt.toLocal();
+              final h = local.hour % 12 == 0 ? 12 : local.hour % 12;
+              final m = local.minute.toString().padLeft(2, '0');
+              final ampm = local.hour < 12 ? 'AM' : 'PM';
+              return '$h:$m $ampm';
+            },
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to link lift: $e')),
+      );
+      setState(() => _linkingEventId = null);
+    }
+  }
+
+  Color _parseEventColor(QbtScheduleEvent event) {
+    try {
+      final h = event.color.replaceAll('#', '');
+      return Color(int.parse('FF$h', radix: 16));
+    } catch (_) {
+      return kBrandGreen;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Link to Schedule Job'),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('Error: $_error', textAlign: TextAlign.center),
+                      const SizedBox(height: 12),
+                      ElevatedButton(onPressed: _load, child: const Text('Retry')),
+                    ],
+                  ),
+                )
+              : Column(
+                  children: [
+                    // Instruction
+                    Container(
+                      margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: kBrandGreen.withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: kBrandGreen.withValues(alpha: 0.3)),
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(Icons.info_outline, size: 18, color: kBrandGreen),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Tap an upcoming install job below to attach this lift to it. '
+                              'You can also create a new job with this lift already linked.',
+                              style: TextStyle(fontSize: 13, color: Colors.grey.shade700, height: 1.4),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Expanded(
+                      child: _installEvents.isEmpty
+                          ? Center(
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    'No upcoming install jobs found.',
+                                    style: TextStyle(color: Colors.grey.shade600),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  ElevatedButton.icon(
+                                    icon: const Icon(Icons.add),
+                                    label: const Text('Create New Job'),
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: kBrandGreen,
+                                      foregroundColor: Colors.white,
+                                    ),
+                                    onPressed: () async {
+                                      final created = await Navigator.of(context).push<bool>(
+                                        MaterialPageRoute(
+                                          builder: (_) => ScheduleEventFormScreen(
+                                            users: _users,
+                                            initialDate: DateTime.now(),
+                                          ),
+                                        ),
+                                      );
+                                      if (created == true) _load();
+                                    },
+                                  ),
+                                ],
+                              ),
+                            )
+                          : RefreshIndicator(
+                              onRefresh: _load,
+                              child: ListView.builder(
+                                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                                itemCount: _installEvents.length + 1,
+                                itemBuilder: (context, i) {
+                                  if (i == _installEvents.length) {
+                                    // Create new job button at bottom
+                                    return Padding(
+                                      padding: const EdgeInsets.symmetric(vertical: 12),
+                                      child: OutlinedButton.icon(
+                                        icon: const Icon(Icons.add),
+                                        label: const Text('Create New Job'),
+                                        onPressed: () async {
+                                          final created = await Navigator.of(context).push<bool>(
+                                            MaterialPageRoute(
+                                              builder: (_) => ScheduleEventFormScreen(
+                                                users: _users,
+                                                initialDate: DateTime.now(),
+                                              ),
+                                            ),
+                                          );
+                                          if (created == true) _load();
+                                        },
+                                      ),
+                                    );
+                                  }
+                                  final event = _installEvents[i];
+                                  final names = _assignedNames(event);
+                                  final isLinking = _linkingEventId == event.id;
+                                  return Card(
+                                    margin: const EdgeInsets.symmetric(vertical: 4),
+                                    child: ListTile(
+                                      leading: Container(
+                                        width: 4,
+                                        height: 40,
+                                        decoration: BoxDecoration(
+                                          color: _parseEventColor(event),
+                                          borderRadius: BorderRadius.circular(2),
+                                        ),
+                                      ),
+                                      title: Text(
+                                        event.title.isNotEmpty ? event.title : '(No title)',
+                                        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                                      ),
+                                      subtitle: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            _formatEventDate(event),
+                                            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                                          ),
+                                          if (names.isNotEmpty)
+                                            Wrap(
+                                              spacing: 4,
+                                              children: names
+                                                  .split(', ')
+                                                  .map((n) => Tooltip(
+                                                        message: n,
+                                                        child: _InitialsAvatar(name: n, size: 22),
+                                                      ))
+                                                  .toList(),
+                                            ),
+                                        ],
+                                      ),
+                                      trailing: isLinking
+                                          ? const SizedBox(
+                                              width: 20,
+                                              height: 20,
+                                              child: CircularProgressIndicator(strokeWidth: 2),
+                                            )
+                                          : const Icon(Icons.link, color: kBrandGreen),
+                                      onTap: isLinking ? null : () => _linkToEvent(event),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                    ),
+                  ],
+                ),
     );
   }
 }
