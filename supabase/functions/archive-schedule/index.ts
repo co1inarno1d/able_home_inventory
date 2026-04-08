@@ -1,9 +1,15 @@
 /**
  * archive-schedule
  *
- * Fetches TSheets schedule events that are older than 7 days and upserts
- * them into the `schedule_history` Supabase table. Safe to run repeatedly —
+ * Fetches TSheets schedule events and upserts them into the
+ * `schedule_history` Supabase table. Safe to run repeatedly —
  * upsert on tsheets_id means no duplicates.
+ *
+ * Nightly cron mode (no params): archives the window that just aged out
+ * of the 7-day live TSheets window (looks back 60 days to catch any misses).
+ *
+ * Migration mode (query params): pass ?start=YYYY-MM-DD&end=YYYY-MM-DD
+ * to archive any arbitrary date range. Used for the one-time full backfill.
  *
  * Called nightly by Supabase cron (see schema.sql for setup SQL).
  */
@@ -12,9 +18,9 @@ const TSHEETS_TOKEN = 'S.6__bc39aa448aae631d140c82d5a694c54b4fd94ebd';
 const TSHEETS_BASE = 'https://rest.tsheets.com/api/v1';
 const CALENDAR_ID = '123571';
 
-// How far back to look when archiving (catches anything missed in prior runs)
+// Nightly mode: how far back to look (catches anything missed in prior runs)
 const LOOKBACK_DAYS = 60;
-// Events newer than this stay in the live TSheets window — don't archive them
+// Nightly mode: events newer than this stay in the live TSheets window
 const LIVE_WINDOW_DAYS = 7;
 
 function dateOnly(d: Date): string {
@@ -59,19 +65,30 @@ async function fetchTsheetsEvents(start: Date, end: Date): Promise<any[]> {
   return all;
 }
 
-Deno.serve(async (_req: Request) => {
+Deno.serve(async (req: Request) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
     const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 
-    const now = new Date();
+    const url = new URL(req.url);
+    const paramStart = url.searchParams.get('start');
+    const paramEnd = url.searchParams.get('end');
 
-    // Archive window: older than LIVE_WINDOW_DAYS, up to LOOKBACK_DAYS back
-    const archiveEnd = new Date(now);
-    archiveEnd.setDate(archiveEnd.getDate() - LIVE_WINDOW_DAYS);
+    let archiveStart: Date;
+    let archiveEnd: Date;
 
-    const archiveStart = new Date(now);
-    archiveStart.setDate(archiveStart.getDate() - LOOKBACK_DAYS);
+    if (paramStart && paramEnd) {
+      // Migration mode: use the provided date range exactly
+      archiveStart = new Date(`${paramStart}T00:00:00Z`);
+      archiveEnd = new Date(`${paramEnd}T23:59:59Z`);
+    } else {
+      // Nightly mode: archive the window that just aged out
+      const now = new Date();
+      archiveEnd = new Date(now);
+      archiveEnd.setDate(archiveEnd.getDate() - LIVE_WINDOW_DAYS);
+      archiveStart = new Date(now);
+      archiveStart.setDate(archiveStart.getDate() - LOOKBACK_DAYS);
+    }
 
     const rawEvents = await fetchTsheetsEvents(archiveStart, archiveEnd);
 
