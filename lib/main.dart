@@ -28,6 +28,23 @@ String formatDate(DateTime? date) {
   return '${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}/${date.year}';
 }
 
+/// Normalizes a bin number field to display as "Bin XX" regardless of how it was entered.
+/// Handles: "43", "bin43", "bin 43", "Bin43", "Bin 43", "bin#43", "Bin #43", etc.
+/// Returns the raw value unchanged if no numeric portion is found.
+String normalizeBinDisplay(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return s;
+  // Strip any leading "bin" (case-insensitive) + optional space/# characters, keep the rest
+  final match = RegExp(r'^bin\s*#?\s*(.+)$', caseSensitive: false).firstMatch(s);
+  final number = match != null ? match.group(1)!.trim() : s;
+  // If the extracted part looks purely numeric, format as "Bin XX"
+  // Otherwise just display as-is (don't corrupt odd entries)
+  if (RegExp(r'^\d+$').hasMatch(number)) return 'Bin $number';
+  // It already had "bin" stripped and isn't purely numeric — show "Bin <rest>"
+  if (match != null) return 'Bin $number';
+  return s;
+}
+
 /// Returns true if the schedule event is a ramp job (title or notes contains "ramp").
 /// Used to trigger the Job Adjustment form instead of the lift status flow.
 bool eventIsRampJob(QbtScheduleEvent event) {
@@ -5960,6 +5977,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
   String? _seriesFilter;
   String? _orientationFilter;
   String? _prepStatusFilter;
+  String? _sortOption; // null = default (newest acquired first)
 
   @override
   void initState() {
@@ -6097,7 +6115,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
           // All filter lists are hardcoded so options always appear
           const statuses = ['In Stock', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
           const brands = ['Acorn', 'Brooks', 'Bruno', 'Harmar'];
-          const orientations = ['Left', 'Right', 'N/A'];
+          const orientations = ['LH', 'RH', 'N/A'];
 
           // Series: hardcoded per brand when brand filter active, else all series
           final List<String> allSeries;
@@ -6155,7 +6173,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
               final lo = l.orientation.trim().toLowerCase();
               final fo = _orientationFilter!.toLowerCase();
               final isNonHanded = lo == 'n/a' || lo.isEmpty;
-              final filterIsHanded = fo == 'left' || fo == 'right';
+              final filterIsHanded = fo == 'lh' || fo == 'rh';
               // Pass if: exact match OR (non-handed lift AND filter is LH/RH)
               final passesFilter = lo == fo || (isNonHanded && filterIsHanded);
               if (!passesFilter) return false;
@@ -6190,6 +6208,67 @@ class _LiftsScreenState extends State<LiftsScreen> {
             return true;
           }).toList();
 
+          // Sort (applied after filtering; search ranking overrides when search is active)
+          if (_search.isEmpty) {
+            switch (_sortOption) {
+              case 'Newest Acquired':
+                filtered.sort((a, b) {
+                  final da = DateTime.tryParse(a.dateAcquired) ?? DateTime(2000);
+                  final db = DateTime.tryParse(b.dateAcquired) ?? DateTime(2000);
+                  return db.compareTo(da);
+                });
+                break;
+              case 'Oldest Acquired':
+                filtered.sort((a, b) {
+                  final da = DateTime.tryParse(a.dateAcquired) ?? DateTime(2000);
+                  final db = DateTime.tryParse(b.dateAcquired) ?? DateTime(2000);
+                  return da.compareTo(db);
+                });
+                break;
+              case 'Brand A–Z':
+                filtered.sort((a, b) => a.brand.toLowerCase().compareTo(b.brand.toLowerCase()));
+                break;
+              case 'Series A–Z':
+                filtered.sort((a, b) => a.series.toLowerCase().compareTo(b.series.toLowerCase()));
+                break;
+              case 'Status':
+                const order = ['In Stock', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
+                filtered.sort((a, b) {
+                  final ia = order.indexOf(a.status);
+                  final ib = order.indexOf(b.status);
+                  return (ia < 0 ? 99 : ia).compareTo(ib < 0 ? 99 : ib);
+                });
+                break;
+              case 'Bin # Asc':
+                filtered.sort((a, b) {
+                  final na = int.tryParse(a.binNumber.replaceAll(RegExp(r'[^0-9]'), ''));
+                  final nb = int.tryParse(b.binNumber.replaceAll(RegExp(r'[^0-9]'), ''));
+                  if (na == null && nb == null) return 0;
+                  if (na == null) return 1;
+                  if (nb == null) return -1;
+                  return na.compareTo(nb);
+                });
+                break;
+              case 'Bin # Desc':
+                filtered.sort((a, b) {
+                  final na = int.tryParse(a.binNumber.replaceAll(RegExp(r'[^0-9]'), ''));
+                  final nb = int.tryParse(b.binNumber.replaceAll(RegExp(r'[^0-9]'), ''));
+                  if (na == null && nb == null) return 0;
+                  if (na == null) return 1;
+                  if (nb == null) return -1;
+                  return nb.compareTo(na);
+                });
+                break;
+              default:
+                // Default: newest acquired first
+                filtered.sort((a, b) {
+                  final da = DateTime.tryParse(a.dateAcquired) ?? DateTime(2000);
+                  final db = DateTime.tryParse(b.dateAcquired) ?? DateTime(2000);
+                  return db.compareTo(da);
+                });
+            }
+          }
+
           // Search ranking: exact bin/serial matches float to top
           if (_search.isNotEmpty) {
             // Normalize for ranking too
@@ -6221,6 +6300,15 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 conditions: const [
                   'New', 'Used',
                   'Used - Like New', 'Used - Standard', 'Used - Not Great', 'Used - Shit',
+                ],
+                sortOptions: const [
+                  'Newest Acquired',
+                  'Oldest Acquired',
+                  'Brand A–Z',
+                  'Series A–Z',
+                  'Status',
+                  'Bin # Asc',
+                  'Bin # Desc',
                 ],
               ),
               if (filtered.isEmpty)
@@ -6337,7 +6425,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                                               if (l.condition.trim().toLowerCase().startsWith('used') && l.binNumber.isNotEmpty) ...[
                                                 const SizedBox(width: 12),
                                                 Text(
-                                                  'Bin ${l.binNumber}',
+                                                  normalizeBinDisplay(l.binNumber),
                                                   style: GoogleFonts.nunito(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.blueGrey.shade700),
                                                 ),
                                               ],
@@ -6421,6 +6509,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
     required List<String> series,
     required List<String> orientations,
     required List<String> conditions,
+    required List<String> sortOptions,
   }) {
     return Column(
       children: [
@@ -6483,7 +6572,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 ],
               ),
               const SizedBox(height: 8),
-              // Row 2: Status, Orientation
+              // Row 2: Status, Orientation, Sort
               Row(
                 children: [
                   Expanded(
@@ -6498,9 +6587,18 @@ class _LiftsScreenState extends State<LiftsScreen> {
                   Expanded(
                     child: _buildCompactDropdown(
                       value: orientations.contains(_orientationFilter) ? _orientationFilter : null,
-                      hint: 'Orientation',
+                      hint: 'Orient.',
                       items: orientations,
                       onChanged: (value) => setState(() => _orientationFilter = value),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildCompactDropdown(
+                      value: _sortOption,
+                      hint: 'Sort',
+                      items: sortOptions,
+                      onChanged: (value) => setState(() => _sortOption = value),
                     ),
                   ),
                 ],
@@ -10041,20 +10139,30 @@ class _InitialsAvatar extends StatelessWidget {
     return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
   }
 
-  /// Stable color derived from the name string.
+  /// Per-person schedule colors (matched to TSheets calendar colors).
+  static const Map<String, Color> _namedColors = {
+    'Matt Walsh':        Color(0xFF9E9E9E), // Grey
+    'Chris Doherty':     Color(0xFFE65100), // Orange
+    'Jim Doherty':       Color(0xFF00C853), // Bright green
+    'Ryan Clark':        Color(0xFF8B0000), // Crimson red
+    'Connor Hibbard':    Color(0xFF6D6E00), // Olive green
+    'Harry Riendeau':    Color(0xFF00AEEF), // Sky blue
+    'Liam Arnold':       Color(0xFF6A1B9A), // Purple
+    'Stephen Tremblay':  Color(0xFFD32F2F), // Bright red
+    'Colin Arnold':      Color(0xFFBF8040), // Tan / light orange
+  };
+
+  /// Color for this avatar — named person first, else hash-based fallback.
   Color get _defaultColor {
-    const colors = [
-      Color(0xFF1565C0), // blue
-      Color(0xFF2E7D32), // green
-      Color(0xFF6A1B9A), // purple
-      Color(0xFFBF360C), // deep orange
-      Color(0xFF00695C), // teal
-      Color(0xFF4527A0), // deep purple
-      Color(0xFF558B2F), // light green
-      Color(0xFF00838F), // cyan
+    final trimmed = name.trim();
+    if (_namedColors.containsKey(trimmed)) return _namedColors[trimmed]!;
+    // Fallback: stable hash over the name
+    const fallbacks = [
+      Color(0xFF1565C0), Color(0xFF2E7D32), Color(0xFF00695C),
+      Color(0xFF4527A0), Color(0xFF558B2F), Color(0xFF00838F),
     ];
     final hash = name.codeUnits.fold(0, (sum, c) => sum + c);
-    return colors[hash % colors.length];
+    return fallbacks[hash % fallbacks.length];
   }
 
   @override
@@ -11371,10 +11479,31 @@ class _LinkLiftToJobScreenState extends State<_LinkLiftToJobScreen> {
 
   @override
   Widget build(BuildContext context) {
+    Future<void> openCreateJob() async {
+      final created = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(
+          builder: (_) => ScheduleEventFormScreen(
+            users: _users,
+            initialDate: DateTime.now(),
+          ),
+        ),
+      );
+      if (created == true) _load();
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('Link to Schedule Job'),
       ),
+      floatingActionButton: _loading || _error != null
+          ? null
+          : FloatingActionButton.extended(
+              onPressed: openCreateJob,
+              backgroundColor: kBrandGreen,
+              foregroundColor: Colors.white,
+              icon: const Icon(Icons.add),
+              label: const Text('Create New Job'),
+            ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
@@ -11417,63 +11546,17 @@ class _LinkLiftToJobScreenState extends State<_LinkLiftToJobScreen> {
                     Expanded(
                       child: _installEvents.isEmpty
                           ? Center(
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    'No upcoming install jobs found.',
-                                    style: TextStyle(color: Colors.grey.shade600),
-                                  ),
-                                  const SizedBox(height: 16),
-                                  ElevatedButton.icon(
-                                    icon: const Icon(Icons.add),
-                                    label: const Text('Create New Job'),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: kBrandGreen,
-                                      foregroundColor: Colors.white,
-                                    ),
-                                    onPressed: () async {
-                                      final created = await Navigator.of(context).push<bool>(
-                                        MaterialPageRoute(
-                                          builder: (_) => ScheduleEventFormScreen(
-                                            users: _users,
-                                            initialDate: DateTime.now(),
-                                          ),
-                                        ),
-                                      );
-                                      if (created == true) _load();
-                                    },
-                                  ),
-                                ],
+                              child: Text(
+                                'No upcoming install jobs found.',
+                                style: TextStyle(color: Colors.grey.shade600),
                               ),
                             )
                           : RefreshIndicator(
                               onRefresh: _load,
                               child: ListView.builder(
-                                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
-                                itemCount: _installEvents.length + 1,
+                                padding: const EdgeInsets.fromLTRB(12, 8, 12, 80),
+                                itemCount: _installEvents.length,
                                 itemBuilder: (context, i) {
-                                  if (i == _installEvents.length) {
-                                    // Create new job button at bottom
-                                    return Padding(
-                                      padding: const EdgeInsets.symmetric(vertical: 12),
-                                      child: OutlinedButton.icon(
-                                        icon: const Icon(Icons.add),
-                                        label: const Text('Create New Job'),
-                                        onPressed: () async {
-                                          final created = await Navigator.of(context).push<bool>(
-                                            MaterialPageRoute(
-                                              builder: (_) => ScheduleEventFormScreen(
-                                                users: _users,
-                                                initialDate: DateTime.now(),
-                                              ),
-                                            ),
-                                          );
-                                          if (created == true) _load();
-                                        },
-                                      ),
-                                    );
-                                  }
                                   final event = _installEvents[i];
                                   final names = _assignedNames(event);
                                   final isLinking = _linkingEventId == event.id;
