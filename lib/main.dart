@@ -6211,14 +6211,14 @@ class _LiftsScreenState extends State<LiftsScreen> {
           // Sort (applied after filtering; search ranking overrides when search is active)
           if (_search.isEmpty) {
             switch (_sortOption) {
-              case 'Newest Acquired':
+              case 'Newest Added':
                 filtered.sort((a, b) {
                   final da = DateTime.tryParse(a.dateAcquired) ?? DateTime(2000);
                   final db = DateTime.tryParse(b.dateAcquired) ?? DateTime(2000);
                   return db.compareTo(da);
                 });
                 break;
-              case 'Oldest Acquired':
+              case 'Oldest Added':
                 filtered.sort((a, b) {
                   final da = DateTime.tryParse(a.dateAcquired) ?? DateTime(2000);
                   final db = DateTime.tryParse(b.dateAcquired) ?? DateTime(2000);
@@ -6302,8 +6302,8 @@ class _LiftsScreenState extends State<LiftsScreen> {
                   'Used - Like New', 'Used - Standard', 'Used - Not Great', 'Used - Shit',
                 ],
                 sortOptions: const [
-                  'Newest Acquired',
-                  'Oldest Acquired',
+                  'Newest Added',
+                  'Oldest Added',
                   'Brand A–Z',
                   'Series A–Z',
                   'Status',
@@ -10141,15 +10141,15 @@ class _InitialsAvatar extends StatelessWidget {
 
   /// Per-person schedule colors (matched to TSheets calendar colors).
   static const Map<String, Color> _namedColors = {
-    'Matt Walsh':        Color(0xFF9E9E9E), // Grey
-    'Chris Doherty':     Color(0xFFE65100), // Orange
-    'Jim Doherty':       Color(0xFF00C853), // Bright green
-    'Ryan Clark':        Color(0xFF8B0000), // Crimson red
-    'Connor Hibbard':    Color(0xFF6D6E00), // Olive green
-    'Harry Riendeau':    Color(0xFF00AEEF), // Sky blue
-    'Liam Arnold':       Color(0xFF6A1B9A), // Purple
-    'Stephen Tremblay':  Color(0xFFD32F2F), // Bright red
-    'Colin Arnold':      Color(0xFFBF8040), // Tan / light orange
+    'Matthew Walsh':        Color(0xFF9E9E9E), // Grey
+    'Christopher Doherty':  Color(0xFFE65100), // Orange
+    'James Doherty':        Color(0xFF00C853), // Bright green
+    'Ryan Clark':           Color(0xFF8B0000), // Crimson red
+    'Connor':               Color(0xFF6D6E00), // Olive green
+    'Harrington Riendeau':  Color(0xFF00AEEF), // Sky blue
+    'Liam Arnold':          Color(0xFF6A1B9A), // Purple
+    'Stephen Tremblay':     Color(0xFFD32F2F), // Bright red
+    'Colin Arnold':         Color(0xFFBF8040), // Tan / light orange
   };
 
   /// Color for this avatar — named person first, else hash-based fallback.
