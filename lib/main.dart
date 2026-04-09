@@ -9711,31 +9711,48 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')}';
   }
 
-  /// Scroll to today by estimating pixel offset from the top of the list.
-  /// Scrollable.ensureVisible can't be used because lazy ListView items
-  /// off-screen are not in the render tree when _load() completes.
+  /// Scroll to today. Uses a two-pass approach:
+  /// 1. Estimate offset from item counts to get roughly the right position.
+  /// 2. After the frame renders, use the GlobalKey to fine-tune with ensureVisible.
   void _scrollToToday({bool animate = true}) {
     if (!_scrollController.hasClients) return;
     final items = _listItems;
     final todayKey = _dayKey(DateTime.now());
+
+    // Count items before today for the initial estimate
     double offset = 0;
     for (final item in items) {
       if (item is String) {
         if (item == todayKey) break;
-        offset += 46.0; // estimated date header row height
+        offset += 46.0;
       } else {
-        offset += 70.0; // estimated event card height
+        offset += 70.0;
       }
     }
+
+    final maxExtent = _scrollController.position.maxScrollExtent;
+    final target = offset.clamp(0.0, maxExtent);
+
     if (animate) {
-      _scrollController.animateTo(
-        offset,
-        duration: const Duration(milliseconds: 400),
-        curve: Curves.easeInOut,
-      );
+      _scrollController.animateTo(target,
+          duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
     } else {
-      _scrollController.jumpTo(offset);
+      _scrollController.jumpTo(target);
     }
+
+    // Second pass: once the target area is rendered, ensureVisible fine-tunes it
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final gk = _dayKeys[todayKey];
+      if (gk?.currentContext != null) {
+        Scrollable.ensureVisible(
+          gk!.currentContext!,
+          alignment: 0.0,
+          duration: animate
+              ? const Duration(milliseconds: 200)
+              : Duration.zero,
+        );
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------
