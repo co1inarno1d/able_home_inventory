@@ -9,8 +9,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:url_launcher/url_launcher.dart';
 
+import 'initials_avatar.dart';
 import 'prep_checklist_form.dart';
 import 'qbt_api.dart';
+import 'schedule_desktop.dart';
 import 'supabase_api.dart';
 
 /// =======================
@@ -3426,7 +3428,7 @@ class _JobEventCard extends StatelessWidget {
                       .split(', ')
                       .map((name) => Tooltip(
                             message: name,
-                            child: _InitialsAvatar(name: name, size: 30),
+                            child: InitialsAvatar(name: name, size: 30),
                           ))
                       .toList(),
                 ),
@@ -10112,85 +10114,141 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF0F0F0),
-      appBar: AppBar(
-        backgroundColor: kBrandGreenDark,
-        foregroundColor: Colors.white,
-        title: _searchActive
-            ? Theme(
-                data: ThemeData.dark(),
-                child: TextField(
-                  controller: _searchController,
-                  autofocus: true,
-                  cursorColor: Colors.white,
-                  style: const TextStyle(color: Colors.white, fontSize: 16),
-                  decoration: const InputDecoration(
-                    hintText: 'Search by name, date, address, assignee...',
-                    hintStyle: TextStyle(color: Colors.white60),
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Desktop layout for wide screens (laptops, etc.)
+        if (constraints.maxWidth >= 800) {
+          return Scaffold(
+            backgroundColor: const Color(0xFFF2F4F2),
+            body: ScheduleDesktopView(
+              events: _events,
+              users: _users,
+              completedIds: _completedIds,
+              isLoading: _loading,
+              error: _error,
+              onToggleComplete: _onToggleComplete,
+              onRefresh: _load,
+              onTapEvent: (event) async {
+                final color = _parseColor(event.color);
+                final changed = await Navigator.push<bool>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ScheduleEventDetailScreen(
+                      event: event,
+                      users: _users,
+                      assignedNames: _assignedNames(event),
+                      color: color,
+                      formatTime: _formatTime,
+                    ),
                   ),
-                  onChanged: _onSearchChanged,
-                ),
-              )
-            : const Text('Schedule', style: TextStyle(fontWeight: FontWeight.bold)),
-        actions: [
-          if (_searchActive)
-            IconButton(
-              icon: const Icon(Icons.close),
-              tooltip: 'Cancel',
-              onPressed: () {
-                _searchDebounce?.cancel();
-                setState(() {
-                  _searchActive = false;
-                  _searchQuery = '';
-                  _searchController.clear();
-                  _isSearchMode = false;
-                  _isSearchLoading = false;
-                  _searchResults = [];
-                });
-                WidgetsBinding.instance.addPostFrameCallback(
-                    (_) => _scrollToToday(animate: false));
+                );
+                if (changed == true) _load();
+                return changed;
               },
-            )
-          else ...[
-            IconButton(
-              icon: const Icon(Icons.search),
-              tooltip: 'Search',
-              onPressed: () => setState(() => _searchActive = true),
-            ),
-            TextButton(
-              onPressed: _scrollToToday,
-              child: const Text('Today', style: TextStyle(color: Colors.white)),
-            ),
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              tooltip: 'Refresh',
-              onPressed: _load,
-            ),
-          ],
-        ],
-      ),
-      body: _buildBody(),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: kBrandGreen,
-        foregroundColor: Colors.white,
-        onPressed: () async {
-          final created = await Navigator.push<bool>(
-            context,
-            MaterialPageRoute(
-              builder: (_) => ScheduleEventFormScreen(
-                users: _users,
-                initialDate: DateTime.now(),
-              ),
+              onAddEvent: () async {
+                final created = await Navigator.push<bool>(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ScheduleEventFormScreen(
+                      users: _users,
+                      initialDate: DateTime.now(),
+                    ),
+                  ),
+                );
+                if (created == true) _load();
+              },
+              activeStart: _activeHistoryStart,
+              activeEnd: _liveRangeEnd,
             ),
           );
-          if (created == true) _load();
-        },
-        child: const Icon(Icons.add),
-      ),
+        }
+
+        // Mobile layout (unchanged)
+        return Scaffold(
+          backgroundColor: const Color(0xFFF0F0F0),
+          appBar: AppBar(
+            backgroundColor: kBrandGreenDark,
+            foregroundColor: Colors.white,
+            title: _searchActive
+                ? Theme(
+                    data: ThemeData.dark(),
+                    child: TextField(
+                      controller: _searchController,
+                      autofocus: true,
+                      cursorColor: Colors.white,
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 16),
+                      decoration: const InputDecoration(
+                        hintText:
+                            'Search by name, date, address, assignee...',
+                        hintStyle: TextStyle(color: Colors.white60),
+                        border: InputBorder.none,
+                        enabledBorder: InputBorder.none,
+                        focusedBorder: InputBorder.none,
+                      ),
+                      onChanged: _onSearchChanged,
+                    ),
+                  )
+                : const Text('Schedule',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+            actions: [
+              if (_searchActive)
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  tooltip: 'Cancel',
+                  onPressed: () {
+                    _searchDebounce?.cancel();
+                    setState(() {
+                      _searchActive = false;
+                      _searchQuery = '';
+                      _searchController.clear();
+                      _isSearchMode = false;
+                      _isSearchLoading = false;
+                      _searchResults = [];
+                    });
+                    WidgetsBinding.instance.addPostFrameCallback(
+                        (_) => _scrollToToday(animate: false));
+                  },
+                )
+              else ...[
+                IconButton(
+                  icon: const Icon(Icons.search),
+                  tooltip: 'Search',
+                  onPressed: () => setState(() => _searchActive = true),
+                ),
+                TextButton(
+                  onPressed: _scrollToToday,
+                  child:
+                      const Text('Today', style: TextStyle(color: Colors.white)),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'Refresh',
+                  onPressed: _load,
+                ),
+              ],
+            ],
+          ),
+          body: _buildBody(),
+          floatingActionButton: FloatingActionButton(
+            backgroundColor: kBrandGreen,
+            foregroundColor: Colors.white,
+            onPressed: () async {
+              final created = await Navigator.push<bool>(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => ScheduleEventFormScreen(
+                    users: _users,
+                    initialDate: DateTime.now(),
+                  ),
+                ),
+              );
+              if (created == true) _load();
+            },
+            child: const Icon(Icons.add),
+          ),
+        );
+      },
     );
   }
 
@@ -10329,81 +10387,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Initials avatar — shows 1-2 initials of a name in a small colored circle
-// ---------------------------------------------------------------------------
-
-class _InitialsAvatar extends StatelessWidget {
-  final String name;
-  final double size;
-  final Color? backgroundColor;
-  final Color? textColor;
-
-  const _InitialsAvatar({
-    required this.name,
-    this.size = 28,
-    this.backgroundColor,
-    this.textColor,
-  });
-
-  /// Extract up to 2 initials from a display name.
-  String get _initials {
-    final parts = name.trim().split(RegExp(r'\s+'));
-    if (parts.isEmpty || parts.first.isEmpty) return '?';
-    if (parts.length == 1) return parts.first[0].toUpperCase();
-    return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
-  }
-
-  /// Per-person schedule colors (matched to TSheets calendar colors).
-  static const Map<String, Color> _namedColors = {
-    'Matthew Walsh':        Color(0xFF9E9E9E), // Grey
-    'Christopher Doherty':  Color(0xFFE65100), // Orange
-    'James Doherty':        Color(0xFF00C853), // Bright green
-    'Ryan Clark':           Color(0xFF8B0000), // Crimson red
-    'Connor Hibbard':       Color(0xFF6D6E00), // Olive green
-    'Harrington Riendeau':  Color(0xFF00AEEF), // Sky blue
-    'Liam Arnold':          Color(0xFF6A1B9A), // Purple
-    'Stephen Tremblay':     Color(0xFFD32F2F), // Bright red
-    'Colin Arnold':         Color(0xFFBF8040), // Tan / light orange
-  };
-
-  /// Color for this avatar — named person first, else hash-based fallback.
-  Color get _defaultColor {
-    final trimmed = name.trim();
-    if (_namedColors.containsKey(trimmed)) return _namedColors[trimmed]!;
-    // Fallback: stable hash over the name
-    const fallbacks = [
-      Color(0xFF1565C0), Color(0xFF2E7D32), Color(0xFF00695C),
-      Color(0xFF4527A0), Color(0xFF558B2F), Color(0xFF00838F),
-    ];
-    final hash = name.codeUnits.fold(0, (sum, c) => sum + c);
-    return fallbacks[hash % fallbacks.length];
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bg = backgroundColor ?? _defaultColor;
-    final fg = textColor ?? Colors.white;
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        color: bg,
-        shape: BoxShape.circle,
-      ),
-      alignment: Alignment.center,
-      child: Text(
-        _initials,
-        style: TextStyle(
-          color: fg,
-          fontSize: size * 0.38,
-          fontWeight: FontWeight.bold,
-          height: 1,
-        ),
-      ),
-    );
-  }
-}
+// InitialsAvatar is now in initials_avatar.dart (imported at top of file).
 
 class _ScheduleEventCard extends StatelessWidget {
   final QbtScheduleEvent event;
@@ -10452,7 +10436,7 @@ class _ScheduleEventCard extends StatelessWidget {
                   shape: BoxShape.circle,
                   border: Border.all(color: eventColor, width: 1.5),
                 ),
-                child: _InitialsAvatar(
+                child: InitialsAvatar(
                   name: names[i],
                   size: size,
                   backgroundColor: const Color(0xFF2E2E2E),
@@ -11820,7 +11804,7 @@ class _LinkLiftToJobScreenState extends State<_LinkLiftToJobScreen> {
                                                   .split(', ')
                                                   .map((n) => Tooltip(
                                                         message: n,
-                                                        child: _InitialsAvatar(name: n, size: 22),
+                                                        child: InitialsAvatar(name: n, size: 22),
                                                       ))
                                                   .toList(),
                                             ),
