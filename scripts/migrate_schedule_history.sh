@@ -11,14 +11,11 @@
 #        export SUPABASE_SERVICE_ROLE_KEY="eyJ..."
 #
 #   2. Run:
-#        chmod +x scripts/migrate_schedule_history.sh
 #        ./scripts/migrate_schedule_history.sh
 #
 #   Safe to re-run — the edge function upserts by TSheets event ID,
 #   so no duplicates will be created.
 # =============================================================================
-
-set -euo pipefail
 
 FUNCTION_URL="https://kaujczbhtajqfrjgbxft.supabase.co/functions/v1/archive-schedule"
 
@@ -26,7 +23,7 @@ FUNCTION_URL="https://kaujczbhtajqfrjgbxft.supabase.co/functions/v1/archive-sche
 # Change START_YEAR to the earliest year you have TSheets data.
 # The script will archive from Jan 1 of that year up to 7 days ago.
 # ---------------------------------------------------------------------------
-START_YEAR=2019
+START_YEAR=2014
 
 if [ -z "${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
   echo "ERROR: SUPABASE_SERVICE_ROLE_KEY is not set."
@@ -46,9 +43,9 @@ echo "================================================"
 echo ""
 
 TOTAL_ARCHIVED=0
+FAILED_YEARS=""
 
 for (( year=START_YEAR; year<=END_YEAR; year++ )); do
-  # For the final year, cap end at END_DATE
   if [ "$year" -eq "$END_YEAR" ]; then
     range_end="$END_DATE"
   else
@@ -58,36 +55,50 @@ for (( year=START_YEAR; year<=END_YEAR; year++ )); do
 
   echo -n "  Archiving $range_start → $range_end ... "
 
-  response=$(curl -sf \
+  # Use -s (silent) but NOT -f so we always get the response body
+  response=$(curl -s --max-time 120 \
     -X POST \
     -H "Authorization: Bearer ${SUPABASE_SERVICE_ROLE_KEY}" \
     -H "Content-Type: application/json" \
     "${FUNCTION_URL}?start=${range_start}&end=${range_end}" \
   )
+  curl_exit=$?
 
-  # Parse the "archived" count from the JSON response
-  count=$(echo "$response" | grep -o '"archived":[0-9]*' | grep -o '[0-9]*' || echo "?")
-  error=$(echo "$response" | grep -o '"error":"[^"]*"' | cut -d'"' -f4 || echo "")
+  if [ $curl_exit -ne 0 ]; then
+    echo "FAILED (curl error $curl_exit — timeout or network issue)"
+    FAILED_YEARS="$FAILED_YEARS $year"
+    sleep 2
+    continue
+  fi
 
+  # Check for error in response body
+  error=$(echo "$response" | grep -o '"error":"[^"]*"' | cut -d'"' -f4 || true)
   if [ -n "$error" ]; then
-    echo "ERROR: $error"
-    echo "  Full response: $response"
-    echo ""
-    echo "Migration stopped. Fix the error and re-run — progress is saved."
-    exit 1
+    echo "FAILED: $error"
+    echo "    Raw response: $response"
+    FAILED_YEARS="$FAILED_YEARS $year"
+    sleep 2
+    continue
+  fi
+
+  count=$(echo "$response" | grep -o '"archived":[0-9]*' | grep -o '[0-9]*' || true)
+  if [ -z "$count" ]; then
+    echo "FAILED (unexpected response: $response)"
+    FAILED_YEARS="$FAILED_YEARS $year"
+    sleep 2
+    continue
   fi
 
   echo "archived $count events"
+  TOTAL_ARCHIVED=$((TOTAL_ARCHIVED + count))
 
-  if [[ "$count" =~ ^[0-9]+$ ]]; then
-    TOTAL_ARCHIVED=$((TOTAL_ARCHIVED + count))
-  fi
-
-  # Brief pause to be polite to both APIs
   sleep 1
 done
 
 echo ""
 echo "================================================"
 echo "  Done! Total events archived: $TOTAL_ARCHIVED"
+if [ -n "$FAILED_YEARS" ]; then
+  echo "  Failed years (re-run to retry):$FAILED_YEARS"
+fi
 echo "================================================"
