@@ -19,6 +19,15 @@ import 'supabase_api.dart';
 /// CONFIG
 /// =======================
 
+/// App password — change this to whatever you want the shared login to be.
+const String kAppPassword = 'AbleHome!';
+
+/// How long a successful login is cached before prompting again.
+const Duration kAuthCacheDuration = Duration(days: 90);
+
+/// SharedPreferences key that stores the expiry timestamp (ms since epoch).
+const String _kAuthUntilKey = 'auth_until';
+
 /// Brand color
 const Color kBrandGreen = Color(0xFF2F7D46);
 const Color kBrandGreenDark = Color(0xFF1A4728);
@@ -195,7 +204,244 @@ class AbleHomeInventoryApp extends StatelessWidget {
           dividerColor: Colors.transparent,
         ),
       ),
-      home: const _ResponsiveShell(),
+      home: const PasswordGate(child: _ResponsiveShell()),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PasswordGate — shows a login screen until the correct password is entered.
+// Once authenticated, the result is cached for kAuthCacheDuration so the user
+// isn't prompted again until the cache expires.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class PasswordGate extends StatefulWidget {
+  final Widget child;
+  const PasswordGate({super.key, required this.child});
+
+  @override
+  State<PasswordGate> createState() => _PasswordGateState();
+}
+
+class _PasswordGateState extends State<PasswordGate> {
+  bool _checking = true;
+  bool _authenticated = false;
+
+  final _ctrl = TextEditingController();
+  final _focusNode = FocusNode();
+  bool _obscure = true;
+  bool _wrong = false;
+  bool _submitting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkCache();
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  Future<void> _checkCache() async {
+    final prefs = await SharedPreferences.getInstance();
+    final until = prefs.getInt(_kAuthUntilKey) ?? 0;
+    final valid = DateTime.fromMillisecondsSinceEpoch(until).isAfter(DateTime.now());
+    if (!mounted) return;
+    setState(() {
+      _authenticated = valid;
+      _checking = false;
+    });
+    // Auto-focus the password field if not authenticated
+    if (!valid) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _focusNode.requestFocus());
+    }
+  }
+
+  Future<void> _submit() async {
+    if (_submitting) return;
+    final entered = _ctrl.text;
+    if (entered == kAppPassword) {
+      setState(() => _submitting = true);
+      final prefs = await SharedPreferences.getInstance();
+      final until = DateTime.now().add(kAuthCacheDuration).millisecondsSinceEpoch;
+      await prefs.setInt(_kAuthUntilKey, until);
+      if (!mounted) return;
+      setState(() {
+        _authenticated = true;
+        _submitting = false;
+      });
+    } else {
+      setState(() => _wrong = true);
+      _ctrl.clear();
+      WidgetsBinding.instance.addPostFrameCallback((_) => _focusNode.requestFocus());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_checking) {
+      return const Scaffold(
+        backgroundColor: kBrandGreenDark,
+        body: Center(child: CircularProgressIndicator(color: Colors.white)),
+      );
+    }
+    if (_authenticated) return widget.child;
+    return _buildLoginScreen();
+  }
+
+  Widget _buildLoginScreen() {
+    return Scaffold(
+      backgroundColor: kBrandGreenDark,
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 380),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Logo / brand
+                Container(
+                  width: 72,
+                  height: 72,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.12),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(Icons.home_work_rounded,
+                      size: 38, color: Colors.white),
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  'Able Home Accessibility',
+                  style: GoogleFonts.nunito(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.w700,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Enter your password to continue',
+                  style: GoogleFonts.nunito(
+                    color: Colors.white.withValues(alpha: 0.6),
+                    fontSize: 14,
+                  ),
+                ),
+                const SizedBox(height: 36),
+                // Password card
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.18),
+                        blurRadius: 24,
+                        offset: const Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      TextField(
+                        controller: _ctrl,
+                        focusNode: _focusNode,
+                        obscureText: _obscure,
+                        style: GoogleFonts.nunito(fontSize: 16),
+                        decoration: InputDecoration(
+                          labelText: 'Password',
+                          labelStyle: TextStyle(color: Colors.grey.shade600),
+                          errorText: _wrong ? 'Incorrect password' : null,
+                          suffixIcon: IconButton(
+                            icon: Icon(
+                              _obscure ? Icons.visibility_off : Icons.visibility,
+                              color: Colors.grey.shade500,
+                            ),
+                            onPressed: () => setState(() => _obscure = !_obscure),
+                          ),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                            borderSide: BorderSide(color: Colors.grey.shade300),
+                          ),
+                          focusedBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                            borderSide:
+                                const BorderSide(color: kBrandGreen, width: 2),
+                          ),
+                          errorBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                            borderSide:
+                                const BorderSide(color: Colors.red, width: 1.5),
+                          ),
+                          focusedErrorBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(10),
+                            borderSide:
+                                const BorderSide(color: Colors.red, width: 2),
+                          ),
+                          filled: true,
+                          fillColor: Colors.grey.shade50,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 14),
+                        ),
+                        onChanged: (_) {
+                          if (_wrong) setState(() => _wrong = false);
+                        },
+                        onSubmitted: (_) => _submit(),
+                        textInputAction: TextInputAction.done,
+                      ),
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        height: 48,
+                        child: ElevatedButton(
+                          onPressed: _submitting ? null : _submit,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: kBrandGreen,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            elevation: 0,
+                          ),
+                          child: _submitting
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                      color: Colors.white, strokeWidth: 2),
+                                )
+                              : Text(
+                                  'Sign In',
+                                  style: GoogleFonts.nunito(
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  'You\'ll stay signed in for 90 days',
+                  style: GoogleFonts.nunito(
+                    color: Colors.white.withValues(alpha: 0.4),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
