@@ -20,7 +20,7 @@ import 'supabase_api.dart';
 /// =======================
 
 /// App password — change this to whatever you want the shared login to be.
-const String kAppPassword = 'AbleHome!';
+const String kAppPassword = '403marshallst!';
 
 /// How long a successful login is cached before prompting again.
 const Duration kAuthCacheDuration = Duration(days: 90);
@@ -263,7 +263,7 @@ class _PasswordGateState extends State<PasswordGate> {
 
   Future<void> _submit() async {
     if (_submitting) return;
-    final entered = _ctrl.text;
+    final entered = _ctrl.text.trim();
     if (entered == kAppPassword) {
       setState(() => _submitting = true);
       final prefs = await SharedPreferences.getInstance();
@@ -391,6 +391,8 @@ class _PasswordGateState extends State<PasswordGate> {
                           contentPadding: const EdgeInsets.symmetric(
                               horizontal: 14, vertical: 14),
                         ),
+                        autocorrect: false,
+                        enableSuggestions: false,
                         onChanged: (_) {
                           if (_wrong) setState(() => _wrong = false);
                         },
