@@ -1,4 +1,6 @@
 
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -9604,9 +9606,16 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   bool _loading = true;
   String? _error;
 
+  // Search state
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
   bool _searchActive = false;
+  List<QbtScheduleEvent> _searchResults = [];
+  bool _isSearchMode = false;
+  bool _isSearchLoading = false;
+  String _sortBy = 'newest'; // 'newest' | 'oldest'
+  Timer? _searchDebounce;
+  static const _kSearchDebounce = Duration(milliseconds: 400);
 
   final ScrollController _scrollController = ScrollController();
   final Map<String, GlobalKey> _dayKeys = {};
@@ -9614,11 +9623,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   // Live TSheets window: last 7 days through 60 days ahead
   static const int _liveWindowDays = 7;
   static const int _daysAhead = 60;
+  // Active view shows history up to 30 days back
+  static const int _activeHistoryDays = 30;
 
   DateTime get _liveRangeStart {
     final now = DateTime.now();
-    return DateTime(now.year, now.month, now.day)
-        .subtract(Duration(days: _liveWindowDays));
+    return DateTime(now.year, now.month, now.day).subtract(Duration(days: _liveWindowDays));
   }
 
   DateTime get _liveRangeEnd {
@@ -9627,6 +9637,27 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   }
 
   DateTime get _archiveCutoff => _liveRangeStart;
+
+  DateTime get _activeHistoryStart {
+    final now = DateTime.now();
+    return DateTime(now.year, now.month, now.day).subtract(const Duration(days: _activeHistoryDays));
+  }
+
+  // Month name → number map used for date parsing
+  static const Map<String, int> _monthMap = {
+    'jan': 1, 'january': 1,
+    'feb': 2, 'february': 2,
+    'mar': 3, 'march': 3,
+    'apr': 4, 'april': 4,
+    'may': 5,
+    'jun': 6, 'june': 6,
+    'jul': 7, 'july': 7,
+    'aug': 8, 'august': 8,
+    'sep': 9, 'sept': 9, 'september': 9,
+    'oct': 10, 'october': 10,
+    'nov': 11, 'november': 11,
+    'dec': 12, 'december': 12,
+  };
 
   @override
   void initState() {
@@ -9638,6 +9669,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   void dispose() {
     _searchController.dispose();
     _scrollController.dispose();
+    _searchDebounce?.cancel();
     super.dispose();
   }
 
@@ -9649,7 +9681,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     try {
       final results = await Future.wait([
         qbtFetchScheduleEvents(start: _liveRangeStart, end: _liveRangeEnd),
-        sbFetchScheduleHistory(before: _archiveCutoff),
+        sbFetchScheduleHistory(before: _archiveCutoff, after: _activeHistoryStart),
         qbtFetchUsers(),
         sbFetchCompletedEventIds(),
       ]);
@@ -9706,36 +9738,184 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     }
   }
 
-  List<QbtScheduleEvent> get _filteredEvents {
-    if (_searchQuery.isEmpty) return _events;
-    final q = _searchQuery.toLowerCase();
-    return _events.where((e) {
-      if (e.title.toLowerCase().contains(q)) return true;
-      if (e.notes.toLowerCase().contains(q)) return true;
-      if (e.location.toLowerCase().contains(q)) return true;
-      for (final id in e.assignedUserIds) {
-        final name = _users[id]?.displayName ?? '';
-        if (name.toLowerCase().contains(q)) return true;
+  // ---------------------------------------------------------------------------
+  // Search
+  // ---------------------------------------------------------------------------
+
+  void _onSearchChanged(String v) {
+    setState(() => _searchQuery = v);
+    _searchDebounce?.cancel();
+    if (v.trim().isEmpty) {
+      setState(() {
+        _isSearchMode = false;
+        _isSearchLoading = false;
+        _searchResults = [];
+      });
+      return;
+    }
+    setState(() => _isSearchLoading = true);
+    _searchDebounce = Timer(_kSearchDebounce, _performSearch);
+  }
+
+  Future<void> _performSearch() async {
+    final query = _searchQuery.trim();
+    if (query.isEmpty) return;
+
+    final parsed = _parseDateRange(query);
+    final dateRange = parsed.$1; // (DateTime start, DateTime end)?
+    final textQuery = parsed.$2;
+
+    try {
+      final historyResults = await sbSearchScheduleHistory(
+        query: textQuery,
+        startDate: dateRange?.$1,
+        endDate: dateRange?.$2,
+        newestFirst: _sortBy == 'newest',
+      );
+
+      final liveFiltered = _filterLiveForSearch(textQuery, dateRange);
+
+      // Merge: live events first (prefer fresh data), then history — dedup by ID
+      final seen = <String>{};
+      final merged = <QbtScheduleEvent>[];
+      for (final e in [...liveFiltered, ...historyResults]) {
+        if (seen.add(e.id)) merged.add(e);
       }
-      return false;
+
+      merged.sort((a, b) => _sortBy == 'newest'
+          ? b.start.compareTo(a.start)
+          : a.start.compareTo(b.start));
+
+      if (!mounted) return;
+      setState(() {
+        _searchResults = merged;
+        _isSearchMode = true;
+        _isSearchLoading = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isSearchLoading = false);
+    }
+  }
+
+  /// Filter the in-memory live events using the same AND-across-terms logic
+  /// as the Supabase query, plus optional date range bounds.
+  List<QbtScheduleEvent> _filterLiveForSearch(
+    String textQuery,
+    (DateTime, DateTime)? dateRange,
+  ) {
+    return _events.where((e) {
+      if (dateRange != null) {
+        final local = e.start.toLocal();
+        if (local.isBefore(dateRange.$1) || local.isAfter(dateRange.$2)) return false;
+      }
+      if (textQuery.isEmpty) return true;
+      final terms = textQuery.toLowerCase()
+          .split(RegExp(r'\s+'))
+          .where((t) => t.length >= 2);
+      for (final term in terms) {
+        final inTitle    = e.title.toLowerCase().contains(term);
+        final inNotes    = e.notes.toLowerCase().contains(term);
+        final inLocation = e.location.toLowerCase().contains(term);
+        final inNames    = e.assignedUserIds.any(
+          (id) => (_users[id]?.displayName ?? '').toLowerCase().contains(term),
+        );
+        if (!inTitle && !inNotes && !inLocation && !inNames) return false;
+      }
+      return true;
     }).toList();
   }
 
-  /// Flat list of alternating [String dayKey, QbtScheduleEvent, ...] for ListView.
-  List<dynamic> get _listItems {
-    final events = _filteredEvents;
-    final Map<String, List<QbtScheduleEvent>> grouped = {};
-    for (final e in events) {
-      final key = _dayKey(e.start);
-      grouped.putIfAbsent(key, () => []).add(e);
+  /// Parse a date range out of [query].
+  /// Returns `((startDate, endDate)?, remainingText)`.
+  /// If no date is detected, the first element is null and the full query is returned as text.
+  ///
+  /// Handles: "april 21 2025", "oct 30 2019", "4/21/25", "4/21/2025",
+  ///          "april 2025" (whole month), "2024" (whole year).
+  ((DateTime, DateTime)?, String) _parseDateRange(String query) {
+    var q = query.toLowerCase().trim();
+
+    String strip(String src, Pattern pat) =>
+        src.replaceAll(pat, ' ').replaceAll(RegExp(r'\s{2,}'), ' ').trim();
+
+    (DateTime, DateTime) dayRange(int y, int mo, int d) =>
+        (DateTime(y, mo, d), DateTime(y, mo, d, 23, 59, 59));
+
+    // MM/DD/YY or MM/DD/YYYY
+    final slash = RegExp(r'\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b');
+    var m = slash.firstMatch(q);
+    if (m != null) {
+      var y = int.parse(m.group(3)!);
+      if (y < 100) y += 2000;
+      return (dayRange(y, int.parse(m.group(1)!), int.parse(m.group(2)!)), strip(q, slash));
     }
-    final sortedDays = grouped.keys.toList()..sort();
+
+    // Month name patterns
+    for (final entry in _monthMap.entries) {
+      final mn = entry.key;
+      final mo = entry.value;
+
+      // "april 21 2025"
+      final pat1 = RegExp(r'\b' + mn + r'\s+(\d{1,2})\s+(20\d{2})\b');
+      m = pat1.firstMatch(q);
+      if (m != null) {
+        return (dayRange(int.parse(m.group(2)!), mo, int.parse(m.group(1)!)), strip(q, pat1));
+      }
+
+      // "21 april 2025"
+      final pat2 = RegExp(r'\b(\d{1,2})\s+' + mn + r'\s+(20\d{2})\b');
+      m = pat2.firstMatch(q);
+      if (m != null) {
+        return (dayRange(int.parse(m.group(2)!), mo, int.parse(m.group(1)!)), strip(q, pat2));
+      }
+
+      // "april 2025" → whole month
+      final pat3 = RegExp(r'\b' + mn + r'\s+(20\d{2})\b');
+      m = pat3.firstMatch(q);
+      if (m != null) {
+        final y = int.parse(m.group(1)!);
+        final lastDay = DateTime(y, mo + 1, 0).day;
+        return (
+          (DateTime(y, mo, 1), DateTime(y, mo, lastDay, 23, 59, 59)),
+          strip(q, pat3),
+        );
+      }
+    }
+
+    // "2024" → whole year
+    final yearPat = RegExp(r'\b(20\d{2})\b');
+    m = yearPat.firstMatch(q);
+    if (m != null) {
+      final y = int.parse(m.group(1)!);
+      return ((DateTime(y, 1, 1), DateTime(y, 12, 31, 23, 59, 59)), strip(q, yearPat));
+    }
+
+    // No date found — full query is text
+    return (null, q);
+  }
+
+  // ---------------------------------------------------------------------------
+  // List building
+  // ---------------------------------------------------------------------------
+
+  /// Flat list of [String dayKey, QbtScheduleEvent, ...] for ListView.
+  /// Search mode: uses _searchResults, newest day at top.
+  /// Active view: uses _events, chronological, today auto-scrolled into view.
+  List<dynamic> get _listItems {
+    final events = _isSearchMode ? _searchResults : _events;
+    final grouped = <String, List<QbtScheduleEvent>>{};
+    for (final e in events) {
+      grouped.putIfAbsent(_dayKey(e.start), () => []).add(e);
+    }
+    var sortedDays = grouped.keys.toList()..sort();
+    if (_isSearchMode && _sortBy == 'newest') {
+      sortedDays = sortedDays.reversed.toList();
+    }
     final items = <dynamic>[];
     for (final day in sortedDays) {
       items.add(day);
-      final dayEvents = grouped[day]!;
-      dayEvents.sort((a, b) => a.start.compareTo(b.start));
-      items.addAll(dayEvents);
+      grouped[day]!.sort((a, b) => a.start.compareTo(b.start));
+      items.addAll(grouped[day]!);
     }
     return items;
   }
@@ -9920,11 +10100,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 autofocus: true,
                 style: const TextStyle(color: Colors.white),
                 decoration: const InputDecoration(
-                  hintText: 'Search jobs...',
+                  hintText: 'Search by name, date, address, assignee...',
                   hintStyle: TextStyle(color: Colors.white60),
                   border: InputBorder.none,
                 ),
-                onChanged: (v) => setState(() => _searchQuery = v),
+                onChanged: _onSearchChanged,
               )
             : const Text('Schedule', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
@@ -9932,11 +10112,19 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             IconButton(
               icon: const Icon(Icons.close),
               tooltip: 'Cancel',
-              onPressed: () => setState(() {
-                _searchActive = false;
-                _searchQuery = '';
-                _searchController.clear();
-              }),
+              onPressed: () {
+                _searchDebounce?.cancel();
+                setState(() {
+                  _searchActive = false;
+                  _searchQuery = '';
+                  _searchController.clear();
+                  _isSearchMode = false;
+                  _isSearchLoading = false;
+                  _searchResults = [];
+                });
+                WidgetsBinding.instance.addPostFrameCallback(
+                    (_) => _scrollToToday(animate: false));
+              },
             )
           else ...[
             IconButton(
@@ -9977,9 +10165,40 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     );
   }
 
+  Widget _buildSearchBar() {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+      child: Row(
+        children: [
+          Text(
+            '${_searchResults.length} result${_searchResults.length == 1 ? '' : 's'}',
+            style: TextStyle(fontSize: 13, color: Colors.grey[600]),
+          ),
+          const Spacer(),
+          DropdownButton<String>(
+            value: _sortBy,
+            underline: const SizedBox(),
+            style: TextStyle(fontSize: 13, color: Colors.grey[800]),
+            items: const [
+              DropdownMenuItem(value: 'newest', child: Text('Newest first')),
+              DropdownMenuItem(value: 'oldest', child: Text('Oldest first')),
+            ],
+            onChanged: (v) {
+              if (v != null && v != _sortBy) {
+                setState(() => _sortBy = v);
+                _performSearch();
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildBody() {
     if (_loading) {
-      return const Center(child: CircularProgressIndicator(color: Colors.white));
+      return const Center(child: CircularProgressIndicator());
     }
     if (_error != null) {
       return Center(
@@ -9990,8 +10209,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             children: [
               const Icon(Icons.cloud_off, size: 48, color: Colors.red),
               const SizedBox(height: 12),
-              Text(_error!, textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white70)),
+              Text(_error!, textAlign: TextAlign.center),
               const SizedBox(height: 16),
               ElevatedButton(onPressed: _load, child: const Text('Retry')),
             ],
@@ -10000,12 +10218,24 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       );
     }
 
+    return Column(
+      children: [
+        if (_isSearchLoading) const LinearProgressIndicator(color: kBrandGreen),
+        if (_isSearchMode) _buildSearchBar(),
+        Expanded(child: _buildList()),
+      ],
+    );
+  }
+
+  Widget _buildList() {
     final items = _listItems;
 
     if (items.isEmpty) {
       return Center(
         child: Text(
-          _searchQuery.isNotEmpty ? 'No matching jobs' : 'No events scheduled',
+          _isSearchMode
+              ? (_isSearchLoading ? 'Searching...' : 'No results found')
+              : 'No events scheduled',
           style: const TextStyle(color: Colors.grey),
         ),
       );
@@ -10014,7 +10244,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView.builder(
-        controller: _scrollController,
+        controller: _isSearchMode ? null : _scrollController,
         padding: const EdgeInsets.only(bottom: 100),
         itemCount: items.length,
         itemBuilder: (context, i) {

@@ -1458,35 +1458,79 @@ Future<void> sbDeleteWebLead({required int id}) async {
 // SCHEDULE HISTORY
 // ---------------------------------------------------------------------------
 
-/// Fetch archived schedule events with start_time before [before].
-/// Returns events as [QbtScheduleEvent] objects so they integrate
-/// seamlessly with live TSheets data in the app.
+QbtScheduleEvent _mapHistoryRow(dynamic r) {
+  final m = r as Map<String, dynamic>;
+  final rawIds = m['assigned_user_ids']?.toString() ?? '';
+  final assignedIds = rawIds.isNotEmpty
+      ? rawIds.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList()
+      : <String>[];
+  return QbtScheduleEvent(
+    id: m['tsheets_id']?.toString() ?? '',
+    title: m['title']?.toString() ?? '',
+    notes: m['notes']?.toString() ?? '',
+    start: DateTime.parse(m['start_time'] as String),
+    end: DateTime.parse(m['end_time'] as String),
+    allDay: m['all_day'] == true,
+    location: m['location']?.toString() ?? '',
+    color: m['color']?.toString() ?? '#2196F3',
+    assignedUserIds: assignedIds,
+    active: m['active'] != false,
+  );
+}
+
+/// Fetch archived events for the active view.
+/// [before] is the cutoff (start of the live TSheets window).
+/// [after] caps how far back to fetch (e.g. 30 days ago) so we don't load years.
 Future<List<QbtScheduleEvent>> sbFetchScheduleHistory({
   required DateTime before,
+  DateTime? after,
 }) async {
-  final raw = await _sb
+  var q = _sb
       .from('schedule_history')
       .select()
-      .lt('start_time', before.toUtc().toIso8601String())
-      .order('start_time', ascending: true);
+      .lt('start_time', before.toUtc().toIso8601String());
+  if (after != null) {
+    q = q.gte('start_time', after.toUtc().toIso8601String());
+  }
+  final raw = await q.order('start_time', ascending: true);
+  return (raw as List).map(_mapHistoryRow).toList();
+}
 
-  return (raw as List).map((r) {
-    final m = r as Map<String, dynamic>;
-    final rawIds = m['assigned_user_ids']?.toString() ?? '';
-    final assignedIds = rawIds.isNotEmpty
-        ? rawIds.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList()
-        : <String>[];
-    return QbtScheduleEvent(
-      id: m['tsheets_id']?.toString() ?? '',
-      title: m['title']?.toString() ?? '',
-      notes: m['notes']?.toString() ?? '',
-      start: DateTime.parse(m['start_time'] as String),
-      end: DateTime.parse(m['end_time'] as String),
-      allDay: m['all_day'] == true,
-      location: m['location']?.toString() ?? '',
-      color: m['color']?.toString() ?? '#2196F3',
-      assignedUserIds: assignedIds,
-      active: m['active'] != false,
+/// Full-text search across all historical events.
+/// [query] is the remaining text after date tokens are stripped.
+/// [startDate]/[endDate] are optional date bounds parsed from the query.
+/// Returns at most [limit] results ordered by [newestFirst].
+Future<List<QbtScheduleEvent>> sbSearchScheduleHistory({
+  required String query,
+  DateTime? startDate,
+  DateTime? endDate,
+  bool newestFirst = true,
+  int limit = 200,
+}) async {
+  var q = _sb.from('schedule_history').select();
+
+  if (startDate != null) {
+    q = q.gte('start_time', startDate.toUtc().toIso8601String());
+  }
+  if (endDate != null) {
+    q = q.lte('start_time', endDate.toUtc().toIso8601String());
+  }
+
+  // Each term must appear in at least one text column (AND between terms, OR across columns)
+  final terms = query.trim().split(RegExp(r'\s+')).where((t) => t.length >= 2).toList();
+  for (final term in terms) {
+    final t = term.toLowerCase();
+    q = q.or(
+      'title.ilike.%$t%,'
+      'notes.ilike.%$t%,'
+      'location.ilike.%$t%,'
+      'assigned_user_names.ilike.%$t%',
     );
-  }).toList();
+  }
+
+  final raw = await q
+      .order('start_time', ascending: !newestFirst)
+      .limit(limit);
+
+  return (raw as List).map(_mapHistoryRow).toList();
 }

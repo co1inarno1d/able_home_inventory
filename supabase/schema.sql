@@ -266,20 +266,30 @@ create index if not exists removal_jobs_lift_id_idx on removal_jobs(lift_id);
 -- SCHEDULE HISTORY (archived TSheets events older than 7 days)
 -- ---------------------------------------------------------------
 create table if not exists schedule_history (
-  tsheets_id        text primary key,
-  title             text not null default '',
-  notes             text not null default '',
-  start_time        timestamptz not null,
-  end_time          timestamptz not null,
-  all_day           boolean not null default false,
-  location          text not null default '',
-  color             text not null default '#2196F3',
-  assigned_user_ids text not null default '',  -- comma-separated TSheets user IDs
-  active            boolean not null default true,
-  archived_at       timestamptz not null default now()
+  tsheets_id          text primary key,
+  title               text not null default '',
+  notes               text not null default '',
+  start_time          timestamptz not null,
+  end_time            timestamptz not null,
+  all_day             boolean not null default false,
+  location            text not null default '',
+  color               text not null default '#2196F3',
+  assigned_user_ids   text not null default '',    -- comma-separated TSheets user IDs
+  assigned_user_names text not null default '',    -- comma-separated display names (for search)
+  active              boolean not null default true,
+  archived_at         timestamptz not null default now()
 );
 
 create index if not exists schedule_history_start_idx on schedule_history(start_time);
+
+-- Full-text search index across all searchable text columns
+create index if not exists schedule_history_fts_idx on schedule_history
+  using gin(to_tsvector('english',
+    coalesce(title, '') || ' ' ||
+    coalesce(notes, '') || ' ' ||
+    coalesce(location, '') || ' ' ||
+    coalesce(assigned_user_names, '')
+  ));
 
 -- ---------------------------------------------------------------
 -- NIGHTLY CRON: archive old TSheets events into schedule_history

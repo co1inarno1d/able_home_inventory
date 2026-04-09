@@ -27,6 +27,23 @@ function dateOnly(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
+async function fetchTsheetsUsers(): Promise<Record<string, string>> {
+  const url = `${TSHEETS_BASE}/users?active=yes&per_page=200`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${TSHEETS_TOKEN}` },
+  });
+  if (!resp.ok) return {};
+  const body = await resp.json();
+  const usersMap: Record<string, any> = body?.results?.users ?? {};
+  const idToName: Record<string, string> = {};
+  for (const [id, u] of Object.entries(usersMap)) {
+    const first = (u as any).first_name ?? '';
+    const last = (u as any).last_name ?? '';
+    idToName[id] = `${first} ${last}`.trim();
+  }
+  return idToName;
+}
+
 async function fetchTsheetsEvents(start: Date, end: Date): Promise<any[]> {
   const startIso = `${dateOnly(start)}T00:00:00+00:00`;
   const endIso = `${dateOnly(end)}T23:59:59+00:00`;
@@ -90,7 +107,11 @@ Deno.serve(async (req: Request) => {
       archiveStart.setDate(archiveStart.getDate() - LOOKBACK_DAYS);
     }
 
-    const rawEvents = await fetchTsheetsEvents(archiveStart, archiveEnd);
+    // Fetch users and events in parallel
+    const [idToName, rawEvents] = await Promise.all([
+      fetchTsheetsUsers(),
+      fetchTsheetsEvents(archiveStart, archiveEnd),
+    ]);
 
     if (rawEvents.length === 0) {
       return new Response(
@@ -105,7 +126,6 @@ Deno.serve(async (req: Request) => {
       const key = `${e.title}|${e.start}|${e.end}`;
       if (dedupMap.has(key)) {
         const existing = dedupMap.get(key)!;
-        // Merge assigned_user_ids
         const existingIds: string[] = existing.assigned_user_ids
           ? existing.assigned_user_ids.split(',').map((s: string) => s.trim())
           : [];
@@ -119,18 +139,25 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    const rows = Array.from(dedupMap.values()).map((e) => ({
-      tsheets_id: String(e.id),
-      title: e.title ?? '',
-      notes: e.notes ?? '',
-      start_time: e.start,
-      end_time: e.end,
-      all_day: e.all_day === true,
-      location: e.location ?? '',
-      color: e.color ?? '#2196F3',
-      assigned_user_ids: e.assigned_user_ids ?? '',
-      active: e.active !== false,
-    }));
+    const rows = Array.from(dedupMap.values()).map((e) => {
+      const ids: string[] = e.assigned_user_ids
+        ? e.assigned_user_ids.split(',').map((s: string) => s.trim()).filter(Boolean)
+        : [];
+      const names = ids.map((id) => idToName[id] ?? '').filter(Boolean).join(', ');
+      return {
+        tsheets_id: String(e.id),
+        title: e.title ?? '',
+        notes: e.notes ?? '',
+        start_time: e.start,
+        end_time: e.end,
+        all_day: e.all_day === true,
+        location: e.location ?? '',
+        color: e.color ?? '#2196F3',
+        assigned_user_ids: ids.join(','),
+        assigned_user_names: names,
+        active: e.active !== false,
+      };
+    });
 
     // Upsert in batches of 200
     const batchSize = 200;
