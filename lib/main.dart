@@ -9613,7 +9613,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   List<QbtScheduleEvent> _searchResults = [];
   bool _isSearchMode = false;
   bool _isSearchLoading = false;
-  String _sortBy = 'newest'; // 'newest' | 'oldest'
+  String _sortBy = 'oldest'; // 'newest' | 'oldest'
   Timer? _searchDebounce;
   static const _kSearchDebounce = Duration(milliseconds: 400);
 
@@ -9791,6 +9791,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         _searchResults = merged;
         _isSearchMode = true;
         _isSearchLoading = false;
+      });
+      // Scroll to bottom so newest results are visible
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_scrollController.hasClients) {
+          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+        }
       });
     } catch (_) {
       if (!mounted) return;
@@ -10095,16 +10101,22 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         backgroundColor: kBrandGreenDark,
         foregroundColor: Colors.white,
         title: _searchActive
-            ? TextField(
-                controller: _searchController,
-                autofocus: true,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  hintText: 'Search by name, date, address, assignee...',
-                  hintStyle: TextStyle(color: Colors.white60),
-                  border: InputBorder.none,
+            ? Theme(
+                data: ThemeData.dark(),
+                child: TextField(
+                  controller: _searchController,
+                  autofocus: true,
+                  cursorColor: Colors.white,
+                  style: const TextStyle(color: Colors.white, fontSize: 16),
+                  decoration: const InputDecoration(
+                    hintText: 'Search by name, date, address, assignee...',
+                    hintStyle: TextStyle(color: Colors.white60),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                  ),
+                  onChanged: _onSearchChanged,
                 ),
-                onChanged: _onSearchChanged,
               )
             : const Text('Schedule', style: TextStyle(fontWeight: FontWeight.bold)),
         actions: [
@@ -10244,7 +10256,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return RefreshIndicator(
       onRefresh: _load,
       child: ListView.builder(
-        controller: _isSearchMode ? null : _scrollController,
+        controller: _scrollController,
         padding: const EdgeInsets.only(bottom: 100),
         itemCount: items.length,
         itemBuilder: (context, i) {
