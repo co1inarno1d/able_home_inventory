@@ -9863,7 +9863,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   List<QbtScheduleEvent> _searchResults = [];
   bool _isSearchMode = false;
   bool _isSearchLoading = false;
-  String _sortBy = 'oldest'; // 'newest' | 'oldest'
+  String _sortBy = 'newest'; // 'newest' | 'oldest'
   Timer? _searchDebounce;
   static const _kSearchDebounce = Duration(milliseconds: 400);
 
@@ -11040,7 +11040,20 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       );
     }
     if (!mounted) return;
-    await _loadMeta(); // refresh to get updated lift status
+    // Reload meta to get updated lift data, then reset savingLift
+    final meta = await sbGetEventMeta(widget.event.id);
+    if (!mounted) return;
+    final liftIds = (meta['lift_ids'] as List<String>?) ?? [];
+    final lifts = <LiftRecord>[];
+    for (final id in liftIds) {
+      final l = await sbFetchLiftById(id);
+      if (l != null) lifts.add(l);
+    }
+    if (!mounted) return;
+    setState(() {
+      _linkedLifts = lifts;
+      _savingLift = false;
+    });
   }
 
   Future<void> _unlinkLift(LiftRecord lift) async {
@@ -11063,6 +11076,26 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       _linkedLifts = _linkedLifts.where((l) => l.liftId != lift.liftId).toList();
       _savingLift = false;
     });
+  }
+
+  Future<void> _openLiftPicker() async {
+    final result = await showDialog(
+      context: context,
+      builder: (_) => const _LiftPickerDialog(),
+    );
+    if (!mounted) return;
+    if (result is LiftRecord) {
+      await _linkLift(result);
+    } else if (result is _AddNewLiftSentinel) {
+      // Open the lift form; after saving, link the newest lift to this event
+      await Navigator.of(context).push(
+        MaterialPageRoute(builder: (_) => const LiftFormScreen()),
+      );
+      if (!mounted) return;
+      final newest = await sbFetchNewestLift();
+      if (!mounted) return;
+      if (newest != null) await _linkLift(newest);
+    }
   }
 
   Future<void> _toggleCompleted() async {
@@ -11510,15 +11543,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                         trailing: _savingLift
                             ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                             : Icon(Icons.chevron_right, color: Colors.grey[400]),
-                        onTap: _savingLift
-                            ? null
-                            : () async {
-                                final lift = await showDialog<LiftRecord>(
-                                  context: context,
-                                  builder: (_) => const _LiftPickerDialog(),
-                                );
-                                if (lift != null) await _linkLift(lift);
-                              },
+                        onTap: _savingLift ? null : _openLiftPicker,
                       ),
                     ],
                   ),

@@ -62,7 +62,7 @@ class _ScheduleDesktopViewState extends State<ScheduleDesktopView> {
   bool _isSearchMode = false;
   bool _isSearchLoading = false;
   List<QbtScheduleEvent> _searchResults = [];
-  String _sortBy = 'oldest';
+  String _sortBy = 'newest';
   Timer? _searchDebounce;
   static const _kDebounce = Duration(milliseconds: 400);
 

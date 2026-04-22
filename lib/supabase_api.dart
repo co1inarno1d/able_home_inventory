@@ -204,6 +204,29 @@ Future<List<LiftRecord>> sbFetchLifts() async {
   }).toList();
 }
 
+/// Fetches the single most-recently inserted lift (by internal row id).
+/// Used to auto-link a newly created lift after the LiftFormScreen closes.
+Future<LiftRecord?> sbFetchNewestLift() async {
+  final raw = await _sb
+      .from('lifts')
+      .select()
+      .not('lift_id', 'is', null)
+      .order('id', ascending: false)
+      .limit(1);
+  final list = raw as List;
+  if (list.isEmpty) return null;
+  final map = Map<String, dynamic>.from(list.first as Map);
+  final urls = map['photo_urls'];
+  if (urls is List) {
+    map['photo_urls'] = urls
+        .map((u) => u.toString())
+        .where((u) => u.isNotEmpty)
+        .map(normalizeDrivePhotoUrl)
+        .join(',');
+  }
+  return LiftRecord.fromJson(map);
+}
+
 Future<LiftRecord?> sbCheckDuplicateSerial(String serialNumber) async {
   if (serialNumber.trim().isEmpty) return null;
   final raw = await _sb
