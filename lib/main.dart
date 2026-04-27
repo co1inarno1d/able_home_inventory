@@ -525,6 +525,7 @@ class RampItem {
   final String condition; // "New" or "Used"
   final int currentQty;
   final int minQty;
+  final int ccalsQty;
   final bool active;
   final String notes;
 
@@ -535,6 +536,7 @@ class RampItem {
     required this.condition,
     required this.currentQty,
     required this.minQty,
+    this.ccalsQty = 0,
     required this.active,
     required this.notes,
   });
@@ -559,6 +561,7 @@ class RampItem {
       condition: normCondition(json['condition']),
       currentQty: parseInt(json['current_qty']),
       minQty: parseInt(json['min_qty']),
+      ccalsQty: parseInt(json['ccals_qty']),
       active: (json['active'] ?? 'Y').toString().toUpperCase() == 'Y',
       notes: json['notes']?.toString() ?? '',
     );
@@ -654,6 +657,8 @@ class LiftRecord {
   final String binNumber; // Bin number for used lifts
   final String cleanBatteriesStatus; // 'Needs Cleaning' or 'Clean'
   final List<String> photoUrls; // Google Drive direct-view URLs
+  final String railType; // 'Straight' or 'Curved'
+  final String acquisitionSource; // 'VA', 'CCALS', 'Web Lead', etc.
 
   LiftRecord({
     required this.liftId,
@@ -675,6 +680,8 @@ class LiftRecord {
     required this.binNumber,
     this.cleanBatteriesStatus = '',
     this.photoUrls = const [],
+    this.railType = 'Straight',
+    this.acquisitionSource = '',
   });
 
   factory LiftRecord.fromJson(Map<String, dynamic> json) {
@@ -702,6 +709,8 @@ class LiftRecord {
       photoUrls: s(json['photo_urls']).isEmpty
           ? []
           : s(json['photo_urls']).split(',').map((u) => u.trim()).where((u) => u.isNotEmpty).map(normalizeDrivePhotoUrl).toList(),
+      railType: s(json['rail_type']).isEmpty ? 'Straight' : s(json['rail_type']),
+      acquisitionSource: s(json['acquisition_source']),
     );
   }
 }
@@ -992,7 +1001,7 @@ const Map<String, List<String>> _seriesByBrandHardcoded = {
   'Acorn': ['T700', '130', '120', 'Outdoor T700', 'Outdoor 130', 'Outdoor 120'],
   'Brooks': ['T700', '130', '120', 'Outdoor T700', 'Outdoor 130', 'Outdoor 120'],
   'Bruno': ['Elan 3050', 'Elan 3000', 'Elite', 'Outdoor Elite'],
-  'Harmar': ['SL300', 'SL600'],
+  'Harmar': ['SL300', 'SL600', 'Helix'],
 };
 
 List<String> sortSeriesList(List<String> series) {
@@ -2484,10 +2493,13 @@ class _LiftPickerDialogState extends State<_LiftPickerDialog> {
   Future<void> _load() async {
     try {
       final lifts = await sbFetchLifts();
+      // Only show lifts that can be linked: exclude Installed and Scrapped
+      const linkableStatuses = ['In Stock', 'Removed', 'Assigned'];
+      final linkable = lifts.where((l) => linkableStatuses.contains(l.status)).toList();
       if (mounted) {
         setState(() {
-          _all = lifts;
-          _filtered = lifts;
+          _all = linkable;
+          _filtered = linkable;
           _loading = false;
         });
       }
@@ -2502,11 +2514,8 @@ class _LiftPickerDialogState extends State<_LiftPickerDialog> {
       _filtered = q.isEmpty
           ? _all
           : _all.where((l) {
-              return l.serialNumber.toLowerCase().contains(q) ||
-                  l.brand.toLowerCase().contains(q) ||
-                  l.series.toLowerCase().contains(q) ||
-                  l.currentLocation.toLowerCase().contains(q) ||
-                  l.liftId.toLowerCase().contains(q);
+              final haystack = [l.serialNumber, l.brand, l.series, l.currentLocation, l.liftId].join(' ').toLowerCase();
+              return q.split(RegExp(r'\s+')).where((t) => t.isNotEmpty).every((t) => haystack.contains(t));
             }).toList();
     });
   }
@@ -4401,6 +4410,69 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
 }
 
 // =======================
+// WEB LEADS SCREEN (standalone, opened from bell)
+// =======================
+
+class WebLeadsScreen extends StatefulWidget {
+  final VoidCallback? onClose;
+  const WebLeadsScreen({super.key, this.onClose});
+
+  @override
+  State<WebLeadsScreen> createState() => _WebLeadsScreenState();
+}
+
+class _WebLeadsScreenState extends State<WebLeadsScreen> {
+  List<WebLeadRecord> _leads = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final leads = await sbFetchWebLeads();
+      if (mounted) setState(() { _leads = leads; _loading = false; });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Row(
+          children: [
+            const Text('Web Leads'),
+            if (_leads.any((l) => l.status == 'New')) ...[
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(color: kBrandGreen, borderRadius: BorderRadius.circular(10)),
+                child: Text(
+                  '${_leads.where((l) => l.status == 'New').length} new',
+                  style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _WebLeadsTab(leads: _leads, onRefresh: _load),
+    );
+  }
+}
+
+// =======================
 // WEB LEADS TAB
 // =======================
 
@@ -4898,16 +4970,39 @@ class _HomeShellState extends State<HomeShell> {
     const LiftsScreen(),
     const RampsScreen(),
     const ScheduleScreen(),
-    const JobsScreen(),
+    // const JobsScreen(), // Hidden — re-enable to restore Jobs tab
     const PrepScreen(),
     // const PickupListScreen(), // Hidden for now - not currently in use
   ];
+
+  List<WebLeadRecord> _webLeads = [];
+  int get _newLeadCount => _webLeads.where((l) => l.status == 'New').length;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadWebLeads();
+  }
+
+  Future<void> _loadWebLeads() async {
+    try {
+      final leads = await sbFetchWebLeads();
+      if (mounted) setState(() => _webLeads = leads);
+    } catch (_) {}
+  }
 
   void _onItemTapped(int index) {
     if (_selectedIndex == index) return;
     setState(() {
       _selectedIndex = index;
     });
+  }
+
+  void _openWebLeads() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => WebLeadsScreen(onClose: _loadWebLeads)),
+    );
+    _loadWebLeads();
   }
 
   @override
@@ -4920,6 +5015,8 @@ class _HomeShellState extends State<HomeShell> {
       bottomNavigationBar: _FloatingNavBar(
         currentIndex: _selectedIndex,
         onTap: _onItemTapped,
+        newLeadCount: _newLeadCount,
+        onBellTap: _openWebLeads,
       ),
     );
   }
@@ -4928,8 +5025,15 @@ class _HomeShellState extends State<HomeShell> {
 class _FloatingNavBar extends StatelessWidget {
   final int currentIndex;
   final ValueChanged<int> onTap;
+  final int newLeadCount;
+  final VoidCallback onBellTap;
 
-  const _FloatingNavBar({required this.currentIndex, required this.onTap});
+  const _FloatingNavBar({
+    required this.currentIndex,
+    required this.onTap,
+    this.newLeadCount = 0,
+    required this.onBellTap,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -4937,7 +5041,7 @@ class _FloatingNavBar extends StatelessWidget {
       (Icons.list_alt_rounded, 'Lifts'),
       (Icons.stairs_rounded, 'Ramps'),
       (Icons.calendar_month_rounded, 'Schedule'),
-      (Icons.work_rounded, 'Jobs'),
+      // (Icons.work_rounded, 'Jobs'), // Hidden — re-enable to restore Jobs tab
       (Icons.build_rounded, 'Prep'),
     ];
 
@@ -4948,46 +5052,82 @@ class _FloatingNavBar extends StatelessWidget {
         child: SizedBox(
           height: 62,
           child: Row(
-            children: List.generate(items.length, (i) {
-              final selected = i == currentIndex;
-              final (icon, label) = items[i];
-              return Expanded(
-                child: GestureDetector(
-                  onTap: () => onTap(i),
-                  behavior: HitTestBehavior.opaque,
+            children: [
+              ...List.generate(items.length, (i) {
+                final selected = i == currentIndex;
+                final (icon, label) = items[i];
+                return Expanded(
+                  child: GestureDetector(
+                    onTap: () => onTap(i),
+                    behavior: HitTestBehavior.opaque,
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 180),
+                          curve: Curves.easeOut,
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+                          decoration: selected
+                              ? BoxDecoration(
+                                  color: Colors.white.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(10),
+                                )
+                              : const BoxDecoration(),
+                          child: Icon(
+                            icon,
+                            size: 22,
+                            color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          label,
+                          style: GoogleFonts.nunito(
+                            fontSize: 10,
+                            fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+                            color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }),
+              // Web leads bell — not a tab, opens leads overlay
+              GestureDetector(
+                onTap: onBellTap,
+                behavior: HitTestBehavior.opaque,
+                child: SizedBox(
+                  width: 52,
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        curve: Curves.easeOut,
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-                        decoration: selected
-                            ? BoxDecoration(
-                                color: Colors.white.withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(10),
-                              )
-                            : const BoxDecoration(),
-                        child: Icon(
-                          icon,
-                          size: 22,
-                          color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
-                        ),
+                      Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Icon(Icons.notifications_outlined, size: 22, color: Colors.white.withValues(alpha: 0.7)),
+                          if (newLeadCount > 0)
+                            Positioned(
+                              top: -4,
+                              right: -6,
+                              child: Container(
+                                padding: const EdgeInsets.all(3),
+                                decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
+                                child: Text(
+                                  '$newLeadCount',
+                                  style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                            ),
+                        ],
                       ),
                       const SizedBox(height: 2),
-                      Text(
-                        label,
-                        style: GoogleFonts.nunito(
-                          fontSize: 10,
-                          fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
-                          color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
-                        ),
-                      ),
+                      Text('Leads', style: GoogleFonts.nunito(fontSize: 10, color: Colors.white.withValues(alpha: 0.7))),
                     ],
                   ),
                 ),
-              );
-            }),
+              ),
+            ],
           ),
         ),
       ),
@@ -5014,6 +5154,7 @@ class _RampsScreenState extends State<RampsScreen> {
   bool _showBelowMinOnlyRamps = false;
   String? _rampBrandFilter;   // 'EZ Access', 'Prairie View', etc.
   String? _rampEzSubFilter;   // '2G' or '3G' — only active when _rampBrandFilter == 'EZ Access'
+  bool _showCcals = false;    // Toggle between Able Home and CCALS pool
 
   String _userName = '';
 
@@ -5401,11 +5542,212 @@ class _RampsScreenState extends State<RampsScreen> {
     );
   }
 
+  Widget _buildCcalsRampsList(List<RampItem> items, List<String> brands) {
+    final condition = _rampConditionFilter;
+    final brandFilter = _rampBrandFilter;
+    final ezSub = _rampEzSubFilter;
+
+    final parentBrands = brands.map((b) {
+      final lower = b.toLowerCase();
+      if (lower.contains('ez access')) return 'EZ Access';
+      return b;
+    }).toSet().toList()..sort();
+
+    final filtered = items.where((item) {
+      if (item.condition != condition) return false;
+      if (brandFilter != null && brandFilter.isNotEmpty) {
+        if (brandFilter == 'EZ Access') {
+          if (!item.brand.toLowerCase().contains('ez access')) return false;
+          if (ezSub != null && ezSub.isNotEmpty) {
+            if (!item.brand.toLowerCase().contains(ezSub.toLowerCase())) return false;
+          }
+        } else {
+          if (item.brand != brandFilter) return false;
+        }
+      }
+      if (_searchQuery.isNotEmpty) {
+        final haystack = '${item.brand} ${item.size}'.toLowerCase();
+        if (!haystack.contains(_searchQuery)) return false;
+      }
+      return true;
+    }).toList()
+      ..sort((a, b) {
+        final brandCmp = _compareRampBrands(a.brand, b.brand);
+        if (brandCmp != 0) return brandCmp;
+        return _compareRampSizes(a.size, b.size);
+      });
+
+    return ListView(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: TextField(
+            decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.search),
+              hintText: 'Search by brand, size...',
+              border: OutlineInputBorder(),
+            ),
+            onChanged: (value) => setState(() => _searchQuery = value.trim().toLowerCase()),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0),
+          child: Row(
+            children: [
+              Wrap(
+                spacing: 8,
+                children: [
+                  ChoiceChip(
+                    label: const Text('New'),
+                    selected: _rampConditionFilter == 'New',
+                    onSelected: (_) => setState(() => _rampConditionFilter = 'New'),
+                    selectedColor: kBrandGreen.withValues(alpha: 0.2),
+                  ),
+                  ChoiceChip(
+                    label: const Text('Used'),
+                    selected: _rampConditionFilter == 'Used',
+                    onSelected: (_) => setState(() => _rampConditionFilter = 'Used'),
+                    selectedColor: kBrandGreen.withValues(alpha: 0.2),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
+          child: Row(
+            children: [
+              DropdownButton<String>(
+                value: _rampBrandFilter ?? '',
+                hint: const Text('All brands'),
+                items: <DropdownMenuItem<String>>[
+                  const DropdownMenuItem<String>(value: '', child: Text('All brands')),
+                  ...parentBrands.map((brand) => DropdownMenuItem<String>(value: brand, child: Text(brand))),
+                ],
+                onChanged: (value) => setState(() {
+                  _rampBrandFilter = (value == null || value.isEmpty) ? null : value;
+                  _rampEzSubFilter = null;
+                }),
+              ),
+              if (_rampBrandFilter == 'EZ Access') ...[
+                const SizedBox(width: 12),
+                DropdownButton<String>(
+                  value: _rampEzSubFilter ?? '',
+                  items: const [
+                    DropdownMenuItem(value: '', child: Text('All EZ Access')),
+                    DropdownMenuItem(value: '2G', child: Text('2G')),
+                    DropdownMenuItem(value: '3G', child: Text('3G')),
+                  ],
+                  onChanged: (value) => setState(() => _rampEzSubFilter = (value == null || value.isEmpty) ? null : value),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 4),
+        if (filtered.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(16.0),
+            child: Center(child: Text('No ramps found.')),
+          )
+        else
+          ...filtered.map((item) {
+            return Card(
+              margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              child: ListTile(
+                title: Text(getRampDisplayTitle(item), style: const TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text('Condition: ${item.condition}'),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.remove_circle_outline),
+                      color: Colors.red.shade400,
+                      onPressed: () => _adjustCcalsQty(item, -1),
+                    ),
+                    SizedBox(
+                      width: 36,
+                      child: Text(
+                        '${item.ccalsQty}',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.add_circle_outline),
+                      color: kBrandGreen,
+                      onPressed: () => _adjustCcalsQty(item, 1),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }).toList(),
+        const SizedBox(height: 80),
+      ],
+    );
+  }
+
+  Future<void> _adjustCcalsQty(RampItem item, int delta) async {
+    final prefs = await SharedPreferences.getInstance();
+    final userName = prefs.getString('user_name') ?? '';
+    final userEmail = prefs.getString('user_email') ?? '';
+    try {
+      await sbSubmitCcalsAdjustment(
+        userEmail: userEmail,
+        userName: userName,
+        jobRef: 'CCALS',
+        items: [
+          {
+            'item_id': item.itemId,
+            'delta': delta,
+            'condition': item.condition,
+            'brand': item.brand,
+            'size': item.size,
+          }
+        ],
+      );
+      _refresh();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error adjusting CCALS qty: $e')),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Ramps Inventory'),
+        title: Row(
+          children: [
+            const Text('Ramps'),
+            const SizedBox(width: 12),
+            SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(value: false, label: Text('Able Home')),
+                ButtonSegment(value: true, label: Text('CCALS')),
+              ],
+              selected: {_showCcals},
+              onSelectionChanged: (sel) => setState(() => _showCcals = sel.first),
+              style: ButtonStyle(
+                visualDensity: VisualDensity.compact,
+                textStyle: WidgetStateProperty.all(const TextStyle(fontSize: 12)),
+                backgroundColor: WidgetStateProperty.resolveWith((states) {
+                  if (states.contains(WidgetState.selected)) return Colors.white;
+                  return Colors.white.withValues(alpha: 0.2);
+                }),
+                foregroundColor: WidgetStateProperty.resolveWith((states) {
+                  if (states.contains(WidgetState.selected)) return kBrandGreen;
+                  return Colors.white.withValues(alpha: 0.8);
+                }),
+              ),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.history),
@@ -5445,6 +5787,54 @@ class _RampsScreenState extends State<RampsScreen> {
           final rampBrands =
               (ramps.map((e) => e.brand).toSet().toList()..sort());
 
+          if (_showCcals) {
+            // CCALS pool view
+            int ccalsTotalUnits = 0;
+            int ccalsNewUnits = 0;
+            int ccalsUsedUnits = 0;
+            for (final r in ramps) {
+              ccalsTotalUnits += r.ccalsQty;
+              if (r.condition == 'New') ccalsNewUnits += r.ccalsQty;
+              if (r.condition == 'Used') ccalsUsedUnits += r.ccalsQty;
+            }
+            return Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
+                  child: Card(
+                    elevation: 1,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Text('CCALS Inventory', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
+                          const SizedBox(height: 4),
+                          Row(
+                            children: [
+                              Expanded(child: _SummaryStat(label: 'Total units', value: ccalsTotalUnits.toString())),
+                              Expanded(child: _SummaryStat(label: 'New', value: ccalsNewUnits.toString())),
+                              Expanded(child: _SummaryStat(label: 'Used', value: ccalsUsedUnits.toString())),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: RefreshIndicator(
+                    onRefresh: () async {
+                      setState(() { _future = sbFetchInventory(); });
+                      await _future;
+                    },
+                    child: _buildCcalsRampsList(ramps, rampBrands),
+                  ),
+                ),
+              ],
+            );
+          }
+
           int rampTotalUnits = 0;
           int rampNewUnits = 0;
           int rampUsedUnits = 0;
@@ -5482,7 +5872,7 @@ class _RampsScreenState extends State<RampsScreen> {
         },
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
-      floatingActionButton: Padding(
+      floatingActionButton: _showCcals ? null : Padding(
         padding: const EdgeInsets.only(bottom: 12.0),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -6229,6 +6619,8 @@ class _LiftsScreenState extends State<LiftsScreen> {
   String? _seriesFilter;
   String? _orientationFilter;
   String? _prepStatusFilter;
+  String? _railTypeFilter;
+  String? _sourceFilter;
   String? _sortOption; // null = default (newest acquired first)
 
   @override
@@ -6438,6 +6830,16 @@ class _LiftsScreenState extends State<LiftsScreen> {
               return false;
             }
 
+            // Rail type filter
+            if (_railTypeFilter != null && _railTypeFilter!.isNotEmpty) {
+              if (l.railType.toLowerCase() != _railTypeFilter!.toLowerCase()) return false;
+            }
+
+            // Source filter
+            if (_sourceFilter != null && _sourceFilter!.isNotEmpty) {
+              if (l.acquisitionSource.toLowerCase() != _sourceFilter!.toLowerCase()) return false;
+            }
+
             // Search filter (applies to multiple fields)
             if (_search.isNotEmpty) {
               // Normalize queries like "bin 24", "bin#24", "bin# 24" → just "24"
@@ -6454,7 +6856,11 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 l.currentLocation,
                 l.currentJob,
               ].join(' ').toLowerCase();
-              if (!haystack.contains(effectiveSearch)) return false;
+
+              // Token-based matching: every word in the query must appear somewhere
+              // in the combined haystack, enabling searches like "Acorn 130" or "Bruno Elite"
+              final tokens = effectiveSearch.split(RegExp(r'\s+')).where((t) => t.isNotEmpty);
+              if (!tokens.every((token) => haystack.contains(token))) return false;
             }
 
             return true;
@@ -6706,9 +7112,11 @@ class _LiftsScreenState extends State<LiftsScreen> {
                                               overflow: TextOverflow.ellipsis,
                                             ),
                                           ],
-                                          if (l.preppedStatus.isNotEmpty || l.cleanBatteriesStatus.isNotEmpty) ...[
+                                          if (l.preppedStatus.isNotEmpty || l.cleanBatteriesStatus.isNotEmpty || l.railType == 'Curved' || l.acquisitionSource.isNotEmpty) ...[
                                             const SizedBox(height: 8),
-                                            Row(
+                                            Wrap(
+                                              spacing: 6,
+                                              runSpacing: 4,
                                               children: [
                                                 if (l.preppedStatus.isNotEmpty)
                                                   _StatusPill(
@@ -6719,10 +7127,12 @@ class _LiftsScreenState extends State<LiftsScreen> {
                                                             ? Colors.orange.shade700
                                                             : Colors.green.shade700,
                                                   ),
-                                                if (l.cleanBatteriesStatus.isNotEmpty) ...[
-                                                  const SizedBox(width: 6),
+                                                if (l.cleanBatteriesStatus.isNotEmpty)
                                                   _StatusPill(label: l.cleanBatteriesStatus, color: cbColor ?? Colors.grey),
-                                                ],
+                                                if (l.railType == 'Curved')
+                                                  _StatusPill(label: 'Curved', color: Colors.purple.shade600),
+                                                if (l.acquisitionSource.isNotEmpty)
+                                                  _StatusPill(label: l.acquisitionSource, color: Colors.blueGrey.shade500),
                                               ],
                                             ),
                                           ],
@@ -6763,6 +7173,9 @@ class _LiftsScreenState extends State<LiftsScreen> {
     required List<String> conditions,
     required List<String> sortOptions,
   }) {
+    const sources = ['VA', 'CCALS', 'Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other'];
+    const railTypes = ['Straight', 'Curved'];
+
     return Column(
       children: [
         // Search bar
@@ -6771,7 +7184,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
           child: TextField(
             decoration: const InputDecoration(
               prefixIcon: Icon(Icons.search),
-              hintText: 'Search by serial, bin #, brand, location...',
+              hintText: 'Search by serial, bin #, brand, series, location...',
               border: OutlineInputBorder(),
             ),
             onChanged: (value) {
@@ -6782,7 +7195,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
           ),
         ),
 
-        // Filters - Two rows of three
+        // Filters - Three rows of three
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
           child: Column(
@@ -6804,7 +7217,6 @@ class _LiftsScreenState extends State<LiftsScreen> {
                       value: _brandFilter,
                       hint: 'Brand',
                       items: brands,
-                      // Only clear series when brand changes — orientation is independent
                       onChanged: (value) => setState(() {
                         _brandFilter = value;
                         _seriesFilter = null;
@@ -6817,7 +7229,6 @@ class _LiftsScreenState extends State<LiftsScreen> {
                       value: series.contains(_seriesFilter) ? _seriesFilter : null,
                       hint: 'Series',
                       items: series,
-                      // Series and orientation are fully independent — don't clear each other
                       onChanged: (value) => setState(() => _seriesFilter = value),
                     ),
                   ),
@@ -6853,6 +7264,31 @@ class _LiftsScreenState extends State<LiftsScreen> {
                       onChanged: (value) => setState(() => _sortOption = value),
                     ),
                   ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              // Row 3: Rail Type, Source
+              Row(
+                children: [
+                  Expanded(
+                    child: _buildCompactDropdown(
+                      value: _railTypeFilter,
+                      hint: 'Rail Type',
+                      items: railTypes,
+                      onChanged: (value) => setState(() => _railTypeFilter = value),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: _buildCompactDropdown(
+                      value: _sourceFilter,
+                      hint: 'Source',
+                      items: sources,
+                      onChanged: (value) => setState(() => _sourceFilter = value),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Expanded(child: SizedBox()),
                 ],
               ),
             ],
@@ -9025,6 +9461,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   String _status = 'In Stock';
   String _preppedStatus = 'Needs prepping';
   String _cleanBatteriesStatus = '';
+  String _railType = 'Straight';
+  String? _acquisitionSource;
 
   final _serialController = TextEditingController();
   final _binNumberController = TextEditingController();
@@ -9065,6 +9503,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
           ? existing.preppedStatus
           : 'Needs prepping';
       _cleanBatteriesStatus = existing.cleanBatteriesStatus;
+      _railType = existing.railType.isEmpty ? 'Straight' : existing.railType;
+      _acquisitionSource = existing.acquisitionSource.isEmpty ? null : existing.acquisitionSource;
     }
 
     _loadInventory();
@@ -9356,6 +9796,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         notes: _notesController.text.trim(),
         binNumber: _binNumberController.text.trim(),
         cleanBatteriesStatus: _cleanBatteriesStatus,
+        railType: _railType,
+        acquisitionSource: _acquisitionSource ?? '',
       );
 
       if (!mounted) return;
@@ -9527,8 +9969,58 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                   _selectedSeries = value;
                   _selectedOrientation = null;
                   _selectedFoldType = null;
+                  // Harmar Helix is always curved
+                  if (_selectedBrand == 'Harmar' && value == 'Helix') {
+                    _railType = 'Curved';
+                  }
                 });
               },
+            ),
+            const SizedBox(height: 12),
+            // Rail type toggle (Straight / Curved)
+            Row(
+              children: [
+                Expanded(
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'Straight', label: Text('Straight')),
+                      ButtonSegment(value: 'Curved', label: Text('Curved')),
+                    ],
+                    selected: {_railType},
+                    onSelectionChanged: (sel) => setState(() => _railType = sel.first),
+                    style: ButtonStyle(
+                      backgroundColor: WidgetStateProperty.resolveWith((states) {
+                        if (states.contains(WidgetState.selected)) return kBrandGreen;
+                        return null;
+                      }),
+                      foregroundColor: WidgetStateProperty.resolveWith((states) {
+                        if (states.contains(WidgetState.selected)) return Colors.white;
+                        return null;
+                      }),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // Acquisition source dropdown
+            DropdownButtonFormField<String>(
+              value: _acquisitionSource,
+              items: const [
+                DropdownMenuItem(value: 'VA', child: Text('VA')),
+                DropdownMenuItem(value: 'CCALS', child: Text('CCALS')),
+                DropdownMenuItem(value: 'Web Lead', child: Text('Web Lead')),
+                DropdownMenuItem(value: 'Call-in', child: Text('Call-in')),
+                DropdownMenuItem(value: 'Navicare', child: Text('Navicare')),
+                DropdownMenuItem(value: 'Angi Lead', child: Text('Angi Lead')),
+                DropdownMenuItem(value: 'Home Advisor', child: Text('Home Advisor')),
+                DropdownMenuItem(value: 'Other', child: Text('Other')),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Source (optional)',
+                border: OutlineInputBorder(),
+              ),
+              onChanged: (value) => setState(() => _acquisitionSource = value),
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
@@ -9686,6 +10178,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
                     notes: _notesController.text.trim(),
                     binNumber: widget.existing?.binNumber ?? '',
                     cleanBatteriesStatus: _cleanBatteriesStatus,
+                    railType: _railType,
+                    acquisitionSource: _acquisitionSource ?? '',
                   );
 
                   // Open prep checklist form

@@ -27,9 +27,15 @@ create table if not exists lifts (
   bin_number      text,
   clean_batteries_status text,
   photo_urls      text[] default '{}',
+  rail_type       text default 'Straight',
+  acquisition_source text,
   created_at      timestamptz default now(),
   updated_at      timestamptz default now()
 );
+
+-- Migration: add new columns to existing lifts table
+-- alter table lifts add column if not exists rail_type text default 'Straight';
+-- alter table lifts add column if not exists acquisition_source text;
 
 -- ---------------------------------------------------------------
 -- LIFT HISTORY
@@ -126,8 +132,12 @@ create table if not exists inventory_ramps (
   size        text,
   condition   text,
   current_qty integer default 0,
-  min_qty     integer default 0
+  min_qty     integer default 0,
+  ccals_qty   integer default 0
 );
+
+-- Migration: add ccals_qty to existing inventory_ramps table
+-- alter table inventory_ramps add column if not exists ccals_qty integer default 0;
 
 -- ---------------------------------------------------------------
 -- INVENTORY CHANGES LOG
