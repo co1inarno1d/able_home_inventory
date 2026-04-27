@@ -11766,14 +11766,14 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
               Text('Source:', style: TextStyle(fontSize: 13, color: Colors.grey[600])),
               const SizedBox(width: 8),
               DropdownButton<String>(
-                value: const ['Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other'].contains(_eventSource)
+                value: const ['VA', 'Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other'].contains(_eventSource)
                     ? _eventSource : null,
                 hint: Text('Set source', style: TextStyle(color: Colors.grey[500], fontSize: 13)),
                 underline: const SizedBox(),
                 isDense: true,
                 items: [
                   const DropdownMenuItem(value: null, child: Text('— None —', style: TextStyle(color: Colors.grey))),
-                  ...['Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other']
+                  ...['VA', 'Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other']
                       .map((s) => DropdownMenuItem(value: s, child: Text(s, style: const TextStyle(fontSize: 13)))),
                 ],
                 onChanged: _savingSource ? null : (val) async {
