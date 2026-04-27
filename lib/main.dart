@@ -3234,14 +3234,13 @@ class _JobsScreenState extends State<JobsScreen>
   Map<String, Map<String, dynamic>> _allMeta = {};
   Set<String> _completedIds = {};
   Map<String, List<LiftRecord>> _liftsByEvent = {};
-  List<WebLeadRecord> _webLeads = [];
   bool _loading = true;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(length: 3, vsync: this);
     _load();
   }
 
@@ -3265,7 +3264,6 @@ class _JobsScreenState extends State<JobsScreen>
         qbtFetchUsers(),
         sbGetAllEventMeta(),
         sbFetchCompletedEventIds(),
-        sbFetchWebLeads(),
       ]);
       if (!mounted) return;
       final events = results[0] as List<QbtScheduleEvent>;
@@ -3296,7 +3294,6 @@ class _JobsScreenState extends State<JobsScreen>
         _users = results[1] as Map<String, QbtUser>;
         _allMeta = allMeta;
         _completedIds = results[3] as Set<String>;
-        _webLeads = results[4] as List<WebLeadRecord>;
         _liftsByEvent = liftsByEvent;
         _loading = false;
       });
@@ -3504,7 +3501,6 @@ class _JobsScreenState extends State<JobsScreen>
             Tab(text: 'Installs'),
             Tab(text: 'Removals'),
             Tab(text: 'Service'),
-            Tab(text: 'Web Leads'),
           ],
         ),
       ),
@@ -3551,7 +3547,6 @@ class _JobsScreenState extends State<JobsScreen>
                       parseEventColor: _parseEventColor,
                       assignedNames: _assignedNames,
                     ),
-                    _WebLeadsTab(leads: _webLeads, onRefresh: _load),
                   ],
                 ),
       floatingActionButton: FloatingActionButton.extended(
@@ -4410,12 +4405,15 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
 }
 
 // =======================
-// WEB LEADS SCREEN (standalone, opened from bell)
+// SERVICE JOB FORM SCREEN
+// =======================
+
+// =======================
+// WEB LEADS SCREEN + WIDGETS
 // =======================
 
 class WebLeadsScreen extends StatefulWidget {
-  final VoidCallback? onClose;
-  const WebLeadsScreen({super.key, this.onClose});
+  const WebLeadsScreen({super.key});
 
   @override
   State<WebLeadsScreen> createState() => _WebLeadsScreenState();
@@ -4472,30 +4470,23 @@ class _WebLeadsScreenState extends State<WebLeadsScreen> {
   }
 }
 
-// =======================
-// WEB LEADS TAB
-// =======================
-
 class _WebLeadsTab extends StatelessWidget {
   final List<WebLeadRecord> leads;
-  final VoidCallback onRefresh;
+  final Future<void> Function() onRefresh;
 
   const _WebLeadsTab({required this.leads, required this.onRefresh});
 
   @override
   Widget build(BuildContext context) {
     if (leads.isEmpty) {
-      return const Center(
-        child: Text('No web leads yet.', style: TextStyle(color: Colors.grey)),
-      );
+      return const Center(child: Text('No web leads yet.', style: TextStyle(color: Colors.grey)));
     }
     return RefreshIndicator(
-      onRefresh: () async => onRefresh(),
+      onRefresh: onRefresh,
       child: ListView.builder(
         padding: const EdgeInsets.all(12),
         itemCount: leads.length,
-        itemBuilder: (context, i) =>
-            _WebLeadCard(lead: leads[i], onRefresh: onRefresh),
+        itemBuilder: (context, i) => _WebLeadCard(lead: leads[i], onRefresh: onRefresh),
       ),
     );
   }
@@ -4503,22 +4494,19 @@ class _WebLeadsTab extends StatelessWidget {
 
 class _WebLeadCard extends StatelessWidget {
   final WebLeadRecord lead;
-  final VoidCallback onRefresh;
+  final Future<void> Function() onRefresh;
 
   const _WebLeadCard({required this.lead, required this.onRefresh});
 
   Color get _statusColor {
     switch (lead.status) {
-      case 'Contacted':
-        return Colors.blue;
-      case 'Closed':
-        return Colors.grey;
-      default:
-        return kBrandGreen;
+      case 'Contacted': return Colors.blue;
+      case 'Closed': return Colors.grey;
+      default: return kBrandGreen;
     }
   }
 
-  Future<void> _confirmDelete(BuildContext context) async {
+  Future<void> _delete(BuildContext context) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
@@ -4534,9 +4522,14 @@ class _WebLeadCard extends StatelessWidget {
         ],
       ),
     );
-    if (confirmed == true) {
+    if (confirmed != true) return;
+    try {
       await sbDeleteWebLead(id: lead.id);
-      onRefresh();
+      await onRefresh();
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+      }
     }
   }
 
@@ -4551,33 +4544,12 @@ class _WebLeadCard extends StatelessWidget {
       background: Container(
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 20),
-        decoration: BoxDecoration(
-          color: Colors.red.shade600,
-          borderRadius: BorderRadius.circular(14),
-        ),
+        decoration: BoxDecoration(color: Colors.red.shade600, borderRadius: BorderRadius.circular(14)),
         child: const Icon(Icons.delete_outline, color: Colors.white, size: 26),
       ),
       confirmDismiss: (_) async {
-        final confirmed = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('Delete lead?'),
-            content: Text('Remove the lead from ${lead.name}? This cannot be undone.'),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade600, foregroundColor: Colors.white),
-                child: const Text('Delete'),
-              ),
-            ],
-          ),
-        );
-        if (confirmed == true) {
-          await sbDeleteWebLead(id: lead.id);
-          onRefresh();
-        }
-        return false; // list refreshes via onRefresh
+        await _delete(context);
+        return false;
       },
       child: Card(
         margin: const EdgeInsets.symmetric(vertical: 4),
@@ -4590,11 +4562,9 @@ class _WebLeadCard extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Expanded(
-                    child: Text(
-                      lead.name,
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                      overflow: TextOverflow.ellipsis,
-                    ),
+                    child: Text(lead.name,
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                        overflow: TextOverflow.ellipsis),
                   ),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -4603,24 +4573,17 @@ class _WebLeadCard extends StatelessWidget {
                       borderRadius: BorderRadius.circular(12),
                       border: Border.all(color: _statusColor.withValues(alpha: 0.4)),
                     ),
-                    child: Text(
-                      lead.status,
-                      style: TextStyle(color: _statusColor, fontSize: 12, fontWeight: FontWeight.w600),
-                    ),
+                    child: Text(lead.status,
+                        style: TextStyle(color: _statusColor, fontSize: 12, fontWeight: FontWeight.w600)),
                   ),
                 ],
               ),
               const SizedBox(height: 4),
               Text(lead.email, style: const TextStyle(color: Colors.blue, fontSize: 13)),
-              if (lead.phone.isNotEmpty)
-                Text(lead.phone, style: const TextStyle(fontSize: 13)),
+              if (lead.phone.isNotEmpty) Text(lead.phone, style: const TextStyle(fontSize: 13)),
               const SizedBox(height: 6),
-              Text(
-                lead.message,
-                maxLines: 3,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 13),
-              ),
+              Text(lead.message, maxLines: 3, overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13)),
               const SizedBox(height: 8),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -4634,16 +4597,17 @@ class _WebLeadCard extends StatelessWidget {
                       PopupMenuButton<String>(
                         onSelected: (status) async {
                           await sbUpdateWebLeadStatus(id: lead.id, status: status);
-                          onRefresh();
+                          await onRefresh();
                         },
                         itemBuilder: (_) => ['New', 'Contacted', 'Closed']
                             .map((s) => PopupMenuItem(value: s, child: Text(s)))
                             .toList(),
-                        child: const Text('Update Status', style: TextStyle(color: Colors.blue, fontSize: 12)),
+                        child: const Text('Update Status',
+                            style: TextStyle(color: Colors.blue, fontSize: 12)),
                       ),
                       const SizedBox(width: 12),
                       GestureDetector(
-                        onTap: () => _confirmDelete(context),
+                        onTap: () => _delete(context),
                         child: Icon(Icons.delete_outline, size: 18, color: Colors.red.shade400),
                       ),
                     ],
@@ -5000,7 +4964,7 @@ class _HomeShellState extends State<HomeShell> {
 
   void _openWebLeads() async {
     await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => WebLeadsScreen(onClose: _loadWebLeads)),
+      MaterialPageRoute(builder: (_) => const WebLeadsScreen()),
     );
     _loadWebLeads();
   }
@@ -5073,27 +5037,22 @@ class _FloatingNavBar extends StatelessWidget {
                                   borderRadius: BorderRadius.circular(10),
                                 )
                               : const BoxDecoration(),
-                          child: Icon(
-                            icon,
-                            size: 22,
-                            color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
-                          ),
+                          child: Icon(icon, size: 22,
+                              color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4)),
                         ),
                         const SizedBox(height: 2),
-                        Text(
-                          label,
+                        Text(label,
                           style: GoogleFonts.nunito(
                             fontSize: 10,
                             fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
                             color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
-                          ),
-                        ),
+                          )),
                       ],
                     ),
                   ),
                 );
               }),
-              // Web leads bell — not a tab, opens leads overlay
+              // Web leads bell
               GestureDetector(
                 onTap: onBellTap,
                 behavior: HitTestBehavior.opaque,
@@ -5105,18 +5064,16 @@ class _FloatingNavBar extends StatelessWidget {
                       Stack(
                         clipBehavior: Clip.none,
                         children: [
-                          Icon(Icons.notifications_outlined, size: 22, color: Colors.white.withValues(alpha: 0.7)),
+                          Icon(Icons.notifications_outlined, size: 22,
+                              color: Colors.white.withValues(alpha: 0.7)),
                           if (newLeadCount > 0)
                             Positioned(
-                              top: -4,
-                              right: -6,
+                              top: -4, right: -6,
                               child: Container(
                                 padding: const EdgeInsets.all(3),
                                 decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
-                                child: Text(
-                                  '$newLeadCount',
-                                  style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w700),
-                                ),
+                                child: Text('$newLeadCount',
+                                    style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w700)),
                               ),
                             ),
                         ],
@@ -5362,9 +5319,9 @@ class _RampsScreenState extends State<RampsScreen> {
     );
   }
 
-  Widget _buildRampsList(List<RampItem> items, List<String> brands) {
+  Widget _buildRampsList(List<RampItem> items, List<String> brands, {bool isCcals = false}) {
     final condition = _rampConditionFilter;
-    final belowMinOnly = _showBelowMinOnlyRamps;
+    final belowMinOnly = _showBelowMinOnlyRamps && !isCcals;
     final brandFilter = _rampBrandFilter;
     final ezSub = _rampEzSubFilter; // '2G', '3G', or null
 
@@ -5482,6 +5439,7 @@ class _RampsScreenState extends State<RampsScreen> {
             final belowMin =
                 item.currentQty < item.minQty && item.minQty > 0;
 
+            final displayQty = isCcals ? item.ccalsQty : item.currentQty;
             return Card(
               margin:
                   const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -5516,7 +5474,7 @@ class _RampsScreenState extends State<RampsScreen> {
                               fontSize: 11, color: Colors.black54),
                         ),
                         Text(
-                          '${item.currentQty}',
+                          '$displayQty',
                           style: TextStyle(
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
@@ -5525,11 +5483,12 @@ class _RampsScreenState extends State<RampsScreen> {
                                 : Colors.black,
                           ),
                         ),
-                        Text(
-                          'Min ${item.minQty}',
-                          style: const TextStyle(
-                              fontSize: 11, color: Colors.black54),
-                        ),
+                        if (!isCcals)
+                          Text(
+                            'Min ${item.minQty}',
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.black54),
+                          ),
                       ],
                     ),
                   ),
@@ -5542,212 +5501,20 @@ class _RampsScreenState extends State<RampsScreen> {
     );
   }
 
-  Widget _buildCcalsRampsList(List<RampItem> items, List<String> brands) {
-    final condition = _rampConditionFilter;
-    final brandFilter = _rampBrandFilter;
-    final ezSub = _rampEzSubFilter;
-
-    final parentBrands = brands.map((b) {
-      final lower = b.toLowerCase();
-      if (lower.contains('ez access')) return 'EZ Access';
-      return b;
-    }).toSet().toList()..sort();
-
-    final filtered = items.where((item) {
-      if (item.condition != condition) return false;
-      if (brandFilter != null && brandFilter.isNotEmpty) {
-        if (brandFilter == 'EZ Access') {
-          if (!item.brand.toLowerCase().contains('ez access')) return false;
-          if (ezSub != null && ezSub.isNotEmpty) {
-            if (!item.brand.toLowerCase().contains(ezSub.toLowerCase())) return false;
-          }
-        } else {
-          if (item.brand != brandFilter) return false;
-        }
-      }
-      if (_searchQuery.isNotEmpty) {
-        final haystack = '${item.brand} ${item.size}'.toLowerCase();
-        if (!haystack.contains(_searchQuery)) return false;
-      }
-      return true;
-    }).toList()
-      ..sort((a, b) {
-        final brandCmp = _compareRampBrands(a.brand, b.brand);
-        if (brandCmp != 0) return brandCmp;
-        return _compareRampSizes(a.size, b.size);
-      });
-
-    return ListView(
-      children: [
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: TextField(
-            decoration: const InputDecoration(
-              prefixIcon: Icon(Icons.search),
-              hintText: 'Search by brand, size...',
-              border: OutlineInputBorder(),
-            ),
-            onChanged: (value) => setState(() => _searchQuery = value.trim().toLowerCase()),
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12.0),
-          child: Row(
-            children: [
-              Wrap(
-                spacing: 8,
-                children: [
-                  ChoiceChip(
-                    label: const Text('New'),
-                    selected: _rampConditionFilter == 'New',
-                    onSelected: (_) => setState(() => _rampConditionFilter = 'New'),
-                    selectedColor: kBrandGreen.withValues(alpha: 0.2),
-                  ),
-                  ChoiceChip(
-                    label: const Text('Used'),
-                    selected: _rampConditionFilter == 'Used',
-                    onSelected: (_) => setState(() => _rampConditionFilter = 'Used'),
-                    selectedColor: kBrandGreen.withValues(alpha: 0.2),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
-          child: Row(
-            children: [
-              DropdownButton<String>(
-                value: _rampBrandFilter ?? '',
-                hint: const Text('All brands'),
-                items: <DropdownMenuItem<String>>[
-                  const DropdownMenuItem<String>(value: '', child: Text('All brands')),
-                  ...parentBrands.map((brand) => DropdownMenuItem<String>(value: brand, child: Text(brand))),
-                ],
-                onChanged: (value) => setState(() {
-                  _rampBrandFilter = (value == null || value.isEmpty) ? null : value;
-                  _rampEzSubFilter = null;
-                }),
-              ),
-              if (_rampBrandFilter == 'EZ Access') ...[
-                const SizedBox(width: 12),
-                DropdownButton<String>(
-                  value: _rampEzSubFilter ?? '',
-                  items: const [
-                    DropdownMenuItem(value: '', child: Text('All EZ Access')),
-                    DropdownMenuItem(value: '2G', child: Text('2G')),
-                    DropdownMenuItem(value: '3G', child: Text('3G')),
-                  ],
-                  onChanged: (value) => setState(() => _rampEzSubFilter = (value == null || value.isEmpty) ? null : value),
-                ),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(height: 4),
-        if (filtered.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(16.0),
-            child: Center(child: Text('No ramps found.')),
-          )
-        else
-          ...filtered.map((item) {
-            return Card(
-              margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: ListTile(
-                title: Text(getRampDisplayTitle(item), style: const TextStyle(fontWeight: FontWeight.w600)),
-                subtitle: Text('Condition: ${item.condition}'),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.remove_circle_outline),
-                      color: Colors.red.shade400,
-                      onPressed: () => _adjustCcalsQty(item, -1),
-                    ),
-                    SizedBox(
-                      width: 36,
-                      child: Text(
-                        '${item.ccalsQty}',
-                        textAlign: TextAlign.center,
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.add_circle_outline),
-                      color: kBrandGreen,
-                      onPressed: () => _adjustCcalsQty(item, 1),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }).toList(),
-        const SizedBox(height: 80),
-      ],
+  void _openCcalsAdjustment() async {
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => const JobAdjustmentScreen(isCcals: true),
+      ),
     );
-  }
-
-  Future<void> _adjustCcalsQty(RampItem item, int delta) async {
-    final prefs = await SharedPreferences.getInstance();
-    final userName = prefs.getString('user_name') ?? '';
-    final userEmail = prefs.getString('user_email') ?? '';
-    try {
-      await sbSubmitCcalsAdjustment(
-        userEmail: userEmail,
-        userName: userName,
-        jobRef: 'CCALS',
-        items: [
-          {
-            'item_id': item.itemId,
-            'delta': delta,
-            'condition': item.condition,
-            'brand': item.brand,
-            'size': item.size,
-          }
-        ],
-      );
-      _refresh();
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error adjusting CCALS qty: $e')),
-        );
-      }
-    }
+    if (result == true) _refresh();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Row(
-          children: [
-            const Text('Ramps'),
-            const SizedBox(width: 12),
-            SegmentedButton<bool>(
-              segments: const [
-                ButtonSegment(value: false, label: Text('Able Home')),
-                ButtonSegment(value: true, label: Text('CCALS')),
-              ],
-              selected: {_showCcals},
-              onSelectionChanged: (sel) => setState(() => _showCcals = sel.first),
-              style: ButtonStyle(
-                visualDensity: VisualDensity.compact,
-                textStyle: WidgetStateProperty.all(const TextStyle(fontSize: 12)),
-                backgroundColor: WidgetStateProperty.resolveWith((states) {
-                  if (states.contains(WidgetState.selected)) return Colors.white;
-                  return Colors.white.withValues(alpha: 0.2);
-                }),
-                foregroundColor: WidgetStateProperty.resolveWith((states) {
-                  if (states.contains(WidgetState.selected)) return kBrandGreen;
-                  return Colors.white.withValues(alpha: 0.8);
-                }),
-              ),
-            ),
-          ],
-        ),
+        title: const Text('Ramps Inventory'),
         actions: [
           IconButton(
             icon: const Icon(Icons.history),
@@ -5766,7 +5533,32 @@ class _RampsScreenState extends State<RampsScreen> {
           ),
         ],
       ),
-      body: FutureBuilder<InventoryData>(
+      body: Column(
+        children: [
+          // Pool toggle — lives in body so it doesn't fight the AppBar on mobile
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(value: false, label: Text('Able Home')),
+                ButtonSegment(value: true, label: Text('CCALS')),
+              ],
+              selected: {_showCcals},
+              onSelectionChanged: (sel) => setState(() => _showCcals = sel.first),
+              style: ButtonStyle(
+                backgroundColor: WidgetStateProperty.resolveWith((states) {
+                  if (states.contains(WidgetState.selected)) return kBrandGreen;
+                  return null;
+                }),
+                foregroundColor: WidgetStateProperty.resolveWith((states) {
+                  if (states.contains(WidgetState.selected)) return Colors.white;
+                  return null;
+                }),
+              ),
+            ),
+          ),
+          Expanded(
+            child: FutureBuilder<InventoryData>(
         future: _future,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.waiting) {
@@ -5828,7 +5620,7 @@ class _RampsScreenState extends State<RampsScreen> {
                       setState(() { _future = sbFetchInventory(); });
                       await _future;
                     },
-                    child: _buildCcalsRampsList(ramps, rampBrands),
+                    child: _buildRampsList(ramps, rampBrands, isCcals: true),
                   ),
                 ),
               ],
@@ -5870,9 +5662,12 @@ class _RampsScreenState extends State<RampsScreen> {
             ],
           );
         },
+            ),
+          ),
+        ],
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
-      floatingActionButton: _showCcals ? null : Padding(
+      floatingActionButton: Padding(
         padding: const EdgeInsets.only(bottom: 12.0),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -5880,20 +5675,21 @@ class _RampsScreenState extends State<RampsScreen> {
             const SizedBox(width: 16),
             FloatingActionButton.extended(
               heroTag: 'job_adjustment_fab_ramps',
-              onPressed: _openJobAdjustment,
+              onPressed: _showCcals ? _openCcalsAdjustment : _openJobAdjustment,
               backgroundColor: kBrandGreen,
               foregroundColor: Colors.white,
               icon: const Icon(Icons.swap_horiz),
-              label: const Text('Job Adjustment'),
+              label: Text(_showCcals ? 'CCALS Adjustment' : 'Job Adjustment'),
             ),
-            FloatingActionButton.extended(
-              heroTag: 'full_check_fab_ramps',
-              onPressed: _openFullCheck,
-              backgroundColor: kBrandGreen,
-              foregroundColor: Colors.white,
-              icon: const Icon(Icons.fact_check),
-              label: const Text('Full Check'),
-            ),
+            if (!_showCcals)
+              FloatingActionButton.extended(
+                heroTag: 'full_check_fab_ramps',
+                onPressed: _openFullCheck,
+                backgroundColor: kBrandGreen,
+                foregroundColor: Colors.white,
+                icon: const Icon(Icons.fact_check),
+                label: const Text('Full Check'),
+              ),
             const SizedBox(width: 16),
           ],
         ),
@@ -6202,10 +5998,14 @@ class JobAdjustmentScreen extends StatefulWidget {
   /// Which tab to open first. 0 = Install (default), 1 = Removal.
   final int initialTabIndex;
 
+  /// When true, adjustments apply to the CCALS pool (ccals_qty) instead of Able Home (current_qty).
+  final bool isCcals;
+
   const JobAdjustmentScreen({
     super.key,
     this.initialJobRef,
     this.initialTabIndex = 0,
+    this.isCcals = false,
   });
 
   @override
@@ -6338,16 +6138,25 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
         return;
       }
 
-      await sbSubmitJobAdjustment(
-        userEmail: userEmail,
-        userName: userName,
-        jobRef: _jobRef.trim(),
-        items: items,
-      );
+      if (widget.isCcals) {
+        await sbSubmitCcalsAdjustment(
+          userEmail: userEmail,
+          userName: userName,
+          jobRef: _jobRef.trim(),
+          items: items,
+        );
+      } else {
+        await sbSubmitJobAdjustment(
+          userEmail: userEmail,
+          userName: userName,
+          jobRef: _jobRef.trim(),
+          items: items,
+        );
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Job adjustment submitted')),
+        SnackBar(content: Text(widget.isCcals ? 'CCALS adjustment submitted' : 'Job adjustment submitted')),
       );
       Navigator.of(context).pop(true);
     } catch (e) {
@@ -6430,6 +6239,7 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
                 final controllerValue = _quantities[key] ?? '';
                 final controller = TextEditingController(text: controllerValue);
 
+                final displayQty = widget.isCcals ? item.ccalsQty : item.currentQty;
                 return Card(
                   margin:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
@@ -6438,7 +6248,7 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
                     subtitle: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Current $condition: ${item.currentQty}'),
+                        Text('${widget.isCcals ? 'CCALS' : 'Current'} $condition: $displayQty'),
                         TextField(
                           keyboardType: TextInputType.number,
                           decoration: const InputDecoration(
@@ -6467,7 +6277,7 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Job Adjustment – Ramps'),
+        title: Text(widget.isCcals ? 'CCALS Adjustment' : 'Job Adjustment – Ramps'),
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
@@ -7132,7 +6942,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                                                 if (l.railType == 'Curved')
                                                   _StatusPill(label: 'Curved', color: Colors.purple.shade600),
                                                 if (l.acquisitionSource.isNotEmpty)
-                                                  _StatusPill(label: l.acquisitionSource, color: Colors.blueGrey.shade500),
+                                                  _StatusPill(label: l.acquisitionSource, color: Colors.indigo.shade400),
                                               ],
                                             ),
                                           ],
@@ -7173,7 +6983,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
     required List<String> conditions,
     required List<String> sortOptions,
   }) {
-    const sources = ['VA', 'CCALS', 'Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other'];
+    const sources = ['VA', 'Private Pay'];
     const railTypes = ['Straight', 'Curved'];
 
     return Column(
@@ -7282,7 +7092,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                   Expanded(
                     child: _buildCompactDropdown(
                       value: _sourceFilter,
-                      hint: 'Source',
+                      hint: 'Job Type',
                       items: sources,
                       onChanged: (value) => setState(() => _sourceFilter = value),
                     ),
@@ -9462,7 +9272,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   String _preppedStatus = 'Needs prepping';
   String _cleanBatteriesStatus = '';
   String _railType = 'Straight';
-  String? _acquisitionSource;
+  String? _acquisitionSource = 'Private Pay';
 
   final _serialController = TextEditingController();
   final _binNumberController = TextEditingController();
@@ -9504,7 +9314,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
           : 'Needs prepping';
       _cleanBatteriesStatus = existing.cleanBatteriesStatus;
       _railType = existing.railType.isEmpty ? 'Straight' : existing.railType;
-      _acquisitionSource = existing.acquisitionSource.isEmpty ? null : existing.acquisitionSource;
+      _acquisitionSource = existing.acquisitionSource.isEmpty ? 'Private Pay' : existing.acquisitionSource;
     }
 
     _loadInventory();
@@ -10003,21 +9813,15 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
               ],
             ),
             const SizedBox(height: 12),
-            // Acquisition source dropdown
+            // Job type (payer) dropdown
             DropdownButtonFormField<String>(
               value: _acquisitionSource,
               items: const [
                 DropdownMenuItem(value: 'VA', child: Text('VA')),
-                DropdownMenuItem(value: 'CCALS', child: Text('CCALS')),
-                DropdownMenuItem(value: 'Web Lead', child: Text('Web Lead')),
-                DropdownMenuItem(value: 'Call-in', child: Text('Call-in')),
-                DropdownMenuItem(value: 'Navicare', child: Text('Navicare')),
-                DropdownMenuItem(value: 'Angi Lead', child: Text('Angi Lead')),
-                DropdownMenuItem(value: 'Home Advisor', child: Text('Home Advisor')),
-                DropdownMenuItem(value: 'Other', child: Text('Other')),
+                DropdownMenuItem(value: 'Private Pay', child: Text('Private Pay')),
               ],
               decoration: const InputDecoration(
-                labelText: 'Source (optional)',
+                labelText: 'Job Type (optional)',
                 border: OutlineInputBorder(),
               ),
               onChanged: (value) => setState(() => _acquisitionSource = value),
@@ -11349,6 +11153,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
 
   String? _jobType;
   bool _savingJobType = false;
+  String? _eventSource;
+  bool _savingSource = false;
   List<LiftRecord> _linkedLifts = [];
   bool _loadingMeta = true;
   bool _savingLift = false;
@@ -11409,6 +11215,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     if (!mounted) return;
     setState(() {
       _jobType = jobType;
+      _eventSource = meta['source'] as String?;
       _linkedLifts = lifts;
       _loadingMeta = false;
       _eventPhotoUrls = photos;
@@ -11943,6 +11750,39 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                   ],
                 ),
               if (_savingJobType)
+                const Padding(
+                  padding: EdgeInsets.only(left: 8),
+                  child: SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+
+          // Lead source row
+          Row(
+            children: [
+              Icon(Icons.source_outlined, size: 16, color: Colors.grey[500]),
+              const SizedBox(width: 6),
+              Text('Source:', style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+              const SizedBox(width: 8),
+              DropdownButton<String>(
+                value: const ['Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other'].contains(_eventSource)
+                    ? _eventSource : null,
+                hint: Text('Set source', style: TextStyle(color: Colors.grey[500], fontSize: 13)),
+                underline: const SizedBox(),
+                isDense: true,
+                items: [
+                  const DropdownMenuItem(value: null, child: Text('— None —', style: TextStyle(color: Colors.grey))),
+                  ...['Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other']
+                      .map((s) => DropdownMenuItem(value: s, child: Text(s, style: const TextStyle(fontSize: 13)))),
+                ],
+                onChanged: _savingSource ? null : (val) async {
+                  setState(() { _eventSource = val; _savingSource = true; });
+                  await sbSetEventSource(widget.event.id, val);
+                  if (mounted) setState(() => _savingSource = false);
+                },
+              ),
+              if (_savingSource)
                 const Padding(
                   padding: EdgeInsets.only(left: 8),
                   child: SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2)),

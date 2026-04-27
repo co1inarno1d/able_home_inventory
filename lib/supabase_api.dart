@@ -1286,7 +1286,7 @@ Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
   final rows = await _sb
       .from('app_config')
       .select('key, value')
-      .or('key.eq.event_job_type_$eventId,key.eq.event_lift_$eventId');
+      .or('key.eq.event_job_type_$eventId,key.eq.event_lift_$eventId,key.eq.event_source_$eventId');
   final map = {for (final r in rows as List) r['key'] as String: r['value'] as String?};
   final liftRaw = map['event_lift_$eventId'];
   List<String> liftIds = [];
@@ -1306,7 +1306,20 @@ Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
   return {
     'job_type': map['event_job_type_$eventId'],
     'lift_ids': liftIds,
+    'source': map['event_source_$eventId'],
   };
+}
+
+Future<void> sbSetEventSource(String eventId, String? source) async {
+  final key = 'event_source_$eventId';
+  if (source == null || source.isEmpty) {
+    await _sb.from('app_config').delete().eq('key', key);
+  } else {
+    await _sb.from('app_config').upsert(
+      {'key': key, 'value': source, 'updated_at': DateTime.now().toIso8601String()},
+      onConflict: 'key',
+    );
+  }
 }
 
 Future<void> sbSetEventJobType(String eventId, String? jobType) async {
@@ -1348,7 +1361,7 @@ Future<Map<String, Map<String, dynamic>>> sbGetAllEventMeta() async {
   final rows = await _sb
       .from('app_config')
       .select('key, value')
-      .or('key.like.event_job_type_%,key.like.event_lift_%');
+      .or('key.like.event_job_type_%,key.like.event_lift_%,key.like.event_source_%');
   final result = <String, Map<String, dynamic>>{};
   for (final r in rows as List) {
     final key = r['key'] as String;
@@ -1361,11 +1374,16 @@ Future<Map<String, Map<String, dynamic>>> sbGetAllEventMeta() async {
     } else if (key.startsWith('event_lift_')) {
       eventId = key.substring('event_lift_'.length);
       field = 'lift_ids';
+    } else if (key.startsWith('event_source_')) {
+      eventId = key.substring('event_source_'.length);
+      field = 'source';
     }
     if (eventId == null || field == null) continue;
-    result.putIfAbsent(eventId, () => {'job_type': null, 'lift_ids': <String>[]});
+    result.putIfAbsent(eventId, () => {'job_type': null, 'lift_ids': <String>[], 'source': null});
     if (field == 'job_type') {
       result[eventId]!['job_type'] = value;
+    } else if (field == 'source') {
+      result[eventId]!['source'] = value;
     } else if (field == 'lift_ids' && value != null && value.isNotEmpty) {
       try {
         final decoded = jsonDecode(value);
