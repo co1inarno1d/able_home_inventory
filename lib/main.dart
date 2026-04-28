@@ -65,6 +65,46 @@ bool eventIsRampJob(QbtScheduleEvent event) {
   return combined.contains('ramp');
 }
 
+/// Infer job type from a schedule event title.
+/// Returns one of: 'Install', 'Removal', 'Service', 'Schedule Service',
+/// 'Schedule Removal', 'Eval', or null (unknown/untracked).
+String? inferJobTypeFromTitle(String title) {
+  final t = title.toLowerCase();
+
+  // Evals / measures / assessments → not a trackable job
+  if (t.contains('eval') || t.contains('measure') || t.contains('assessment')) {
+    return 'Eval';
+  }
+
+  // Scheduling notes: "set up …" or "schedule …" at the start
+  final isSetupNote = t.startsWith('set up') ||
+      t.startsWith('set-up') ||
+      t.startsWith('schedule ');
+  if (isSetupNote) {
+    if (t.contains('service') || t.contains('annual')) return 'Schedule Service';
+    if (t.contains('removal') || t.contains('remove')) return 'Schedule Removal';
+    return null; // other setup notes (ramp rental setup, etc.) — ignore
+  }
+
+  // Explicit installs
+  if (t.contains('install')) return 'Install';
+
+  // Explicit removals
+  if (t.contains('removal') || t.contains('remove')) return 'Removal';
+
+  // Ramp installs: "[location] ramp" pattern (no eval/adjustment/meeting)
+  if (t.contains('ramp') &&
+      !t.contains('adjustment') &&
+      !t.contains('meeting')) {
+    return 'Install';
+  }
+
+  // Service calls
+  if (t.contains('service') || t.contains('annual')) return 'Service';
+
+  return null;
+}
+
 /// Convert any Drive URL format to the thumbnail format that Flutter can load.
 /// The /uc?export=view endpoint no longer serves image bytes reliably.
 String normalizeDrivePhotoUrl(String url) {
@@ -3302,15 +3342,6 @@ class _JobsScreenState extends State<JobsScreen>
     }
   }
 
-  /// Infers job type from an event title (Install / Service / Removal only).
-  String? _inferJobTypeFromTitle(String title) {
-    final t = title.toLowerCase();
-    if (t.contains('install')) return 'Install';
-    if (t.contains('removal') || t.contains('remove')) return 'Removal';
-    if (t.contains('service') || t.contains('annual')) return 'Service';
-    return null;
-  }
-
   List<QbtScheduleEvent> _eventsForType(List<String> types) {
     final now = DateTime.now();
     final windowStart = DateTime(now.year, now.month, now.day).subtract(const Duration(days: 7));
@@ -3320,7 +3351,7 @@ class _JobsScreenState extends State<JobsScreen>
       if (eventDate.isBefore(windowStart) || eventDate.isAfter(windowEnd)) return false;
       String? jobType = _allMeta[e.id]?['job_type'] as String?;
       if (jobType == null || jobType.isEmpty) {
-        jobType = _inferJobTypeFromTitle(e.title);
+        jobType = inferJobTypeFromTitle(e.title);
       }
       return jobType != null && types.contains(jobType);
     }).toList();
@@ -3524,7 +3555,7 @@ class _JobsScreenState extends State<JobsScreen>
                       assignedNames: _assignedNames,
                     ),
                     _RemovalsTab(
-                      events: _eventsForType(['Removal']),
+                      events: _eventsForType(['Removal', 'Schedule Removal']),
                       allMeta: _allMeta,
                       completedIds: _completedIds,
                       liftsByEvent: _liftsByEvent,
@@ -3536,7 +3567,7 @@ class _JobsScreenState extends State<JobsScreen>
                       assignedNames: _assignedNames,
                     ),
                     _ServiceTab(
-                      events: _eventsForType(['Service', 'Annual Service']),
+                      events: _eventsForType(['Service', 'Annual Service', 'Schedule Service']),
                       allMeta: _allMeta,
                       completedIds: _completedIds,
                       liftsByEvent: _liftsByEvent,
@@ -3820,6 +3851,96 @@ Widget _jobSectionHeader(String title) {
 }
 
 // -----------------------
+// SCHEDULE NOTE CARD
+// A compact card for "To Be Scheduled" entries with a Convert button.
+// -----------------------
+
+class _ScheduleNoteCard extends StatelessWidget {
+  final QbtScheduleEvent event;
+  final Color color;
+  final String Function(DateTime) formatTime;
+  final String assignedNames;
+  final String convertLabel;
+  final VoidCallback onConvert;
+
+  const _ScheduleNoteCard({
+    required this.event,
+    required this.color,
+    required this.formatTime,
+    required this.assignedNames,
+    required this.convertLabel,
+    required this.onConvert,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final local = event.start.toLocal();
+    final dateStr = '${local.month}/${local.day}/${local.year}';
+    final timeStr = event.allDay ? 'All day' : formatTime(event.start);
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(color: Colors.amber.shade300, width: 1.5),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        child: Row(
+          children: [
+            Container(
+              width: 4,
+              height: 48,
+              decoration: BoxDecoration(
+                color: Colors.amber.shade600,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    event.title,
+                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '$dateStr · $timeStr'
+                    '${assignedNames.isNotEmpty ? ' · $assignedNames' : ''}',
+                    style: const TextStyle(color: Colors.black54, fontSize: 12),
+                  ),
+                  if (event.notes.isNotEmpty)
+                    Text(
+                      event.notes,
+                      style: const TextStyle(color: Colors.black45, fontSize: 12),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: onConvert,
+              style: TextButton.styleFrom(
+                foregroundColor: kBrandGreen,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(convertLabel, style: const TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// -----------------------
 // INSTALLS TAB
 // -----------------------
 
@@ -3914,7 +4035,7 @@ class _InstallsTab extends StatelessWidget {
 // REMOVALS TAB
 // -----------------------
 
-class _RemovalsTab extends StatelessWidget {
+class _RemovalsTab extends StatefulWidget {
   final List<QbtScheduleEvent> events;
   final Map<String, Map<String, dynamic>> allMeta;
   final Set<String> completedIds;
@@ -3940,24 +4061,110 @@ class _RemovalsTab extends StatelessWidget {
   });
 
   @override
+  State<_RemovalsTab> createState() => _RemovalsTabState();
+}
+
+class _RemovalsTabState extends State<_RemovalsTab> {
+  String _resolvedJobType(QbtScheduleEvent e) {
+    final jt = widget.allMeta[e.id]?['job_type'] as String?;
+    if (jt != null && jt.isNotEmpty) return jt;
+    return inferJobTypeFromTitle(e.title) ?? '';
+  }
+
+  Future<void> _convertToRemoval(BuildContext context, QbtScheduleEvent event) async {
+    final prefs = await SharedPreferences.getInstance();
+    final userEmail = prefs.getString('user_email') ?? '';
+    final userName = prefs.getString('user_name') ?? '';
+
+    final nameCtrl = TextEditingController(text: event.title);
+    final addrCtrl = TextEditingController(text: event.location);
+    final phoneCtrl = TextEditingController();
+    final notesCtrl = TextEditingController(text: event.notes);
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Convert to Removal'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Customer name')),
+              const SizedBox(height: 8),
+              TextField(controller: addrCtrl, decoration: const InputDecoration(labelText: 'Address')),
+              const SizedBox(height: 8),
+              TextField(controller: phoneCtrl, decoration: const InputDecoration(labelText: 'Phone')),
+              const SizedBox(height: 8),
+              TextField(controller: notesCtrl, decoration: const InputDecoration(labelText: 'Notes'), maxLines: 3),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+            child: const Text('Create Removal'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    await sbUpsertRemovalJob(
+      userEmail: userEmail,
+      userName: userName,
+      customerName: nameCtrl.text.trim(),
+      address: addrCtrl.text.trim(),
+      phone: phoneCtrl.text.trim(),
+      liftType: '',
+      notes: notesCtrl.text.trim(),
+    );
+    // Upgrade the event's job type so it shows as an actual removal
+    await sbSetEventJobType(event.id, 'Removal');
+    await widget.onRefresh();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final now = DateTime.now();
     final oneWeekAgo = now.subtract(const Duration(days: 7));
     final oneWeekAhead = now.add(const Duration(days: 7));
-    final pending = events
-        .where((e) => !completedIds.contains(e.id) && !e.start.isAfter(oneWeekAhead))
+
+    final toSchedule = widget.events
+        .where((e) => !widget.completedIds.contains(e.id) && _resolvedJobType(e) == 'Schedule Removal')
         .toList()
       ..sort((a, b) => a.start.compareTo(b.start));
-    final completed = events
-        .where((e) => completedIds.contains(e.id) && e.start.isAfter(oneWeekAgo))
+    final pending = widget.events
+        .where((e) => !widget.completedIds.contains(e.id) &&
+            !e.start.isAfter(oneWeekAhead) &&
+            _resolvedJobType(e) != 'Schedule Removal')
+        .toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
+    final completed = widget.events
+        .where((e) => widget.completedIds.contains(e.id) &&
+            e.start.isAfter(oneWeekAgo) &&
+            _resolvedJobType(e) != 'Schedule Removal')
         .toList()
       ..sort((a, b) => b.start.compareTo(a.start));
 
     return RefreshIndicator(
-      onRefresh: onRefresh,
+      onRefresh: widget.onRefresh,
       child: ListView(
         padding: const EdgeInsets.fromLTRB(8, 8, 8, 80),
         children: [
+          if (toSchedule.isNotEmpty) ...[
+            _jobSectionHeader('To Be Scheduled (${toSchedule.length})'),
+            ...toSchedule.map((e) => _ScheduleNoteCard(
+                  event: e,
+                  color: widget.parseEventColor(e),
+                  formatTime: widget.formatTime,
+                  assignedNames: widget.assignedNames(e),
+                  convertLabel: 'Convert to Removal',
+                  onConvert: () => _convertToRemoval(context, e),
+                )),
+            const SizedBox(height: 8),
+          ],
           _jobSectionHeader('Pending Removals (${pending.length})'),
           if (pending.isEmpty)
             const Padding(
@@ -3969,11 +4176,11 @@ class _RemovalsTab extends StatelessWidget {
             ...pending.map((e) => _JobEventCard(
                   event: e,
                   completed: false,
-                  lifts: liftsByEvent[e.id] ?? [],
-                  assignedNames: assignedNames(e),
-                  color: parseEventColor(e),
-                  formatTime: formatTime,
-                  onToggleComplete: onToggleComplete,
+                  lifts: widget.liftsByEvent[e.id] ?? [],
+                  assignedNames: widget.assignedNames(e),
+                  color: widget.parseEventColor(e),
+                  formatTime: widget.formatTime,
+                  onToggleComplete: widget.onToggleComplete,
                   completedLabel: 'Removed',
                 )),
           const SizedBox(height: 8),
@@ -3988,11 +4195,11 @@ class _RemovalsTab extends StatelessWidget {
             ...completed.map((e) => _JobEventCard(
                   event: e,
                   completed: true,
-                  lifts: liftsByEvent[e.id] ?? [],
-                  assignedNames: assignedNames(e),
-                  color: parseEventColor(e),
-                  formatTime: formatTime,
-                  onToggleComplete: onToggleComplete,
+                  lifts: widget.liftsByEvent[e.id] ?? [],
+                  assignedNames: widget.assignedNames(e),
+                  color: widget.parseEventColor(e),
+                  formatTime: widget.formatTime,
+                  onToggleComplete: widget.onToggleComplete,
                   completedLabel: 'Removed',
                 )),
         ],
@@ -4037,6 +4244,68 @@ class _ServiceTab extends StatefulWidget {
 class _ServiceTabState extends State<_ServiceTab> {
   String _search = '';
 
+  String _resolvedJobType(QbtScheduleEvent e) {
+    final jt = widget.allMeta[e.id]?['job_type'] as String?;
+    if (jt != null && jt.isNotEmpty) return jt;
+    return inferJobTypeFromTitle(e.title) ?? '';
+  }
+
+  Future<void> _convertToServiceCall(BuildContext context, QbtScheduleEvent event) async {
+    final prefs = await SharedPreferences.getInstance();
+    final userEmail = prefs.getString('user_email') ?? '';
+    final userName = prefs.getString('user_name') ?? '';
+
+    final nameCtrl = TextEditingController(text: event.title);
+    final addrCtrl = TextEditingController(text: event.location);
+    final phoneCtrl = TextEditingController();
+    final notesCtrl = TextEditingController(text: event.notes);
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Convert to Service Call'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Customer name')),
+              const SizedBox(height: 8),
+              TextField(controller: addrCtrl, decoration: const InputDecoration(labelText: 'Address')),
+              const SizedBox(height: 8),
+              TextField(controller: phoneCtrl, decoration: const InputDecoration(labelText: 'Phone')),
+              const SizedBox(height: 8),
+              TextField(controller: notesCtrl, decoration: const InputDecoration(labelText: 'Notes'), maxLines: 3),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+            child: const Text('Create Service Call'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    await sbUpsertServiceJob(
+      userEmail: userEmail,
+      userName: userName,
+      jobType: 'Service Call',
+      customerName: nameCtrl.text.trim(),
+      address: addrCtrl.text.trim(),
+      phone: phoneCtrl.text.trim(),
+      liftType: '',
+      dateRequested: formatDate(DateTime.now()),
+      notes: notesCtrl.text.trim(),
+    );
+    // Upgrade the event's job type so it shows as an actual service call
+    await sbSetEventJobType(event.id, 'Service');
+    await widget.onRefresh();
+  }
+
   @override
   Widget build(BuildContext context) {
     final allEvents = widget.events;
@@ -4049,12 +4318,22 @@ class _ServiceTabState extends State<_ServiceTab> {
     final now = DateTime.now();
     final oneWeekAgo = now.subtract(const Duration(days: 7));
     final oneWeekAhead = now.add(const Duration(days: 7));
+
+    // Split: scheduling notes vs actual service calls
+    final toSchedule = filtered
+        .where((e) => !widget.completedIds.contains(e.id) && _resolvedJobType(e) == 'Schedule Service')
+        .toList()
+      ..sort((a, b) => a.start.compareTo(b.start));
     final pending = filtered
-        .where((e) => !widget.completedIds.contains(e.id) && !e.start.isAfter(oneWeekAhead))
+        .where((e) => !widget.completedIds.contains(e.id) &&
+            !e.start.isAfter(oneWeekAhead) &&
+            _resolvedJobType(e) != 'Schedule Service')
         .toList()
       ..sort((a, b) => a.start.compareTo(b.start));
     final completed = filtered
-        .where((e) => widget.completedIds.contains(e.id) && e.start.isAfter(oneWeekAgo))
+        .where((e) => widget.completedIds.contains(e.id) &&
+            e.start.isAfter(oneWeekAgo) &&
+            _resolvedJobType(e) != 'Schedule Service')
         .toList()
       ..sort((a, b) => b.start.compareTo(a.start));
 
@@ -4085,6 +4364,18 @@ class _ServiceTabState extends State<_ServiceTab> {
             child: ListView(
               padding: const EdgeInsets.fromLTRB(8, 4, 8, 80),
               children: [
+                if (toSchedule.isNotEmpty) ...[
+                  _jobSectionHeader('To Be Scheduled (${toSchedule.length})'),
+                  ...toSchedule.map((e) => _ScheduleNoteCard(
+                        event: e,
+                        color: widget.parseEventColor(e),
+                        formatTime: widget.formatTime,
+                        assignedNames: widget.assignedNames(e),
+                        convertLabel: 'Convert to Service Call',
+                        onConvert: () => _convertToServiceCall(context, e),
+                      )),
+                  const SizedBox(height: 8),
+                ],
                 _jobSectionHeader('Pending Service (${pending.length})'),
                 if (pending.isEmpty)
                   const Padding(
@@ -11177,16 +11468,6 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     });
   }
 
-  /// Infers job type from an event title when no type has been manually set.
-  /// Only matches Install, Service, or Removal — the three types common in TSheets titles.
-  String? _inferJobTypeFromTitle(String title) {
-    final t = title.toLowerCase();
-    if (t.contains('install')) return 'Install';
-    if (t.contains('removal') || t.contains('remove')) return 'Removal';
-    if (t.contains('service') || t.contains('annual')) return 'Service';
-    return null;
-  }
-
   Future<void> _loadMeta() async {
     final meta = await sbGetEventMeta(widget.event.id);
     if (!mounted) return;
@@ -11203,7 +11484,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
 
     // If no job type is set, try to infer it from the event title
     if ((jobType == null || jobType.isEmpty) && widget.event.title.isNotEmpty) {
-      final inferred = _inferJobTypeFromTitle(widget.event.title);
+      final inferred = inferJobTypeFromTitle(widget.event.title);
       if (inferred != null) {
         jobType = inferred;
         // Persist the inferred type so it shows correctly everywhere
