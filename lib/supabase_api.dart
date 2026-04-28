@@ -1537,7 +1537,10 @@ Future<void> sbUpdateWebLeadStatus({
 }
 
 Future<void> sbDeleteWebLead({required int id}) async {
-  await _sb.from('web_leads').delete().eq('id', id);
+  final res = await _sb.from('web_leads').delete().eq('id', id).select();
+  if ((res as List).isEmpty) {
+    throw Exception('Delete blocked — check Supabase RLS policy on web_leads');
+  }
 }
 
 // ---------------------------------------------------------------------------

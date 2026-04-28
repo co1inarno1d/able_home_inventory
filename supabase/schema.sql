@@ -273,6 +273,20 @@ create index if not exists removal_jobs_lift_id_idx on removal_jobs(lift_id);
 -- from annuals;
 
 -- ---------------------------------------------------------------
+-- WEB LEADS (submitted via website contact/hero forms)
+-- ---------------------------------------------------------------
+create table if not exists web_leads (
+  id          bigserial primary key,
+  created_at  timestamptz default now(),
+  name        text not null default '',
+  email       text not null default '',
+  phone       text not null default '',
+  message     text not null default '',
+  source      text not null default 'contact_form',  -- 'hero_form' | 'contact_form'
+  status      text not null default 'New'            -- 'New' | 'Contacted' | 'Closed'
+);
+
+-- ---------------------------------------------------------------
 -- SCHEDULE HISTORY (archived TSheets events older than 7 days)
 -- ---------------------------------------------------------------
 create table if not exists schedule_history (
@@ -339,6 +353,7 @@ alter table annuals_history      enable row level security;
 alter table service_jobs         enable row level security;
 alter table removal_jobs         enable row level security;
 alter table schedule_history     enable row level security;
+alter table web_leads            enable row level security;
 
 -- Allow all operations for anonymous users (internal tool)
 create policy "allow_all" on lifts                for all using (true) with check (true);
@@ -354,6 +369,7 @@ create policy "allow_all" on annuals_history      for all using (true) with chec
 create policy "allow_all" on service_jobs         for all using (true) with check (true);
 create policy "allow_all" on removal_jobs         for all using (true) with check (true);
 create policy "allow_all" on schedule_history     for all using (true) with check (true);
+create policy "allow_all" on web_leads            for all using (true) with check (true);
 
 -- ---------------------------------------------------------------
 -- STORAGE BUCKET POLICIES (for lift photos)

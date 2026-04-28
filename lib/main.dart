@@ -5320,7 +5320,8 @@ class _RampsScreenState extends State<RampsScreen> {
   }
 
   Widget _buildRampsList(List<RampItem> items, List<String> brands, {bool isCcals = false}) {
-    final condition = _rampConditionFilter;
+    // CCALS only tracks used ramps; ignore condition filter and min logic
+    final condition = isCcals ? 'Used' : _rampConditionFilter;
     final belowMinOnly = _showBelowMinOnlyRamps && !isCcals;
     final brandFilter = _rampBrandFilter;
     final ezSub = _rampEzSubFilter; // '2G', '3G', or null
@@ -5379,10 +5380,11 @@ class _RampsScreenState extends State<RampsScreen> {
             },
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12.0),
-          child: _buildFilterRow(),
-        ),
+        if (!isCcals)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12.0),
+            child: _buildFilterRow(),
+          ),
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 4.0),
           child: Row(
@@ -5437,7 +5439,7 @@ class _RampsScreenState extends State<RampsScreen> {
         else
           ...filtered.map((item) {
             final belowMin =
-                item.currentQty < item.minQty && item.minQty > 0;
+                !isCcals && item.currentQty < item.minQty && item.minQty > 0;
 
             final displayQty = isCcals ? item.ccalsQty : item.currentQty;
             return Card(
@@ -5538,7 +5540,9 @@ class _RampsScreenState extends State<RampsScreen> {
           // Pool toggle — lives in body so it doesn't fight the AppBar on mobile
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-            child: SegmentedButton<bool>(
+            child: SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<bool>(
               segments: const [
                 ButtonSegment(value: false, label: Text('Able Home')),
                 ButtonSegment(value: true, label: Text('CCALS')),
@@ -5555,6 +5559,7 @@ class _RampsScreenState extends State<RampsScreen> {
                   return null;
                 }),
               ),
+            ),
             ),
           ),
           Expanded(
@@ -5580,14 +5585,10 @@ class _RampsScreenState extends State<RampsScreen> {
               (ramps.map((e) => e.brand).toSet().toList()..sort());
 
           if (_showCcals) {
-            // CCALS pool view
+            // CCALS pool view — used ramps only
             int ccalsTotalUnits = 0;
-            int ccalsNewUnits = 0;
-            int ccalsUsedUnits = 0;
             for (final r in ramps) {
-              ccalsTotalUnits += r.ccalsQty;
-              if (r.condition == 'New') ccalsNewUnits += r.ccalsQty;
-              if (r.condition == 'Used') ccalsUsedUnits += r.ccalsQty;
+              if (r.condition == 'Used') ccalsTotalUnits += r.ccalsQty;
             }
             return Column(
               children: [
@@ -5604,9 +5605,7 @@ class _RampsScreenState extends State<RampsScreen> {
                           const SizedBox(height: 4),
                           Row(
                             children: [
-                              Expanded(child: _SummaryStat(label: 'Total units', value: ccalsTotalUnits.toString())),
-                              Expanded(child: _SummaryStat(label: 'New', value: ccalsNewUnits.toString())),
-                              Expanded(child: _SummaryStat(label: 'Used', value: ccalsUsedUnits.toString())),
+                              Expanded(child: _SummaryStat(label: 'Total units (used)', value: ccalsTotalUnits.toString())),
                             ],
                           ),
                         ],
@@ -6820,10 +6819,10 @@ class _LiftsScreenState extends State<LiftsScreen> {
 
                         return GestureDetector(
                           onTap: () async {
-                            final deleted = await Navigator.of(context).push<bool>(
-                              MaterialPageRoute(builder: (_) => LiftDetailScreen(lift: l)),
+                            final saved = await Navigator.of(context).push<bool>(
+                              MaterialPageRoute(builder: (_) => LiftFormScreen(existing: l)),
                             );
-                            if (deleted == true) _refresh();
+                            if (saved == true) _refresh();
                           },
                           child: Container(
                             margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
