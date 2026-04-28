@@ -11668,14 +11668,16 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     if (result is LiftRecord) {
       await _linkLift(result);
     } else if (result is _AddNewLiftSentinel) {
-      // Open the lift form; after saving, link the newest lift to this event
-      await Navigator.of(context).push(
+      // Open the lift form; only link if the user actually saved
+      final saved = await Navigator.of(context).push<bool>(
         MaterialPageRoute(builder: (_) => const LiftFormScreen()),
       );
       if (!mounted) return;
-      final newest = await sbFetchNewestLift();
-      if (!mounted) return;
-      if (newest != null) await _linkLift(newest);
+      if (saved == true) {
+        final newest = await sbFetchNewestLift();
+        if (!mounted) return;
+        if (newest != null) await _linkLift(newest);
+      }
     }
   }
 
