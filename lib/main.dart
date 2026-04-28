@@ -3342,18 +3342,23 @@ class _JobsScreenState extends State<JobsScreen>
     }
   }
 
+  // Schedule-note types don't have a meaningful date window — show all unconverted ones.
+  static const _scheduleNoteTypes = {'Schedule Service', 'Schedule Removal'};
+
   List<QbtScheduleEvent> _eventsForType(List<String> types) {
     final now = DateTime.now();
     final windowStart = DateTime(now.year, now.month, now.day).subtract(const Duration(days: 7));
     final windowEnd = DateTime(now.year, now.month, now.day, 23, 59, 59).add(const Duration(days: 7));
     return _events.where((e) {
-      final eventDate = e.start.toLocal();
-      if (eventDate.isBefore(windowStart) || eventDate.isAfter(windowEnd)) return false;
       String? jobType = _allMeta[e.id]?['job_type'] as String?;
       if (jobType == null || jobType.isEmpty) {
         jobType = inferJobTypeFromTitle(e.title);
       }
-      return jobType != null && types.contains(jobType);
+      if (jobType == null || !types.contains(jobType)) return false;
+      // Schedule notes: skip date window — show until converted
+      if (_scheduleNoteTypes.contains(jobType)) return true;
+      final eventDate = e.start.toLocal();
+      return !eventDate.isBefore(windowStart) && !eventDate.isAfter(windowEnd);
     }).toList();
   }
 
