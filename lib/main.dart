@@ -9583,6 +9583,44 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
 
   bool get _isEditing => widget.existing != null;
 
+  Future<void> _deleteLift() async {
+    final lift = widget.existing!;
+    final label = [lift.brand, lift.series].where((s) => s.isNotEmpty).join(' ');
+    final snLabel = lift.serialNumber.isNotEmpty ? ' (SN: ${lift.serialNumber})' : '';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete lift?'),
+        content: Text(
+          'Permanently delete $label$snLabel from the system?\n\nThis cannot be undone.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade600, foregroundColor: Colors.white),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await sbDeleteLift(
+        liftId: lift.liftId,
+        userEmail: prefs.getString('user_email') ?? '',
+        userName: prefs.getString('user_name') ?? '',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Lift deleted')));
+        Navigator.of(context).pop(true);
+      }
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -9998,6 +10036,15 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Text(title),
+        actions: [
+          if (_isEditing)
+            IconButton(
+              icon: const Icon(Icons.delete_outline),
+              color: Colors.red.shade300,
+              tooltip: 'Delete lift',
+              onPressed: _deleteLift,
+            ),
+        ],
       ),
       body: Form(
         key: _formKey,
