@@ -1069,6 +1069,7 @@ Future<void> sbUpsertServiceJob({
   required String userName,
   String? jobId,
   required String jobType,
+  String title = '',
   required String customerName,
   required String address,
   required String phone,
@@ -1086,6 +1087,7 @@ Future<void> sbUpsertServiceJob({
   final data = <String, dynamic>{
     'job_id': resolvedId,
     'job_type': jobType,
+    'title': title,
     'customer_name': customerName,
     'address': address,
     'phone': phone,
@@ -1144,6 +1146,7 @@ Future<void> sbUpsertRemovalJob({
   required String userEmail,
   required String userName,
   String? jobId,
+  String title = '',
   required String customerName,
   required String address,
   required String phone,
@@ -1159,6 +1162,7 @@ Future<void> sbUpsertRemovalJob({
 
   final data = <String, dynamic>{
     'job_id': resolvedId,
+    'title': title,
     'customer_name': customerName,
     'address': address,
     'phone': phone,

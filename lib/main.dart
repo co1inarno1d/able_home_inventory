@@ -1732,6 +1732,7 @@ class ServiceJobRecord {
   final String jobId;
   final String jobType;
   final String status;
+  final String title;
   final String customerName;
   final String address;
   final String phone;
@@ -1746,6 +1747,7 @@ class ServiceJobRecord {
     required this.jobId,
     required this.jobType,
     required this.status,
+    this.title = '',
     required this.customerName,
     required this.address,
     required this.phone,
@@ -1763,6 +1765,7 @@ class ServiceJobRecord {
       jobId: s(json['job_id']),
       jobType: s(json['job_type']),
       status: s(json['status']),
+      title: s(json['title']),
       customerName: s(json['customer_name']),
       address: s(json['address']),
       phone: s(json['phone']),
@@ -1783,6 +1786,7 @@ class ServiceJobRecord {
 class RemovalJobRecord {
   final String jobId;
   final String status;
+  final String title;
   final String customerName;
   final String address;
   final String phone;
@@ -1795,6 +1799,7 @@ class RemovalJobRecord {
   RemovalJobRecord({
     required this.jobId,
     required this.status,
+    this.title = '',
     required this.customerName,
     required this.address,
     required this.phone,
@@ -1810,6 +1815,7 @@ class RemovalJobRecord {
     return RemovalJobRecord(
       jobId: s(json['job_id']),
       status: s(json['status']),
+      title: s(json['title']),
       customerName: s(json['customer_name']),
       address: s(json['address']),
       phone: s(json['phone']),
@@ -4444,6 +4450,7 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
   final _formKey = GlobalKey<FormState>();
   bool _saving = false;
 
+  late final TextEditingController _titleController;
   late final TextEditingController _nameController;
   late final TextEditingController _addressController;
   late final TextEditingController _phoneController;
@@ -4459,6 +4466,7 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
   void initState() {
     super.initState();
     final e = widget.existing;
+    _titleController = TextEditingController(text: e?.title ?? '');
     _nameController = TextEditingController(text: e?.customerName ?? '');
     _addressController = TextEditingController(text: e?.address ?? '');
     _phoneController = TextEditingController(text: e?.phone ?? '');
@@ -4475,6 +4483,7 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
 
   @override
   void dispose() {
+    _titleController.dispose();
     _nameController.dispose();
     _addressController.dispose();
     _phoneController.dispose();
@@ -4556,6 +4565,7 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
         userEmail: prefs.getString('user_email') ?? '',
         userName: prefs.getString('user_name') ?? '',
         jobId: widget.existing?.jobId,
+        title: _titleController.text.trim(),
         customerName: _nameController.text.trim(),
         address: _addressController.text.trim(),
         phone: _phoneController.text.trim(),
@@ -4590,11 +4600,18 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
           child: Column(
             children: [
               TextFormField(
-                controller: _nameController,
+                controller: _titleController,
                 decoration: const InputDecoration(
-                    labelText: 'Customer name *', border: OutlineInputBorder()),
+                    labelText: 'Title *', border: OutlineInputBorder()),
+                textCapitalization: TextCapitalization.sentences,
                 validator: (v) =>
                     v == null || v.trim().isEmpty ? 'Required' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _nameController,
+                decoration: const InputDecoration(
+                    labelText: 'Customer name', border: OutlineInputBorder()),
               ),
               const SizedBox(height: 12),
               TextFormField(
@@ -4935,6 +4952,7 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
   bool _saving = false;
   String _jobType = 'Service';
 
+  late final TextEditingController _titleController;
   late final TextEditingController _nameController;
   late final TextEditingController _addressController;
   late final TextEditingController _phoneController;
@@ -4952,6 +4970,7 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
     super.initState();
     final e = widget.existing;
     _jobType = e?.jobType ?? 'Service';
+    _titleController = TextEditingController(text: e?.title ?? '');
     _nameController = TextEditingController(text: e?.customerName ?? '');
     _addressController = TextEditingController(text: e?.address ?? '');
     _phoneController = TextEditingController(text: e?.phone ?? '');
@@ -4970,6 +4989,7 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
 
   @override
   void dispose() {
+    _titleController.dispose();
     _nameController.dispose();
     _addressController.dispose();
     _phoneController.dispose();
@@ -5053,6 +5073,7 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
         userName: prefs.getString('user_name') ?? '',
         jobId: widget.existing?.jobId,
         jobType: _jobType,
+        title: _titleController.text.trim(),
         customerName: _nameController.text.trim(),
         address: _addressController.text.trim(),
         phone: _phoneController.text.trim(),
@@ -5100,11 +5121,18 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
               ),
               const SizedBox(height: 12),
               TextFormField(
-                controller: _nameController,
+                controller: _titleController,
                 decoration: const InputDecoration(
-                    labelText: 'Customer name *', border: OutlineInputBorder()),
+                    labelText: 'Title *', border: OutlineInputBorder()),
+                textCapitalization: TextCapitalization.sentences,
                 validator: (v) =>
                     v == null || v.trim().isEmpty ? 'Required' : null,
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _nameController,
+                decoration: const InputDecoration(
+                    labelText: 'Customer name', border: OutlineInputBorder()),
               ),
               const SizedBox(height: 12),
               TextFormField(
@@ -12816,14 +12844,14 @@ class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
       users = {};
     }
     if (!mounted) return;
-    final title = '${job.jobType} — ${job.customerName}';
+    final prefillTitle = job.title.isNotEmpty ? job.title : '${job.jobType} — ${job.customerName}';
     final liftIds = job.liftId.isNotEmpty ? [job.liftId] : <String>[];
     final saved = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => ScheduleEventFormScreen(
           users: users,
           initialDate: DateTime.now(),
-          prefillTitle: title,
+          prefillTitle: prefillTitle,
           prefillLocation: job.address,
           prefillNotes: job.notes,
           prefillJobType: job.jobType,
@@ -12844,14 +12872,14 @@ class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
       users = {};
     }
     if (!mounted) return;
-    final title = 'Removal — ${job.customerName}';
+    final prefillTitle = job.title.isNotEmpty ? job.title : 'Removal — ${job.customerName}';
     final liftIds = job.liftId.isNotEmpty ? [job.liftId] : <String>[];
     final saved = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
         builder: (_) => ScheduleEventFormScreen(
           users: users,
           initialDate: DateTime.now(),
-          prefillTitle: title,
+          prefillTitle: prefillTitle,
           prefillLocation: job.address,
           prefillNotes: job.notes,
           prefillJobType: 'Removal',
@@ -12921,6 +12949,10 @@ class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
                         );
                         if (saved == true && mounted) _load();
                       },
+                      onDelete: (job) async {
+                        await sbDeleteServiceJob(jobId: job.jobId);
+                        _load();
+                      },
                     ),
                     _QueueRemovalTab(
                       jobs: _removalJobs,
@@ -12931,6 +12963,10 @@ class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
                           MaterialPageRoute(builder: (_) => RemovalJobFormScreen(existing: job)),
                         );
                         if (saved == true && mounted) _load();
+                      },
+                      onDelete: (job) async {
+                        await sbDeleteRemovalJob(jobId: job.jobId);
+                        _load();
                       },
                     ),
                     _WebLeadsTab(leads: _webLeads, onRefresh: _load),
@@ -12945,12 +12981,14 @@ class _QueueServiceTab extends StatelessWidget {
   final Future<void> Function() onRefresh;
   final Future<void> Function(ServiceJobRecord) onSchedule;
   final Future<void> Function(ServiceJobRecord) onEdit;
+  final Future<void> Function(ServiceJobRecord) onDelete;
 
   const _QueueServiceTab({
     required this.jobs,
     required this.onRefresh,
     required this.onSchedule,
     required this.onEdit,
+    required this.onDelete,
   });
 
   @override
@@ -12973,6 +13011,7 @@ class _QueueServiceTab extends StatelessWidget {
           job: jobs[i],
           onSchedule: () => onSchedule(jobs[i]),
           onEdit: () => onEdit(jobs[i]),
+          onDelete: () => onDelete(jobs[i]),
         ),
       ),
     );
@@ -12984,12 +13023,14 @@ class _QueueRemovalTab extends StatelessWidget {
   final Future<void> Function() onRefresh;
   final Future<void> Function(RemovalJobRecord) onSchedule;
   final Future<void> Function(RemovalJobRecord) onEdit;
+  final Future<void> Function(RemovalJobRecord) onDelete;
 
   const _QueueRemovalTab({
     required this.jobs,
     required this.onRefresh,
     required this.onSchedule,
     required this.onEdit,
+    required this.onDelete,
   });
 
   @override
@@ -13012,6 +13053,7 @@ class _QueueRemovalTab extends StatelessWidget {
           job: jobs[i],
           onSchedule: () => onSchedule(jobs[i]),
           onEdit: () => onEdit(jobs[i]),
+          onDelete: () => onDelete(jobs[i]),
         ),
       ),
     );
@@ -13020,6 +13062,7 @@ class _QueueRemovalTab extends StatelessWidget {
 
 class _QueueCard extends StatefulWidget {
   final String jobType;
+  final String title;
   final String customerName;
   final String address;
   final String phone;
@@ -13028,9 +13071,11 @@ class _QueueCard extends StatefulWidget {
   final String dateRequested; // empty for removals
   final VoidCallback onEdit;
   final Future<void> Function() onSchedule;
+  final Future<void> Function() onDelete;
 
   const _QueueCard({
     required this.jobType,
+    required this.title,
     required this.customerName,
     required this.address,
     required this.phone,
@@ -13039,15 +13084,18 @@ class _QueueCard extends StatefulWidget {
     required this.dateRequested,
     required this.onEdit,
     required this.onSchedule,
+    required this.onDelete,
   });
 
   factory _QueueCard.service({
     required ServiceJobRecord job,
     required VoidCallback onEdit,
     required Future<void> Function() onSchedule,
+    required Future<void> Function() onDelete,
   }) {
     return _QueueCard(
       jobType: job.jobType.isEmpty ? 'Service' : job.jobType,
+      title: job.title,
       customerName: job.customerName,
       address: job.address,
       phone: job.phone,
@@ -13058,6 +13106,7 @@ class _QueueCard extends StatefulWidget {
           : '',
       onEdit: onEdit,
       onSchedule: onSchedule,
+      onDelete: onDelete,
     );
   }
 
@@ -13065,9 +13114,11 @@ class _QueueCard extends StatefulWidget {
     required RemovalJobRecord job,
     required VoidCallback onEdit,
     required Future<void> Function() onSchedule,
+    required Future<void> Function() onDelete,
   }) {
     return _QueueCard(
       jobType: 'Removal',
+      title: job.title,
       customerName: job.customerName,
       address: job.address,
       phone: job.phone,
@@ -13076,6 +13127,7 @@ class _QueueCard extends StatefulWidget {
       dateRequested: '',
       onEdit: onEdit,
       onSchedule: onSchedule,
+      onDelete: onDelete,
     );
   }
 
@@ -13095,6 +13147,26 @@ class _QueueCardState extends State<_QueueCard> {
     }
   }
 
+  Future<void> _handleDelete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Delete entry?'),
+        content: Text('Remove "${widget.title.isNotEmpty ? widget.title : widget.customerName}" from the queue? This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade600, foregroundColor: Colors.white),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await widget.onDelete();
+  }
+
   Future<void> _launchPhone() async {
     if (widget.phone.isEmpty) return;
     final uri = Uri(scheme: 'tel', path: widget.phone);
@@ -13103,6 +13175,7 @@ class _QueueCardState extends State<_QueueCard> {
 
   @override
   Widget build(BuildContext context) {
+    final headline = widget.title.isNotEmpty ? widget.title : widget.customerName;
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
@@ -13127,7 +13200,7 @@ class _QueueCardState extends State<_QueueCard> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Job type chip + customer name
+                    // Job type chip + title headline
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -13149,7 +13222,7 @@ class _QueueCardState extends State<_QueueCard> {
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
-                            widget.customerName,
+                            headline,
                             style: GoogleFonts.nunito(
                               fontSize: 16,
                               fontWeight: FontWeight.w700,
@@ -13158,8 +13231,21 @@ class _QueueCardState extends State<_QueueCard> {
                         ),
                       ],
                     ),
+                    if (widget.customerName.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(Icons.person_outline, size: 14, color: Colors.grey[600]),
+                          const SizedBox(width: 4),
+                          Text(
+                            widget.customerName,
+                            style: GoogleFonts.nunito(fontSize: 13, color: Colors.grey[700]),
+                          ),
+                        ],
+                      ),
+                    ],
                     if (widget.address.isNotEmpty) ...[
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 2),
                       Row(
                         children: [
                           Icon(Icons.location_on_outlined, size: 14, color: Colors.grey[600]),
@@ -13248,6 +13334,15 @@ class _QueueCardState extends State<_QueueCard> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.end,
                       children: [
+                        IconButton(
+                          onPressed: _handleDelete,
+                          icon: const Icon(Icons.delete_outline, size: 20),
+                          color: Colors.red.shade400,
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          tooltip: 'Delete',
+                        ),
+                        const SizedBox(width: 8),
                         OutlinedButton(
                           onPressed: widget.onEdit,
                           style: OutlinedButton.styleFrom(
@@ -13356,6 +13451,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
     '#EF6C00', // orange
     '#43A047', // green
     '#888888', // grey
+    '#F44336', // red (Steve)
     '#8A2731', // dark red
     '#9C27B0', // purple
     '#827717', // olive/dark yellow

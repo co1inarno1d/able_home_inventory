@@ -218,6 +218,7 @@ create table if not exists service_jobs (
   job_type        text not null default 'Service',  -- 'Annual Service', 'Service'
   status          text not null default 'Needs Scheduling',
                                       -- 'Needs Scheduling', 'Scheduled', 'Completed'
+  title           text not null default '',
   customer_name   text,
   address         text,
   phone           text,
@@ -242,6 +243,7 @@ create table if not exists removal_jobs (
   job_id          text unique not null,
   status          text not null default 'Needs Scheduling',
                                       -- 'Needs Scheduling', 'Scheduled', 'Completed'
+  title           text not null default '',
   customer_name   text,
   address         text,
   phone           text,
