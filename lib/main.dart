@@ -5230,39 +5230,16 @@ class _HomeShellState extends State<HomeShell> {
     const LiftsScreen(),
     const RampsScreen(),
     const ScheduleScreen(),
-    // const JobsScreen(), // Hidden — re-enable to restore Jobs tab
+    const SchedulingQueueScreen(),
     const PrepScreen(),
     // const PickupListScreen(), // Hidden for now - not currently in use
   ];
-
-  List<WebLeadRecord> _webLeads = [];
-  int get _newLeadCount => _webLeads.where((l) => l.status == 'New').length;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadWebLeads();
-  }
-
-  Future<void> _loadWebLeads() async {
-    try {
-      final leads = await sbFetchWebLeads();
-      if (mounted) setState(() => _webLeads = leads);
-    } catch (_) {}
-  }
 
   void _onItemTapped(int index) {
     if (_selectedIndex == index) return;
     setState(() {
       _selectedIndex = index;
     });
-  }
-
-  void _openWebLeads() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => const WebLeadsScreen()),
-    );
-    _loadWebLeads();
   }
 
   @override
@@ -5275,8 +5252,6 @@ class _HomeShellState extends State<HomeShell> {
       bottomNavigationBar: _FloatingNavBar(
         currentIndex: _selectedIndex,
         onTap: _onItemTapped,
-        newLeadCount: _newLeadCount,
-        onBellTap: _openWebLeads,
       ),
     );
   }
@@ -5285,14 +5260,10 @@ class _HomeShellState extends State<HomeShell> {
 class _FloatingNavBar extends StatelessWidget {
   final int currentIndex;
   final ValueChanged<int> onTap;
-  final int newLeadCount;
-  final VoidCallback onBellTap;
 
   const _FloatingNavBar({
     required this.currentIndex,
     required this.onTap,
-    this.newLeadCount = 0,
-    required this.onBellTap,
   });
 
   @override
@@ -5301,7 +5272,7 @@ class _FloatingNavBar extends StatelessWidget {
       (Icons.list_alt_rounded, 'Lifts'),
       (Icons.stairs_rounded, 'Ramps'),
       (Icons.calendar_month_rounded, 'Schedule'),
-      // (Icons.work_rounded, 'Jobs'), // Hidden — re-enable to restore Jobs tab
+      (Icons.pending_actions_rounded, 'Queue'),
       (Icons.build_rounded, 'Prep'),
     ];
 
@@ -5348,38 +5319,6 @@ class _FloatingNavBar extends StatelessWidget {
                   ),
                 );
               }),
-              // Web leads bell
-              GestureDetector(
-                onTap: onBellTap,
-                behavior: HitTestBehavior.opaque,
-                child: SizedBox(
-                  width: 52,
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          Icon(Icons.notifications_outlined, size: 22,
-                              color: Colors.white.withValues(alpha: 0.7)),
-                          if (newLeadCount > 0)
-                            Positioned(
-                              top: -4, right: -6,
-                              child: Container(
-                                padding: const EdgeInsets.all(3),
-                                decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle),
-                                child: Text('$newLeadCount',
-                                    style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w700)),
-                              ),
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      Text('Leads', style: GoogleFonts.nunito(fontSize: 10, color: Colors.white.withValues(alpha: 0.7))),
-                    ],
-                  ),
-                ),
-              ),
             ],
           ),
         ),
@@ -12772,6 +12711,586 @@ class _LinkLiftToJobScreenState extends State<_LinkLiftToJobScreen> {
 }
 
 // ---------------------------------------------------------------------------
+// Scheduling Queue — pending service calls and removals
+// ---------------------------------------------------------------------------
+
+class SchedulingQueueScreen extends StatefulWidget {
+  const SchedulingQueueScreen({super.key});
+
+  @override
+  State<SchedulingQueueScreen> createState() => _SchedulingQueueScreenState();
+}
+
+class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+
+  List<ServiceJobRecord> _serviceJobs = [];
+  List<RemovalJobRecord> _removalJobs = [];
+  List<WebLeadRecord> _webLeads = [];
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 3, vsync: this);
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final results = await Future.wait([
+        sbFetchServiceJobs(),
+        sbFetchRemovalJobs(),
+        sbFetchWebLeads(),
+      ]);
+      if (!mounted) return;
+      final serviceJobs = (results[0] as List<ServiceJobRecord>)
+          .where((j) => j.status == 'Needs Scheduling')
+          .toList();
+      final removalJobs = (results[1] as List<RemovalJobRecord>)
+          .where((j) => j.status == 'Needs Scheduling')
+          .toList();
+      setState(() {
+        _serviceJobs = serviceJobs;
+        _removalJobs = removalJobs;
+        _webLeads = results[2] as List<WebLeadRecord>;
+        _loading = false;
+      });
+    } catch (e) {
+      if (mounted) setState(() { _loading = false; _error = e.toString(); });
+    }
+  }
+
+  Future<void> _openAddSheet() async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.build_outlined),
+              title: const Text('Service Call'),
+              onTap: () => Navigator.pop(ctx, 'service'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.move_to_inbox_outlined),
+              title: const Text('Removal'),
+              onTap: () => Navigator.pop(ctx, 'removal'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    if (choice == 'service') {
+      final saved = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(builder: (_) => const ServiceJobFormScreen()),
+      );
+      if (saved == true && mounted) _load();
+    } else {
+      final saved = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(builder: (_) => const RemovalJobFormScreen()),
+      );
+      if (saved == true && mounted) _load();
+    }
+  }
+
+  Future<void> _scheduleServiceJob(ServiceJobRecord job) async {
+    Map<String, QbtUser> users;
+    try {
+      users = await qbtFetchUsers();
+    } catch (_) {
+      users = {};
+    }
+    if (!mounted) return;
+    final title = '${job.jobType} — ${job.customerName}';
+    final liftIds = job.liftId.isNotEmpty ? [job.liftId] : <String>[];
+    final saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => ScheduleEventFormScreen(
+          users: users,
+          initialDate: DateTime.now(),
+          prefillTitle: title,
+          prefillLocation: job.address,
+          prefillNotes: job.notes,
+          prefillJobType: job.jobType,
+          prefillLiftIds: liftIds,
+          sourceJobId: job.jobId,
+          sourceJobTable: 'service_jobs',
+        ),
+      ),
+    );
+    if (saved == true && mounted) _load();
+  }
+
+  Future<void> _scheduleRemovalJob(RemovalJobRecord job) async {
+    Map<String, QbtUser> users;
+    try {
+      users = await qbtFetchUsers();
+    } catch (_) {
+      users = {};
+    }
+    if (!mounted) return;
+    final title = 'Removal — ${job.customerName}';
+    final liftIds = job.liftId.isNotEmpty ? [job.liftId] : <String>[];
+    final saved = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => ScheduleEventFormScreen(
+          users: users,
+          initialDate: DateTime.now(),
+          prefillTitle: title,
+          prefillLocation: job.address,
+          prefillNotes: job.notes,
+          prefillJobType: 'Removal',
+          prefillLiftIds: liftIds,
+          sourceJobId: job.jobId,
+          sourceJobTable: 'removal_jobs',
+        ),
+      ),
+    );
+    if (saved == true && mounted) _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final svcCount = _serviceJobs.length;
+    final remCount = _removalJobs.length;
+    final newLeadCount = _webLeads.where((l) => l.status == 'New').length;
+
+    return Scaffold(
+      appBar: AppBar(
+        backgroundColor: kBrandGreenDark,
+        foregroundColor: Colors.white,
+        title: const Text('Queue'),
+        bottom: TabBar(
+          controller: _tabController,
+          indicatorColor: Colors.white,
+          labelColor: Colors.white,
+          unselectedLabelColor: Colors.white60,
+          labelStyle: GoogleFonts.nunito(fontWeight: FontWeight.w700),
+          unselectedLabelStyle: GoogleFonts.nunito(),
+          tabs: [
+            Tab(text: svcCount > 0 ? 'Service ($svcCount)' : 'Service'),
+            Tab(text: remCount > 0 ? 'Removals ($remCount)' : 'Removals'),
+            Tab(text: newLeadCount > 0 ? 'Leads ($newLeadCount new)' : 'Leads'),
+          ],
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        backgroundColor: kBrandGreen,
+        foregroundColor: Colors.white,
+        onPressed: _openAddSheet,
+        child: const Icon(Icons.add),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text('Error: $_error'),
+                      const SizedBox(height: 12),
+                      ElevatedButton(onPressed: _load, child: const Text('Retry')),
+                    ],
+                  ),
+                )
+              : TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _QueueServiceTab(
+                      jobs: _serviceJobs,
+                      onRefresh: _load,
+                      onSchedule: _scheduleServiceJob,
+                      onEdit: (job) async {
+                        final saved = await Navigator.of(context).push<bool>(
+                          MaterialPageRoute(builder: (_) => ServiceJobFormScreen(existing: job)),
+                        );
+                        if (saved == true && mounted) _load();
+                      },
+                    ),
+                    _QueueRemovalTab(
+                      jobs: _removalJobs,
+                      onRefresh: _load,
+                      onSchedule: _scheduleRemovalJob,
+                      onEdit: (job) async {
+                        final saved = await Navigator.of(context).push<bool>(
+                          MaterialPageRoute(builder: (_) => RemovalJobFormScreen(existing: job)),
+                        );
+                        if (saved == true && mounted) _load();
+                      },
+                    ),
+                    _WebLeadsTab(leads: _webLeads, onRefresh: _load),
+                  ],
+                ),
+    );
+  }
+}
+
+class _QueueServiceTab extends StatelessWidget {
+  final List<ServiceJobRecord> jobs;
+  final Future<void> Function() onRefresh;
+  final Future<void> Function(ServiceJobRecord) onSchedule;
+  final Future<void> Function(ServiceJobRecord) onEdit;
+
+  const _QueueServiceTab({
+    required this.jobs,
+    required this.onRefresh,
+    required this.onSchedule,
+    required this.onEdit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (jobs.isEmpty) {
+      return const Center(
+        child: Text(
+          'No service calls waiting to be scheduled.',
+          style: TextStyle(color: Colors.grey),
+          textAlign: TextAlign.center,
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: onRefresh,
+      child: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 80),
+        itemCount: jobs.length,
+        itemBuilder: (ctx, i) => _QueueCard.service(
+          job: jobs[i],
+          onSchedule: () => onSchedule(jobs[i]),
+          onEdit: () => onEdit(jobs[i]),
+        ),
+      ),
+    );
+  }
+}
+
+class _QueueRemovalTab extends StatelessWidget {
+  final List<RemovalJobRecord> jobs;
+  final Future<void> Function() onRefresh;
+  final Future<void> Function(RemovalJobRecord) onSchedule;
+  final Future<void> Function(RemovalJobRecord) onEdit;
+
+  const _QueueRemovalTab({
+    required this.jobs,
+    required this.onRefresh,
+    required this.onSchedule,
+    required this.onEdit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (jobs.isEmpty) {
+      return const Center(
+        child: Text(
+          'No removals waiting to be scheduled.',
+          style: TextStyle(color: Colors.grey),
+          textAlign: TextAlign.center,
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: onRefresh,
+      child: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 80),
+        itemCount: jobs.length,
+        itemBuilder: (ctx, i) => _QueueCard.removal(
+          job: jobs[i],
+          onSchedule: () => onSchedule(jobs[i]),
+          onEdit: () => onEdit(jobs[i]),
+        ),
+      ),
+    );
+  }
+}
+
+class _QueueCard extends StatefulWidget {
+  final String jobType;
+  final String customerName;
+  final String address;
+  final String phone;
+  final String liftLabel;
+  final String notes;
+  final String dateRequested; // empty for removals
+  final VoidCallback onEdit;
+  final Future<void> Function() onSchedule;
+
+  const _QueueCard({
+    required this.jobType,
+    required this.customerName,
+    required this.address,
+    required this.phone,
+    required this.liftLabel,
+    required this.notes,
+    required this.dateRequested,
+    required this.onEdit,
+    required this.onSchedule,
+  });
+
+  factory _QueueCard.service({
+    required ServiceJobRecord job,
+    required VoidCallback onEdit,
+    required Future<void> Function() onSchedule,
+  }) {
+    return _QueueCard(
+      jobType: job.jobType.isEmpty ? 'Service' : job.jobType,
+      customerName: job.customerName,
+      address: job.address,
+      phone: job.phone,
+      liftLabel: job.liftType,
+      notes: job.notes,
+      dateRequested: job.dateRequested.isNotEmpty
+          ? normalizeDateDisplay(job.dateRequested)
+          : '',
+      onEdit: onEdit,
+      onSchedule: onSchedule,
+    );
+  }
+
+  factory _QueueCard.removal({
+    required RemovalJobRecord job,
+    required VoidCallback onEdit,
+    required Future<void> Function() onSchedule,
+  }) {
+    return _QueueCard(
+      jobType: 'Removal',
+      customerName: job.customerName,
+      address: job.address,
+      phone: job.phone,
+      liftLabel: job.liftType,
+      notes: job.notes,
+      dateRequested: '',
+      onEdit: onEdit,
+      onSchedule: onSchedule,
+    );
+  }
+
+  @override
+  State<_QueueCard> createState() => _QueueCardState();
+}
+
+class _QueueCardState extends State<_QueueCard> {
+  bool _scheduling = false;
+
+  Future<void> _handleSchedule() async {
+    setState(() => _scheduling = true);
+    try {
+      await widget.onSchedule();
+    } finally {
+      if (mounted) setState(() => _scheduling = false);
+    }
+  }
+
+  Future<void> _launchPhone() async {
+    if (widget.phone.isEmpty) return;
+    final uri = Uri(scheme: 'tel', path: widget.phone);
+    if (await canLaunchUrl(uri)) await launchUrl(uri);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      child: IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Colored left accent bar
+            Container(
+              width: 5,
+              decoration: BoxDecoration(
+                color: kBrandGreen,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(10),
+                  bottomLeft: Radius.circular(10),
+                ),
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Job type chip + customer name
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: kBrandGreen.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            widget.jobType,
+                            style: GoogleFonts.nunito(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: kBrandGreenDark,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            widget.customerName,
+                            style: GoogleFonts.nunito(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (widget.address.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          Icon(Icons.location_on_outlined, size: 14, color: Colors.grey[600]),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              widget.address,
+                              style: GoogleFonts.nunito(fontSize: 13, color: Colors.grey[700]),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (widget.phone.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      GestureDetector(
+                        onTap: _launchPhone,
+                        child: Row(
+                          children: [
+                            Icon(Icons.phone_outlined, size: 14, color: Colors.grey[600]),
+                            const SizedBox(width: 4),
+                            Text(
+                              widget.phone,
+                              style: GoogleFonts.nunito(
+                                fontSize: 13,
+                                color: kBrandGreen,
+                                decoration: TextDecoration.underline,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    if (widget.liftLabel.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.grey[100],
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: Colors.grey[300]!),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.stairs_rounded, size: 13, color: Colors.grey[600]),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                widget.liftLabel,
+                                style: GoogleFonts.nunito(fontSize: 12, color: Colors.grey[700]),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    if (widget.dateRequested.isNotEmpty) ...[
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          Icon(Icons.calendar_today_outlined, size: 13, color: Colors.grey[500]),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Requested: ${widget.dateRequested}',
+                            style: GoogleFonts.nunito(fontSize: 12, color: Colors.grey[600]),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (widget.notes.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        widget.notes,
+                        style: GoogleFonts.nunito(
+                          fontSize: 12,
+                          fontStyle: FontStyle.italic,
+                          color: Colors.grey[600],
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                    const SizedBox(height: 10),
+                    // Action buttons
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        OutlinedButton(
+                          onPressed: widget.onEdit,
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: kBrandGreen,
+                            side: const BorderSide(color: kBrandGreen),
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: Text('Edit', style: GoogleFonts.nunito(fontWeight: FontWeight.w600)),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton.icon(
+                          onPressed: _scheduling ? null : _handleSchedule,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: kBrandGreen,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          icon: _scheduling
+                              ? const SizedBox(
+                                  width: 14, height: 14,
+                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                )
+                              : const Icon(Icons.calendar_month_rounded, size: 16),
+                          label: Text('Schedule', style: GoogleFonts.nunito(fontWeight: FontWeight.w700)),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Schedule event form (create + edit)
 // ---------------------------------------------------------------------------
 
@@ -12780,11 +13299,27 @@ class ScheduleEventFormScreen extends StatefulWidget {
   final QbtScheduleEvent? existingEvent;
   final DateTime initialDate;
 
+  // Pre-fill values when creating from a queue job
+  final String? prefillTitle;
+  final String? prefillLocation;
+  final String? prefillNotes;
+  final String? prefillJobType;
+  final List<String>? prefillLiftIds;
+  final String? sourceJobId;
+  final String? sourceJobTable; // 'service_jobs' or 'removal_jobs'
+
   const ScheduleEventFormScreen({
     super.key,
     required this.users,
     this.existingEvent,
     required this.initialDate,
+    this.prefillTitle,
+    this.prefillLocation,
+    this.prefillNotes,
+    this.prefillJobType,
+    this.prefillLiftIds,
+    this.sourceJobId,
+    this.sourceJobTable,
   });
 
   @override
@@ -12834,9 +13369,9 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
   void initState() {
     super.initState();
     final e = widget.existingEvent;
-    _titleCtrl = TextEditingController(text: e?.title ?? '');
-    _notesCtrl = TextEditingController(text: e?.notes ?? '');
-    _locationCtrl = TextEditingController(text: e?.location ?? '');
+    _titleCtrl = TextEditingController(text: e?.title ?? widget.prefillTitle ?? '');
+    _notesCtrl = TextEditingController(text: e?.notes ?? widget.prefillNotes ?? '');
+    _locationCtrl = TextEditingController(text: e?.location ?? widget.prefillLocation ?? '');
     _allDay = e?.allDay ?? false;
     _selectedColor = e?.color ?? '#2196F3';
     _selectedUserIds = List.from(e?.assignedUserIds ?? []);
@@ -12855,6 +13390,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
       _date = widget.initialDate;
       _startTime = const TimeOfDay(hour: 8, minute: 0);
       _endTime = const TimeOfDay(hour: 10, minute: 0);
+      if (widget.prefillJobType != null) _jobType = widget.prefillJobType;
     }
   }
 
@@ -12942,6 +13478,25 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
       }
       // Persist job type metadata (independent of QBT)
       await sbSetEventJobType(saved.id, _jobType);
+
+      // Link lift IDs and source job when scheduling from the queue
+      final prefillLiftIds = widget.prefillLiftIds ?? [];
+      if (prefillLiftIds.isNotEmpty) {
+        await sbSetEventLiftIds(saved.id, prefillLiftIds);
+      }
+      final srcId = widget.sourceJobId;
+      final srcTable = widget.sourceJobTable;
+      if (srcId != null && srcId.isNotEmpty && srcTable != null) {
+        await sbSetEventSource(saved.id, '$srcTable:$srcId');
+        final scheduledDateStr =
+            '${_date.month.toString().padLeft(2, '0')}/${_date.day.toString().padLeft(2, '0')}/${_date.year}';
+        if (srcTable == 'service_jobs') {
+          await sbUpdateServiceJobStatus(jobId: srcId, status: 'Scheduled', scheduledDate: scheduledDateStr);
+        } else {
+          await sbUpdateRemovalJobStatus(jobId: srcId, status: 'Scheduled', scheduledDate: scheduledDateStr);
+        }
+      }
+
       if (!mounted) return;
       Navigator.pop(context, true);
     } catch (e) {
