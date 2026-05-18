@@ -12943,7 +12943,7 @@ class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
                       jobs: _serviceJobs,
                       onRefresh: _load,
                       onSchedule: _scheduleServiceJob,
-                      onEdit: (job) async {
+                      onTap: (job) async {
                         final saved = await Navigator.of(context).push<bool>(
                           MaterialPageRoute(builder: (_) => ServiceJobFormScreen(existing: job)),
                         );
@@ -12958,7 +12958,7 @@ class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
                       jobs: _removalJobs,
                       onRefresh: _load,
                       onSchedule: _scheduleRemovalJob,
-                      onEdit: (job) async {
+                      onTap: (job) async {
                         final saved = await Navigator.of(context).push<bool>(
                           MaterialPageRoute(builder: (_) => RemovalJobFormScreen(existing: job)),
                         );
@@ -12980,14 +12980,14 @@ class _QueueServiceTab extends StatelessWidget {
   final List<ServiceJobRecord> jobs;
   final Future<void> Function() onRefresh;
   final Future<void> Function(ServiceJobRecord) onSchedule;
-  final Future<void> Function(ServiceJobRecord) onEdit;
+  final Future<void> Function(ServiceJobRecord) onTap;
   final Future<void> Function(ServiceJobRecord) onDelete;
 
   const _QueueServiceTab({
     required this.jobs,
     required this.onRefresh,
     required this.onSchedule,
-    required this.onEdit,
+    required this.onTap,
     required this.onDelete,
   });
 
@@ -13010,7 +13010,7 @@ class _QueueServiceTab extends StatelessWidget {
         itemBuilder: (ctx, i) => _QueueCard.service(
           job: jobs[i],
           onSchedule: () => onSchedule(jobs[i]),
-          onEdit: () => onEdit(jobs[i]),
+          onTap: () => onTap(jobs[i]),
           onDelete: () => onDelete(jobs[i]),
         ),
       ),
@@ -13022,14 +13022,14 @@ class _QueueRemovalTab extends StatelessWidget {
   final List<RemovalJobRecord> jobs;
   final Future<void> Function() onRefresh;
   final Future<void> Function(RemovalJobRecord) onSchedule;
-  final Future<void> Function(RemovalJobRecord) onEdit;
+  final Future<void> Function(RemovalJobRecord) onTap;
   final Future<void> Function(RemovalJobRecord) onDelete;
 
   const _QueueRemovalTab({
     required this.jobs,
     required this.onRefresh,
     required this.onSchedule,
-    required this.onEdit,
+    required this.onTap,
     required this.onDelete,
   });
 
@@ -13052,9 +13052,34 @@ class _QueueRemovalTab extends StatelessWidget {
         itemBuilder: (ctx, i) => _QueueCard.removal(
           job: jobs[i],
           onSchedule: () => onSchedule(jobs[i]),
-          onEdit: () => onEdit(jobs[i]),
+          onTap: () => onTap(jobs[i]),
           onDelete: () => onDelete(jobs[i]),
         ),
+      ),
+    );
+  }
+}
+
+class _JobTypeChip extends StatelessWidget {
+  final String jobType;
+  const _JobTypeChip({required this.jobType});
+
+  @override
+  Widget build(BuildContext context) {
+    final isAnnual = jobType == 'Annual Service';
+    final bg = isAnnual
+        ? const Color(0xFFEF6C00).withValues(alpha: 0.12)
+        : kBrandGreen.withValues(alpha: 0.12);
+    final fg = isAnnual ? const Color(0xFFBF360C) : kBrandGreenDark;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        jobType,
+        style: GoogleFonts.nunito(fontSize: 11, fontWeight: FontWeight.w700, color: fg),
       ),
     );
   }
@@ -13069,7 +13094,7 @@ class _QueueCard extends StatefulWidget {
   final String liftLabel;
   final String notes;
   final String dateRequested; // empty for removals
-  final VoidCallback onEdit;
+  final VoidCallback onTap;
   final Future<void> Function() onSchedule;
   final Future<void> Function() onDelete;
 
@@ -13082,14 +13107,14 @@ class _QueueCard extends StatefulWidget {
     required this.liftLabel,
     required this.notes,
     required this.dateRequested,
-    required this.onEdit,
+    required this.onTap,
     required this.onSchedule,
     required this.onDelete,
   });
 
   factory _QueueCard.service({
     required ServiceJobRecord job,
-    required VoidCallback onEdit,
+    required VoidCallback onTap,
     required Future<void> Function() onSchedule,
     required Future<void> Function() onDelete,
   }) {
@@ -13104,7 +13129,7 @@ class _QueueCard extends StatefulWidget {
       dateRequested: job.dateRequested.isNotEmpty
           ? normalizeDateDisplay(job.dateRequested)
           : '',
-      onEdit: onEdit,
+      onTap: onTap,
       onSchedule: onSchedule,
       onDelete: onDelete,
     );
@@ -13112,7 +13137,7 @@ class _QueueCard extends StatefulWidget {
 
   factory _QueueCard.removal({
     required RemovalJobRecord job,
-    required VoidCallback onEdit,
+    required VoidCallback onTap,
     required Future<void> Function() onSchedule,
     required Future<void> Function() onDelete,
   }) {
@@ -13125,7 +13150,7 @@ class _QueueCard extends StatefulWidget {
       liftLabel: job.liftType,
       notes: job.notes,
       dateRequested: '',
-      onEdit: onEdit,
+      onTap: onTap,
       onSchedule: onSchedule,
       onDelete: onDelete,
     );
@@ -13179,10 +13204,13 @@ class _QueueCardState extends State<_QueueCard> {
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      child: IntrinsicHeight(
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: widget.onTap,
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
             // Colored left accent bar
             Container(
               width: 5,
@@ -13204,21 +13232,7 @@ class _QueueCardState extends State<_QueueCard> {
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: kBrandGreen.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Text(
-                            widget.jobType,
-                            style: GoogleFonts.nunito(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w700,
-                              color: kBrandGreenDark,
-                            ),
-                          ),
-                        ),
+                        _JobTypeChip(jobType: widget.jobType),
                         const SizedBox(width: 8),
                         Expanded(
                           child: Text(
@@ -13325,8 +13339,6 @@ class _QueueCardState extends State<_QueueCard> {
                           fontStyle: FontStyle.italic,
                           color: Colors.grey[600],
                         ),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
                       ),
                     ],
                     const SizedBox(height: 10),
@@ -13341,18 +13353,6 @@ class _QueueCardState extends State<_QueueCard> {
                           padding: EdgeInsets.zero,
                           constraints: const BoxConstraints(),
                           tooltip: 'Delete',
-                        ),
-                        const SizedBox(width: 8),
-                        OutlinedButton(
-                          onPressed: widget.onEdit,
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: kBrandGreen,
-                            side: const BorderSide(color: kBrandGreen),
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                            minimumSize: Size.zero,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          child: Text('Edit', style: GoogleFonts.nunito(fontWeight: FontWeight.w600)),
                         ),
                         const SizedBox(width: 8),
                         ElevatedButton.icon(
@@ -13381,6 +13381,7 @@ class _QueueCardState extends State<_QueueCard> {
           ],
         ),
       ),
+    ),
     );
   }
 }
@@ -13522,6 +13523,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
     final picked = await showTimePicker(
       context: context,
       initialTime: isStart ? _startTime : _endTime,
+      initialEntryMode: TimePickerEntryMode.input,
     );
     if (picked != null) {
       setState(() {

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'main.dart';
 import 'supabase_api.dart';
@@ -139,10 +140,47 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
           final template = snapshot.data!;
           final fields = List<String>.from(template['fields'] ?? []);
           final checklistType = template['checklist_type'] ?? '';
+          final rawGroups = template['option_groups'] as List? ?? [];
+          final optionGroups = rawGroups
+              .map((g) => List<String>.from(g as List))
+              .toList();
+          // Build a fast lookup: field name → which group it belongs to
+          final groupedFields = <String>{};
+          for (final g in optionGroups) {
+            groupedFields.addAll(g);
+          }
 
           // Initialize all fields to false if not already set
           for (final field in fields) {
             _checklistItems.putIfAbsent(field, () => false);
+          }
+
+          // Build the list items: option groups are rendered once (when first member
+          // is encountered); individual fields render as normal checkboxes.
+          final renderedGroups = <List<String>>{};
+          final listItems = <Widget>[];
+          for (final field in fields) {
+            if (groupedFields.contains(field)) {
+              final group = optionGroups.firstWhere((g) => g.contains(field));
+              if (!renderedGroups.contains(group)) {
+                renderedGroups.add(group);
+                listItems.add(_OptionGroupRow(
+                  group: group,
+                  formatFieldName: _formatFieldName,
+                  values: _checklistItems,
+                  onChanged: (f, v) => setState(() => _checklistItems[f] = v),
+                ));
+              }
+            } else {
+              listItems.add(CheckboxListTile(
+                title: Text(_formatFieldName(field)),
+                value: _checklistItems[field] ?? false,
+                onChanged: (value) {
+                  setState(() => _checklistItems[field] = value ?? false);
+                },
+                activeColor: kBrandGreen,
+              ));
+            }
           }
 
           return Column(
@@ -199,18 +237,7 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
                         ],
                       ),
                     ),
-                    ...fields.map((field) {
-                      return CheckboxListTile(
-                        title: Text(_formatFieldName(field)),
-                        value: _checklistItems[field] ?? false,
-                        onChanged: (value) {
-                          setState(() {
-                            _checklistItems[field] = value ?? false;
-                          });
-                        },
-                        activeColor: kBrandGreen,
-                      );
-                    }),
+                    ...listItems,
                     const SizedBox(height: 16),
                     TextField(
                       controller: _notesController,
@@ -269,6 +296,118 @@ class _PrepChecklistFormScreenState extends State<PrepChecklistFormScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+/// Renders a group of 2 fields side-by-side (e.g. Yes/No, T130/T700).
+class _OptionGroupRow extends StatelessWidget {
+  final List<String> group;
+  final String Function(String) formatFieldName;
+  final Map<String, bool> values;
+  final void Function(String field, bool value) onChanged;
+
+  const _OptionGroupRow({
+    required this.group,
+    required this.formatFieldName,
+    required this.values,
+    required this.onChanged,
+  });
+
+  // Derive a shared label from the group members by stripping the differing suffix.
+  String _groupLabel() {
+    if (group.length < 2) return formatFieldName(group.first);
+    // Find common prefix of the two field names
+    final a = group[0].split('_');
+    final b = group[1].split('_');
+    final common = <String>[];
+    for (var i = 0; i < a.length && i < b.length; i++) {
+      if (a[i] == b[i]) {
+        common.add(a[i]);
+      } else {
+        break;
+      }
+    }
+    if (common.isEmpty) return '';
+    // Capitalise each word
+    return common.map((w) => w[0].toUpperCase() + w.substring(1)).join(' ');
+  }
+
+  // Label shown on each individual checkbox button (the part after the common prefix).
+  String _optionLabel(String field) {
+    if (group.length < 2) return formatFieldName(field);
+    final a = group[0].split('_');
+    final b = group[1].split('_');
+    int commonLen = 0;
+    for (var i = 0; i < a.length && i < b.length; i++) {
+      if (a[i] == b[i]) commonLen = i + 1; else break;
+    }
+    final parts = field.split('_').skip(commonLen).toList();
+    if (parts.isEmpty) return formatFieldName(field);
+    return parts.map((w) => w[0].toUpperCase() + w.substring(1)).join(' ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final label = _groupLabel();
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (label.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(left: 16, bottom: 4),
+              child: Text(
+                label,
+                style: GoogleFonts.nunito(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+            ),
+          Row(
+            children: group.map((field) {
+              final checked = values[field] ?? false;
+              return Expanded(
+                child: InkWell(
+                  onTap: () => onChanged(field, !checked),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: checked ? kBrandGreen.withValues(alpha: 0.12) : Colors.grey.shade100,
+                      border: Border.all(
+                        color: checked ? kBrandGreen : Colors.grey.shade300,
+                        width: checked ? 1.5 : 1,
+                      ),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(
+                          checked ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
+                          color: checked ? kBrandGreen : Colors.grey.shade400,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _optionLabel(field),
+                            style: GoogleFonts.nunito(
+                              fontSize: 14,
+                              fontWeight: checked ? FontWeight.w600 : FontWeight.w400,
+                              color: checked ? kBrandGreenDark : Colors.black87,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
       ),
     );
   }

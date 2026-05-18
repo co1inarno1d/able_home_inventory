@@ -1428,7 +1428,8 @@ const Map<String, List<String>> _prepChecklistTemplates = {
     'gear_rack_for_length_of_track',
     'soft_stops_if_needed',
     'extension_brackets_if_needed',
-    'folding_rail_yes_no',
+    'folding_rail_yes',
+    'folding_rail_no',
     'folding_rail_bottom_foot',
     'spacer_end_plate',
     'check_seat_armrests_stay_up',
@@ -1467,7 +1468,8 @@ const Map<String, List<String>> _prepChecklistTemplates = {
   'brooks_acorn': [
     'correct_handed_carriage',
     'correct_handed_seat',
-    'charger_type_130_black_t700_white',
+    'charger_type_130_black',
+    'charger_type_t700_white',
     'correct_num_feet_brackets_hardware_lags',
     'end_plate_covers_top_bottom',
     'remotes_hanging_hooks',
@@ -1483,14 +1485,30 @@ const Map<String, List<String>> _prepChecklistTemplates = {
     'seat_index_plate_cover',
     'hand_winding_wheel',
     'check_seat_armrests_stay_up',
-    'folding_rail_yes_no',
+    'folding_rail_yes',
+    'folding_rail_no',
     't130_remove_h_cam_from_track',
     't700_make_sure_h_cam_installed',
-    'outdoor_yes_no',
+    'outdoor_yes',
+    'outdoor_no',
     'outdoor_box_for_charger',
     'outlet_cover',
     'paperwork',
     'owners_manual',
+  ],
+};
+
+// Groups of fields rendered side-by-side as choices (yes/no, model options, etc.)
+const Map<String, List<List<String>>> _prepChecklistOptionGroups = {
+  'bruno_elan': [
+    ['folding_rail_yes', 'folding_rail_no'],
+  ],
+  'bruno_elite': [],
+  'brooks_acorn': [
+    ['charger_type_130_black', 'charger_type_t700_white'],
+    ['folding_rail_yes', 'folding_rail_no'],
+    ['t130_remove_h_cam_from_track', 't700_make_sure_h_cam_installed'],
+    ['outdoor_yes', 'outdoor_no'],
   ],
 };
 
@@ -1516,6 +1534,7 @@ Map<String, dynamic> sbGetPrepChecklistTemplate({
   return {
     'checklist_type': checklistType,
     'fields': _prepChecklistTemplates[checklistType]!,
+    'option_groups': _prepChecklistOptionGroups[checklistType] ?? [],
   };
 }
 
