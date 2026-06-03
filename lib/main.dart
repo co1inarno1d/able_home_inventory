@@ -66,8 +66,9 @@ bool eventIsRampJob(QbtScheduleEvent event) {
 }
 
 /// Infer job type from a schedule event title.
-/// Returns one of: 'Install', 'Removal', 'Service', 'Schedule Service',
-/// 'Schedule Removal', 'Eval', or null (unknown/untracked).
+/// Returns one of: 'Stairlift Install', 'Stairlift Removal', 'Stairlift Service',
+/// 'Stairlift Annual Service', 'Ramp Install', 'Ramp Removal',
+/// 'Schedule Service', 'Schedule Removal', 'Eval', or null (unknown/untracked).
 String? inferJobTypeFromTitle(String title) {
   final t = title.toLowerCase();
 
@@ -86,21 +87,20 @@ String? inferJobTypeFromTitle(String title) {
     return null; // other setup notes (ramp rental setup, etc.) — ignore
   }
 
+  final hasRamp = t.contains('ramp') && !t.contains('adjustment') && !t.contains('meeting');
+
   // Explicit installs
-  if (t.contains('install')) return 'Install';
+  if (t.contains('install')) return hasRamp ? 'Ramp Install' : 'Stairlift Install';
 
   // Explicit removals
-  if (t.contains('removal') || t.contains('remove')) return 'Removal';
+  if (t.contains('removal') || t.contains('remove')) return hasRamp ? 'Ramp Removal' : 'Stairlift Removal';
 
-  // Ramp installs: "[location] ramp" pattern (no eval/adjustment/meeting)
-  if (t.contains('ramp') &&
-      !t.contains('adjustment') &&
-      !t.contains('meeting')) {
-    return 'Install';
-  }
+  // Ramp jobs with no explicit install/removal keyword
+  if (hasRamp) return 'Ramp Install';
 
   // Service calls
-  if (t.contains('service') || t.contains('annual')) return 'Service';
+  if (t.contains('annual')) return 'Stairlift Annual Service';
+  if (t.contains('service')) return 'Stairlift Service';
 
   return null;
 }
@@ -3407,10 +3407,9 @@ class _JobsScreenState extends State<JobsScreen>
       final jobType = meta?['job_type'] as String?;
       final liftIds = (meta?['lift_ids'] as List?)?.cast<String>() ?? [];
 
-      // Ramp job (install or removal): no linked lifts, but event contains "ramp"
-      final isRampType = jobType == 'Install' || jobType == 'Removal';
-      if (isRampType && liftIds.isEmpty && eventIsRampJob(event) && mounted) {
-        final isInstall = jobType == 'Install';
+      // Ramp job: explicit Ramp Install or Ramp Removal type
+      if ((jobType == 'Ramp Install' || jobType == 'Ramp Removal') && liftIds.isEmpty && mounted) {
+        final isInstall = jobType == 'Ramp Install';
         final confirm = await showDialog<bool>(
           context: context,
           builder: (_) => AlertDialog(
@@ -3453,12 +3452,12 @@ class _JobsScreenState extends State<JobsScreen>
           String dialogTitle = '';
           String dialogBody = '';
           String confirmLabel = '';
-          if (jobType == 'Install') {
+          if (jobType == 'Stairlift Install') {
             newStatus = 'Installed';
             dialogTitle = 'Mark lift as Installed?';
             dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?';
             confirmLabel = 'Mark Installed';
-          } else if (jobType == 'Removal') {
+          } else if (jobType == 'Stairlift Removal') {
             newStatus = 'Removed';
             dialogTitle = 'Mark lift as Removed?';
             dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?';
@@ -3489,8 +3488,8 @@ class _JobsScreenState extends State<JobsScreen>
                 note: 'Marked $newStatus via schedule event: ${event.title}',
               );
             }
-          } else if ((jobType == 'Service' || jobType == 'Annual Service') && mounted) {
-            final serviceType = jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
+          } else if ((jobType == 'Stairlift Service' || jobType == 'Stairlift Annual Service') && mounted) {
+            final serviceType = jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
             final confirm = await showDialog<bool>(
               context: context,
               builder: (_) => AlertDialog(
@@ -3555,7 +3554,7 @@ class _JobsScreenState extends State<JobsScreen>
                   controller: _tabController,
                   children: [
                     _InstallsTab(
-                      events: _eventsForType(['Install']),
+                      events: _eventsForType(['Stairlift Install', 'Ramp Install']),
                       allMeta: _allMeta,
                       completedIds: _completedIds,
                       liftsByEvent: _liftsByEvent,
@@ -3567,7 +3566,7 @@ class _JobsScreenState extends State<JobsScreen>
                       assignedNames: _assignedNames,
                     ),
                     _RemovalsTab(
-                      events: _eventsForType(['Removal', 'Schedule Removal']),
+                      events: _eventsForType(['Stairlift Removal', 'Ramp Removal', 'Schedule Removal']),
                       allMeta: _allMeta,
                       completedIds: _completedIds,
                       liftsByEvent: _liftsByEvent,
@@ -3579,7 +3578,7 @@ class _JobsScreenState extends State<JobsScreen>
                       assignedNames: _assignedNames,
                     ),
                     _ServiceTab(
-                      events: _eventsForType(['Service', 'Annual Service', 'Schedule Service']),
+                      events: _eventsForType(['Stairlift Service', 'Stairlift Annual Service', 'Schedule Service']),
                       allMeta: _allMeta,
                       completedIds: _completedIds,
                       liftsByEvent: _liftsByEvent,
@@ -10856,9 +10855,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       final jobType = meta['job_type'] as String?;
       final liftIds = (meta['lift_ids'] as List<String>?) ?? [];
 
-      final isRampType = jobType == 'Install' || jobType == 'Removal';
-      if (isRampType && liftIds.isEmpty && eventIsRampJob(event) && mounted) {
-        final isInstall = jobType == 'Install';
+      if ((jobType == 'Ramp Install' || jobType == 'Ramp Removal') && liftIds.isEmpty && mounted) {
+        final isInstall = jobType == 'Ramp Install';
         final confirm = await showDialog<bool>(
           context: context,
           builder: (_) => AlertDialog(
@@ -10901,12 +10899,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           String dialogTitle = '';
           String dialogBody = '';
           String confirmLabel = '';
-          if (jobType == 'Install') {
+          if (jobType == 'Stairlift Install') {
             newStatus = 'Installed';
             dialogTitle = 'Mark lift as Installed?';
             dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?';
             confirmLabel = 'Mark Installed';
-          } else if (jobType == 'Removal') {
+          } else if (jobType == 'Stairlift Removal') {
             newStatus = 'Removed';
             dialogTitle = 'Mark lift as Removed?';
             dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?';
@@ -10937,8 +10935,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 note: 'Marked $newStatus via schedule event: ${event.title}',
               );
             }
-          } else if ((jobType == 'Service' || jobType == 'Annual Service') && mounted) {
-            final serviceType = jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
+          } else if ((jobType == 'Stairlift Service' || jobType == 'Stairlift Annual Service') && mounted) {
+            final serviceType = jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
             final confirm = await showDialog<bool>(
               context: context,
               builder: (_) => AlertDialog(
@@ -11634,8 +11632,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     setState(() => _savingLift = true);
     final newIds = [..._linkedLifts.map((l) => l.liftId), lift.liftId];
     await sbSetEventLiftIds(widget.event.id, newIds);
-    // Only set status to Assigned for Install jobs; Service/Removal leave status unchanged
-    if (_jobType == 'Install') {
+    // Only set status to Assigned for stairlift install jobs; Service/Removal leave status unchanged
+    if (_jobType == 'Stairlift Install') {
       final prefs = await SharedPreferences.getInstance();
       await sbMarkLiftStatus(
         liftId: lift.liftId,
@@ -11666,8 +11664,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     setState(() => _savingLift = true);
     final newIds = _linkedLifts.where((l) => l.liftId != lift.liftId).map((l) => l.liftId).toList();
     await sbSetEventLiftIds(widget.event.id, newIds);
-    // Only revert to New when unlinking from an Install job
-    if (_jobType == 'Install') {
+    // Only revert to New when unlinking from a stairlift install job
+    if (_jobType == 'Stairlift Install') {
       final prefs = await SharedPreferences.getInstance();
       await sbMarkLiftStatus(
         liftId: lift.liftId,
@@ -11716,14 +11714,13 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       await sbSetEventCompleted(eventId: widget.event.id, completed: next);
       debugPrint('[Complete] marked=$next linkedLifts=${_linkedLifts.length} jobType=$_jobType');
       // Smart completion: trigger downstream actions when marking complete.
-      // Fires when lifts are linked, OR when it's a ramp install (no lifts linked but ramp detected).
-      final isRamp = eventIsRampJob(widget.event);
-      final isRampJob = next && isRamp && (_jobType == 'Install' || _jobType == 'Removal') && _linkedLifts.isEmpty;
+      // Fires when lifts are linked, OR when it's an explicit ramp job type.
+      final isRampJob = next && (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal') && _linkedLifts.isEmpty;
       if (next && (_linkedLifts.isNotEmpty || isRampJob) && mounted) {
         await _handleSmartCompletion();
       }
       // Warn if completing a service job with no lift linked
-      final isServiceType = _jobType == 'Service' || _jobType == 'Annual Service';
+      final isServiceType = _jobType == 'Stairlift Service' || _jobType == 'Stairlift Annual Service';
       if (next && isServiceType && _linkedLifts.isEmpty && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -11746,11 +11743,10 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     final userName = prefs.getString('user_name') ?? '';
     final userEmail = prefs.getString('user_email') ?? '';
 
-    // Ramp job (install or removal): no linked lifts, but the job title/notes contains "ramp"
-    final isRampType = _jobType == 'Install' || _jobType == 'Removal';
-    if (isRampType && _linkedLifts.isEmpty && eventIsRampJob(widget.event)) {
+    // Ramp job: explicit Ramp Install or Ramp Removal type
+    if (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal') {
       if (!mounted) return;
-      final isInstall = _jobType == 'Install';
+      final isInstall = _jobType == 'Ramp Install';
       final confirm = await showDialog<bool>(
         context: context,
         builder: (_) => AlertDialog(
@@ -11787,7 +11783,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       debugPrint('[SmartComplete] processing lift=${lift.liftId} status=${lift.status}');
       if (!mounted) return;
       switch (_jobType) {
-        case 'Install':
+        case 'Stairlift Install':
           if (mounted) {
             final confirm = await showDialog<bool>(
               context: context,
@@ -11821,7 +11817,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           }
           break;
 
-        case 'Removal':
+        case 'Stairlift Removal':
           if (mounted) {
             final confirm = await showDialog<bool>(
               context: context,
@@ -11852,10 +11848,10 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           }
           break;
 
-        case 'Service':
-        case 'Annual Service':
+        case 'Stairlift Service':
+        case 'Stairlift Annual Service':
           if (!mounted) return;
-          final serviceType = _jobType == 'Annual Service' ? 'Annual Service' : 'Service Call';
+          final serviceType = _jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
           final confirm = await showDialog<bool>(
             context: context,
             builder: (_) => AlertDialog(
@@ -12022,7 +12018,10 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                 const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
               else
                 DropdownButton<String>(
-                  value: (_jobType != null && const ['Install', 'Removal', 'Service', 'Annual Service', 'Reminder', 'Other'].contains(_jobType))
+                  value: (_jobType != null && const [
+                    'Stairlift Install', 'Stairlift Removal', 'Stairlift Service', 'Stairlift Annual Service',
+                    'Ramp Install', 'Ramp Removal', 'Reminder', 'Other',
+                  ].contains(_jobType))
                       ? _jobType
                       : null,
                   hint: Text('Set type', style: TextStyle(color: Colors.grey[500], fontSize: 13)),
@@ -12030,8 +12029,10 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                   isDense: true,
                   items: [
                     const DropdownMenuItem(value: null, child: Text('— None —', style: TextStyle(color: Colors.grey))),
-                    ...['Install', 'Removal', 'Service', 'Annual Service', 'Reminder', 'Other']
-                        .map((t) => DropdownMenuItem(value: t, child: Text(t))),
+                    ...[
+                      'Stairlift Install', 'Stairlift Removal', 'Stairlift Service', 'Stairlift Annual Service',
+                      'Ramp Install', 'Ramp Removal', 'Reminder', 'Other',
+                    ].map((t) => DropdownMenuItem(value: t, child: Text(t))),
                   ],
                   onChanged: _savingJobType ? null : (val) async {
                     setState(() {
@@ -12043,7 +12044,10 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                   },
                   selectedItemBuilder: (_) => [
                     const SizedBox.shrink(),
-                    ...['Install', 'Removal', 'Service', 'Annual Service', 'Reminder', 'Other'].map((t) =>
+                    ...[
+                      'Stairlift Install', 'Stairlift Removal', 'Stairlift Service', 'Stairlift Annual Service',
+                      'Ramp Install', 'Ramp Removal', 'Reminder', 'Other',
+                    ].map((t) =>
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                         decoration: BoxDecoration(
@@ -12564,10 +12568,10 @@ class _LinkLiftToJobScreenState extends State<_LinkLiftToJobScreen> {
       if (!currentIds.contains(widget.liftId)) {
         await sbSetEventLiftIds(event.id, [...currentIds, widget.liftId]);
       }
-      // Ensure job type is set to Install
+      // Ensure job type is set to Stairlift Install
       final jobType = meta['job_type'] as String?;
       if (jobType == null || jobType.isEmpty) {
-        await sbSetEventJobType(event.id, 'Install');
+        await sbSetEventJobType(event.id, 'Stairlift Install');
       }
       if (!mounted) return;
       // Navigate to the event detail so user can see the link
@@ -13072,7 +13076,7 @@ class _JobTypeChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isAnnual = jobType == 'Annual Service';
+    final isAnnual = jobType == 'Stairlift Annual Service';
     final bg = isAnnual
         ? const Color(0xFFEF6C00).withValues(alpha: 0.12)
         : kBrandGreen.withValues(alpha: 0.12);
@@ -13445,10 +13449,12 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
   bool _deleting = false;
 
   static const _jobTypeOptions = [
-    'Install',
-    'Removal',
-    'Service',
-    'Annual Service',
+    'Stairlift Install',
+    'Stairlift Removal',
+    'Stairlift Service',
+    'Stairlift Annual Service',
+    'Ramp Install',
+    'Ramp Removal',
     'Reminder',
     'Other',
   ];
