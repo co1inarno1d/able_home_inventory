@@ -686,7 +686,7 @@ class LiftRecord {
   final String foldType;
   final String condition;
   final String dateAcquired;
-  final String status; // e.g. In Stock, Assigned, Installed, Removed, Scrapped
+  final String status; // e.g. New, Assigned, Installed, Removed, Scrapped
   final String currentLocation; // address or short label
   final String currentJob;
   final String installDate;
@@ -758,7 +758,7 @@ class LiftRecord {
 /// Single movement/location history entry for a lift
 class LiftHistoryEvent {
   final DateTime? timestamp;
-  final String status; // e.g. In Stock, Assigned, Installed, Removed, Scrapped
+  final String status; // e.g. New, Assigned, Installed, Removed, Scrapped
   final String location; // customer/address / shop / etc.
   final String jobRef;
   final String note;
@@ -2540,7 +2540,7 @@ class _LiftPickerDialogState extends State<_LiftPickerDialog> {
     try {
       final lifts = await sbFetchLifts();
       // Only show lifts that can be linked: exclude Installed and Scrapped
-      const linkableStatuses = ['In Stock', 'Removed', 'Assigned'];
+      const linkableStatuses = ['New', 'Removed', 'Assigned'];
       final linkable = lifts.where((l) => linkableStatuses.contains(l.status)).toList();
       if (mounted) {
         setState(() {
@@ -2605,6 +2605,7 @@ class _LiftPickerDialogState extends State<_LiftPickerDialog> {
             child: TextField(
               controller: _searchController,
               autofocus: true,
+              style: const TextStyle(color: Colors.black),
               decoration: const InputDecoration(
                 hintText: 'Search by serial, brand, series, location...',
                 prefixIcon: Icon(Icons.search),
@@ -4353,6 +4354,7 @@ class _ServiceTabState extends State<_ServiceTab> {
         Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
           child: TextField(
+            style: const TextStyle(color: Colors.black),
             decoration: InputDecoration(
               hintText: 'Search...',
               prefixIcon: const Icon(Icons.search),
@@ -6829,7 +6831,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
           final lifts = allLifts.where((l) => !isLiftRecordFoldingRail(l)).toList();
 
           // All filter lists are hardcoded so options always appear
-          const statuses = ['In Stock', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
+          const statuses = ['New', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
           const brands = ['Acorn', 'Brooks', 'Bruno', 'Harmar'];
           const orientations = ['LH', 'RH', 'N/A'];
 
@@ -6962,7 +6964,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
                 filtered.sort((a, b) => a.series.toLowerCase().compareTo(b.series.toLowerCase()));
                 break;
               case 'Status':
-                const order = ['In Stock', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
+                const order = ['New', 'Assigned', 'Installed', 'Removed', 'Scrapped'];
                 filtered.sort((a, b) {
                   final ia = order.indexOf(a.status);
                   final ib = order.indexOf(b.status);
@@ -7254,6 +7256,7 @@ class _LiftsScreenState extends State<LiftsScreen> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: TextField(
+            style: const TextStyle(color: Colors.black),
             decoration: const InputDecoration(
               prefixIcon: Icon(Icons.search),
               hintText: 'Search by serial, bin #, brand, series, location...',
@@ -8235,7 +8238,7 @@ class _StairliftQuantitiesScreenState
           final inventoryData = snapshot.data![1] as InventoryData;
 
           // Count all non-folding-rail lifts from master list.
-          // New: only In Stock. Used: all statuses (used units out in field still count).
+          // New: only New status. Used: all statuses (used units out in field still count).
           final eligibleLifts = lifts.where((l) => !isLiftRecordFoldingRail(l)).toList();
 
           // Group by brand + series + condition and count
@@ -8243,8 +8246,8 @@ class _StairliftQuantitiesScreenState
           for (final lift in eligibleLifts) {
             final cond = lift.condition.trim();
             final status = lift.status.trim();
-            // For New units, only count In Stock; for Used, count all statuses
-            if (cond == 'New' && status != 'In Stock') continue;
+            // For New units, only count New status; for Used, count all statuses
+            if (cond == 'New' && status != 'New') continue;
             final key = '${lift.brand.trim()}|${lift.series.trim()}|${lift.orientation.trim()}|$cond';
             counts[key] = (counts[key] ?? 0) + 1;
           }
@@ -9530,7 +9533,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   String? _selectedFoldType;
 
   String _condition = 'New';
-  String _status = 'In Stock';
+  String _status = 'New';
   String _preppedStatus = 'Needs prepping';
   String _cleanBatteriesStatus = '';
   String _railType = 'Straight';
@@ -9608,7 +9611,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         'New', 'Used - Like New', 'Used - Standard', 'Used - Not Great', 'Used - Shit',
       ];
       _condition = validConditions.contains(existing.condition) ? existing.condition : 'New';
-      _status = existing.status.isNotEmpty ? existing.status : 'In Stock';
+      _status = existing.status.isNotEmpty ? existing.status : 'New';
       _preppedStatus = existing.preppedStatus.isNotEmpty
           ? existing.preppedStatus
           : 'Needs prepping';
@@ -10203,8 +10206,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
               value: _status,
               items: const [
                 DropdownMenuItem<String>(
-                  value: 'In Stock',
-                  child: Text('In Stock'),
+                  value: 'New',
+                  child: Text('New'),
                 ),
                 DropdownMenuItem<String>(
                   value: 'Assigned',
@@ -10229,7 +10232,10 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
               ),
               onChanged: (value) {
                 setState(() {
-                  _status = value ?? 'In Stock';
+                  _status = value ?? 'New';
+                  if (_status == 'New') {
+                    _condition = 'New';
+                  }
                   // Clear bin # when marking as Installed
                   if (_status == 'Installed') {
                     _binNumberController.clear();
@@ -11660,12 +11666,12 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     setState(() => _savingLift = true);
     final newIds = _linkedLifts.where((l) => l.liftId != lift.liftId).map((l) => l.liftId).toList();
     await sbSetEventLiftIds(widget.event.id, newIds);
-    // Only revert to In Stock when unlinking from an Install job
+    // Only revert to New when unlinking from an Install job
     if (_jobType == 'Install') {
       final prefs = await SharedPreferences.getInstance();
       await sbMarkLiftStatus(
         liftId: lift.liftId,
-        newStatus: 'In Stock',
+        newStatus: 'New',
         userEmail: prefs.getString('user_email') ?? '',
         userName: prefs.getString('user_name') ?? '',
         note: 'Unlinked from schedule event: ${widget.event.title}',
