@@ -49,7 +49,13 @@ async function logError(entry: QbErrorEntry) {
 }
 
 const QB_TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer';
-const QB_API_BASE = 'https://quickbooks.api.intuit.com/v3/company';
+// Use sandbox base for realm IDs under 10 digits, production otherwise.
+function getApiBase(realmId: string) {
+  return realmId.length < 10
+    ? 'https://sandbox-quickbooks.api.intuit.com/v3/company'
+    : 'https://quickbooks.api.intuit.com/v3/company';
+}
+
 const QB_SCOPE = 'com.intuit.quickbooks.accounting';
 
 // State tokens expire after 10 minutes (OAuth flow must complete in that window)
@@ -298,16 +304,15 @@ async function handleSearch(req: Request) {
     return err((e as Error).message, isAuthError ? 401 : 500);
   }
 
-  // QB IDS only supports prefix LIKE on string fields.
-  // BillAddr is a structured object — cannot be searched with LIKE.
-  // Search DisplayName and FamilyName with OR for best coverage.
-  const safeQuery = query.replace(/'/g, "''").trim();
+  // Fetch all customers (no WHERE clause — avoids IDS query syntax issues)
+  // and filter client-side by name contains.
+  const lowerQuery = query.toLowerCase().trim();
   const sql = encodeURIComponent(
-    `SELECT Id, DisplayName, FamilyName, PrimaryEmailAddr, PrimaryPhone, BillAddr FROM Customer WHERE DisplayName LIKE '${safeQuery}%' OR FamilyName LIKE '${safeQuery}%' MAXRESULTS 25`
+    `SELECT * FROM Customer MAXRESULTS 200`
   );
 
   const apiRes = await fetch(
-    `${QB_API_BASE}/${row.realm_id}/query?query=${sql}&minorversion=65`,
+    `${getApiBase(row.realm_id)}/${row.realm_id}/query?query=${sql}&minorversion=65`,
     {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
@@ -325,7 +330,7 @@ async function handleSearch(req: Request) {
       try {
         const fresh = await refreshAccessToken(row);
         const retry = await fetch(
-          `${QB_API_BASE}/${row.realm_id}/query?query=${sql}&minorversion=65`,
+          `${getApiBase(row.realm_id)}/${row.realm_id}/query?query=${sql}&minorversion=65`,
           { headers: { 'Authorization': `Bearer ${fresh}`, 'Accept': 'application/json' } }
         );
         const retryTid = retry.headers.get('intuit_tid') ?? undefined;
@@ -343,7 +348,9 @@ async function handleSearch(req: Request) {
           });
           return err('QB session expired — please reconnect QuickBooks', 401);
         }
-        return json({ customers: (retryData?.QueryResponse?.Customer ?? []).map(mapCustomer) });
+        const retryAll = ((retryData as QbQueryResponse)?.QueryResponse?.['Customer'] ?? []) as Record<string, unknown>[];
+        const retryFiltered = retryAll.filter((c) => (c.DisplayName as string ?? '').toLowerCase().includes(lowerQuery));
+        return json({ customers: retryFiltered.map(mapCustomer) });
       } catch (e) {
         // RefreshTokenExpiredError or InvalidGrantError — tokens already cleared
         return err((e as Error).message, 401);
@@ -354,8 +361,9 @@ async function handleSearch(req: Request) {
     // validation errors, and the intuit_tid for support troubleshooting.
     const faultErrors = apiData?.Fault?.Error ?? apiData?.fault?.error ?? [];
     const firstCode = faultErrors?.[0]?.code ?? faultErrors?.[0]?.errorCode ?? String(apiRes.status);
-    const firstMessage = faultErrors?.[0]?.Message ?? faultErrors?.[0]?.message
-      ?? apiData?.message ?? JSON.stringify(apiData);
+    const firstMessage = faultErrors?.[0]?.Message ?? faultErrors?.[0]?.Detail
+      ?? faultErrors?.[0]?.message ?? apiData?.message
+      ?? JSON.stringify(apiData).substring(0, 800);
 
     await logError({
       action: 'search',
@@ -367,11 +375,14 @@ async function handleSearch(req: Request) {
       context: { query, realm_id: row.realm_id },
     });
 
-    // Surface a clean message to the client; full detail is in the log
     return err(`QB API error (${apiRes.status}): ${firstMessage}`, 502);
   }
 
-  return json({ customers: (apiData?.QueryResponse?.Customer ?? []).map(mapCustomer) });
+  const all = ((apiData as QbQueryResponse)?.QueryResponse?.['Customer'] ?? []) as Record<string, unknown>[];
+  const filtered = all.filter((c) =>
+    (c.DisplayName as string ?? '').toLowerCase().includes(lowerQuery)
+  );
+  return json({ customers: filtered.map(mapCustomer) });
 }
 
 function mapCustomer(c: Record<string, unknown>) {
@@ -411,7 +422,7 @@ async function handleFinancials(req: Request) {
   // Helper to run a QB SQL query
   async function qbQuery(sql: string): Promise<{ data: unknown; tid: string | null }> {
     const res = await fetch(
-      `${QB_API_BASE}/${row!.realm_id}/query?query=${encodeURIComponent(sql)}&minorversion=65`,
+      `${getApiBase(row!.realm_id)}/${row!.realm_id}/query?query=${encodeURIComponent(sql)}&minorversion=65`,
       { headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' } }
     );
     const tid = res.headers.get('intuit_tid');
@@ -514,7 +525,7 @@ async function handleAppendNote(req: Request) {
 
   // Fetch current customer to get SyncToken and existing notes
   const getRes = await fetch(
-    `${QB_API_BASE}/${row.realm_id}/customer/${qb_customer_id}?minorversion=65`,
+    `${getApiBase(row.realm_id)}/${row.realm_id}/customer/${qb_customer_id}?minorversion=65`,
     { headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' } }
   );
   const getTid = getRes.headers.get('intuit_tid');
@@ -543,7 +554,7 @@ async function handleAppendNote(req: Request) {
 
   // Sparse update — only send fields we're changing + SyncToken
   const updateRes = await fetch(
-    `${QB_API_BASE}/${row.realm_id}/customer?minorversion=65`,
+    `${getApiBase(row.realm_id)}/${row.realm_id}/customer?minorversion=65`,
     {
       method: 'POST',
       headers: {
@@ -601,7 +612,7 @@ async function handleCustomerSummary(req: Request) {
 
   // Fetch customer record (name, notes, balance)
   const custRes = await fetch(
-    `${QB_API_BASE}/${row.realm_id}/customer/${qb_customer_id}?minorversion=65`,
+    `${getApiBase(row.realm_id)}/${row.realm_id}/customer/${qb_customer_id}?minorversion=65`,
     { headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' } }
   );
   const custTid = custRes.headers.get('intuit_tid');
@@ -624,7 +635,7 @@ async function handleCustomerSummary(req: Request) {
   // Fetch last 5 invoices for this customer
   const invSql = `SELECT Id, TxnDate, TotalAmt, Balance, PrivateNote FROM Invoice WHERE CustomerRef = '${qb_customer_id}' ORDERBY TxnDate DESC MAXRESULTS 5`;
   const invRes = await fetch(
-    `${QB_API_BASE}/${row.realm_id}/query?query=${encodeURIComponent(invSql)}&minorversion=65`,
+    `${getApiBase(row.realm_id)}/${row.realm_id}/query?query=${encodeURIComponent(invSql)}&minorversion=65`,
     { headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' } }
   );
   const invData = await invRes.json();
