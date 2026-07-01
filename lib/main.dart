@@ -9,17 +9,30 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:url_launcher/url_launcher.dart';
 
+import 'auth/auth.dart';
 import 'initials_avatar.dart';
+import 'models/models.dart';
 import 'prep_checklist_form.dart';
 import 'qbt_api.dart';
 import 'schedule_desktop.dart';
+import 'screens/bin_whiteboard_screen.dart';
+import 'screens/customers_screen.dart';
+import 'screens/inventory_screen.dart';
+import 'screens/dashboard_screen.dart';
+import 'screens/operations_hub_screen.dart';
+import 'screens/schedule_event_form_screen.dart';
+import 'screens/audit_log_screen.dart';
+import 'screens/documents_screen.dart';
+import 'screens/user_management_screen.dart';
+import 'integrations/quickbooks_service.dart';
 import 'supabase_api.dart';
+import 'utils/utils.dart' show extractCity;
 
 /// =======================
 /// CONFIG
 /// =======================
 
-/// App password — change this to whatever you want the shared login to be.
+/// App password — kept for legacy reference only; auth now uses Supabase Auth.
 const String kAppPassword = '403marshallst!';
 
 /// How long a successful login is cached before prompting again.
@@ -148,6 +161,268 @@ Future<void> main() async {
   runApp(const AbleHomeInventoryApp());
 }
 
+/// Shared user menu — shows current user name/role and a sign-out button.
+/// Call from any screen's app bar person icon.
+/// After marking a lift as Installed, offer to create or link a customer record.
+/// Shows a bottom sheet; skippable with no side-effects.
+Future<void> _offerCreateCustomerForLift(
+    BuildContext context, LiftRecord lift, dynamic event) async {
+  final shouldCreate = await showModalBottomSheet<bool>(
+    context: context,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+    ),
+    builder: (ctx) => Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            const Icon(Icons.person_add_outlined, color: kBrandGreen),
+            const SizedBox(width: 10),
+            Text('Create customer record?',
+                style: GoogleFonts.nunito(fontSize: 16, fontWeight: FontWeight.w700)),
+          ]),
+          const SizedBox(height: 8),
+          Text(
+            'No customer is linked to this lift yet. Add one now to track warranty, service history, and reviews.',
+            style: GoogleFonts.nunito(fontSize: 13, color: Colors.grey[600]),
+          ),
+          const SizedBox(height: 16),
+          Row(children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Skip'),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: () => Navigator.pop(ctx, true),
+                style: ElevatedButton.styleFrom(
+                    backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('Add Customer'),
+              ),
+            ),
+          ]),
+        ],
+      ),
+    ),
+  );
+  if (shouldCreate == true && context.mounted) {
+    // Pre-fill with location from the event if available
+    final location = (event as dynamic).location as String? ?? '';
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CustomerFormScreen(
+          existing: CustomerRecord(
+            customerId: '',
+            name: '',
+            address: location,
+            city: extractCity(location),
+            phone: '',
+            email: '',
+            fundingSource: 'Private',
+            qbCustomerId: '',
+            notes: '',
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+Future<void> showUserMenu(BuildContext context) async {
+  final auth = AuthService.instance;
+  final profile = auth.profile;
+  final prefs = await SharedPreferences.getInstance();
+
+  if (!context.mounted) return;
+  await showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Account'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (profile != null) ...[
+            Text(profile.name.isNotEmpty ? profile.name : profile.email,
+                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
+            const SizedBox(height: 4),
+            Text(profile.role.label,
+                style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+            const SizedBox(height: 4),
+            Text(profile.email,
+                style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+            const Divider(height: 24),
+          ],
+          Text('Display name (used in logs)',
+              style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+          const SizedBox(height: 6),
+          TextField(
+            controller: TextEditingController(
+                text: prefs.getString('user_name') ??
+                    profile?.name ?? ''),
+            decoration: const InputDecoration(
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            onChanged: (v) => prefs.setString('user_name', v),
+          ),
+        ],
+      ),
+      actions: [
+        if (profile?.canSeeSettings == true) ...[
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => const UserManagementScreen(),
+              ));
+            },
+            child: const Text('Manage Team'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => const AuditLogScreen(),
+              ));
+            },
+            child: const Text('Audit Log'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => const DocumentsScreen(),
+              ));
+            },
+            child: const Text('Documents'),
+          ),
+          _QbConnectButton(parentCtx: context, onClose: () => Navigator.of(ctx).pop()),
+        ],
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('Close'),
+        ),
+        TextButton(
+          style: TextButton.styleFrom(foregroundColor: Colors.red),
+          onPressed: () async {
+            Navigator.of(ctx).pop();
+            await AuthService.instance.signOut();
+          },
+          child: const Text('Sign Out'),
+        ),
+      ],
+    ),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// QB Connect Button — shown in the account menu for admins
+// ---------------------------------------------------------------------------
+
+class _QbConnectButton extends StatefulWidget {
+  final BuildContext parentCtx;
+  final VoidCallback onClose;
+  const _QbConnectButton({required this.parentCtx, required this.onClose});
+
+  @override
+  State<_QbConnectButton> createState() => _QbConnectButtonState();
+}
+
+class _QbConnectButtonState extends State<_QbConnectButton> {
+  bool _loading = true;
+  bool _connected = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkStatus();
+  }
+
+  Future<void> _checkStatus() async {
+    final status = await QuickBooksService.getStatus();
+    if (mounted) setState(() { _connected = status.connected; _loading = false; });
+  }
+
+  Future<void> _connect() async {
+    widget.onClose();
+    final err = await QuickBooksService.startOAuthFlow();
+    if (err != null && widget.parentCtx.mounted) {
+      ScaffoldMessenger.of(widget.parentCtx).showSnackBar(
+        SnackBar(content: Text('QB connect failed: $err')),
+      );
+    }
+  }
+
+  Future<void> _disconnect() async {
+    await QuickBooksService.disconnect();
+    if (mounted) setState(() => _connected = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) return const SizedBox.shrink();
+    if (_connected) {
+      return TextButton.icon(
+        icon: Icon(Icons.check_circle, size: 14, color: Colors.green[600]),
+        label: const Text('QuickBooks Connected'),
+        style: TextButton.styleFrom(foregroundColor: Colors.green[700]),
+        onPressed: () async {
+          final disconnect = await showDialog<bool>(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text('Disconnect QuickBooks?'),
+              content: const Text('Customer search will stop working until reconnected.'),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+                TextButton(
+                  style: TextButton.styleFrom(foregroundColor: Colors.red),
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Disconnect'),
+                ),
+              ],
+            ),
+          );
+          if (disconnect == true) _disconnect();
+        },
+      );
+    }
+    return TextButton.icon(
+      icon: const Icon(Icons.link, size: 14),
+      label: const Text('Connect QuickBooks'),
+      onPressed: _connect,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// QB OAuth callback handler — call from app init when URL has ?code=&realmId=
+// ---------------------------------------------------------------------------
+
+Future<void> handleQbCallback(BuildContext context) async {
+  final uri = Uri.base;
+  final code = uri.queryParameters['code'];
+  final realmId = uri.queryParameters['realmId'];
+  if (code == null || realmId == null) return;
+
+  final err = await QuickBooksService.completeOAuthFlow(code: code, realmId: realmId);
+
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+    content: Text(err == null
+        ? 'QuickBooks connected successfully!'
+        : 'QB connect failed: $err'),
+    backgroundColor: err == null ? Colors.green[700] : Colors.red[700],
+  ));
+}
+
 class AbleHomeInventoryApp extends StatelessWidget {
   const AbleHomeInventoryApp({super.key});
 
@@ -244,7 +519,10 @@ class AbleHomeInventoryApp extends StatelessWidget {
           dividerColor: Colors.transparent,
         ),
       ),
-      home: const PasswordGate(child: _ResponsiveShell()),
+      home: AuthGate(
+        builder: (profile) => HomeShell(profile: profile),
+        onQbCallback: handleQbCallback,
+      ),
     );
   }
 }
@@ -488,430 +766,7 @@ class _PasswordGateState extends State<PasswordGate> {
   }
 }
 
-/// On wide screens (desktop/tablet): centers the app in a max-width container
-/// with a clean dark green sidebar accent. On mobile: full screen.
-class _ResponsiveShell extends StatelessWidget {
-  const _ResponsiveShell();
 
-  @override
-  Widget build(BuildContext context) {
-    // Full screen on all sizes — no phone frame on desktop
-    return const HomeShell();
-  }
-}
-
-/// =======================
-/// MODELS
-/// =======================
-
-class StairliftItem {
-  final String itemId;
-  final String brand;
-  final String series;
-  final String orientation;
-  final String foldType;
-  final String condition; // "New" or "Used"
-  final int currentQty;
-  final int minQty;
-  final bool active;
-  final String notes;
-
-  StairliftItem({
-    required this.itemId,
-    required this.brand,
-    required this.series,
-    required this.orientation,
-    required this.foldType,
-    required this.condition,
-    required this.currentQty,
-    required this.minQty,
-    required this.active,
-    required this.notes,
-  });
-
-  factory StairliftItem.fromJson(Map<String, dynamic> json) {
-    int parseInt(dynamic v) {
-      if (v == null) return 0;
-      if (v is int) return v;
-      return int.tryParse(v.toString()) ?? 0;
-    }
-
-    String normCondition(dynamic v) {
-      final s = v?.toString().trim().toLowerCase() ?? '';
-      if (s == 'used') return 'Used';
-      if (s == 'cut') return 'Cut';
-      return 'New';
-    }
-
-    return StairliftItem(
-      itemId: json['item_id']?.toString() ?? '',
-      brand: json['brand']?.toString() ?? '',
-      series: json['series']?.toString() ?? '',
-      orientation: json['orientation']?.toString() ?? '',
-      foldType: json['fold_type']?.toString() ?? '',
-      condition: normCondition(json['condition']),
-      currentQty: parseInt(json['current_qty']),
-      minQty: parseInt(json['min_qty']),
-      active: (json['active'] ?? 'Y').toString().toUpperCase() == 'Y',
-      notes: json['notes']?.toString() ?? '',
-    );
-  }
-}
-
-class RampItem {
-  final String itemId;
-  final String brand;
-  final String size;
-  final String condition; // "New" or "Used"
-  final int currentQty;
-  final int minQty;
-  final int ccalsQty;
-  final bool active;
-  final String notes;
-
-  RampItem({
-    required this.itemId,
-    required this.brand,
-    required this.size,
-    required this.condition,
-    required this.currentQty,
-    required this.minQty,
-    this.ccalsQty = 0,
-    required this.active,
-    required this.notes,
-  });
-
-  factory RampItem.fromJson(Map<String, dynamic> json) {
-    int parseInt(dynamic v) {
-      if (v == null) return 0;
-      if (v is int) return v;
-      return int.tryParse(v.toString()) ?? 0;
-    }
-
-    String normCondition(dynamic v) {
-      final s = v?.toString().trim().toLowerCase() ?? '';
-      if (s == 'used') return 'Used';
-      return 'New';
-    }
-
-    return RampItem(
-      itemId: json['item_id']?.toString() ?? '',
-      brand: json['brand']?.toString() ?? '',
-      size: json['size']?.toString() ?? '',
-      condition: normCondition(json['condition']),
-      currentQty: parseInt(json['current_qty']),
-      minQty: parseInt(json['min_qty']),
-      ccalsQty: parseInt(json['ccals_qty']),
-      active: (json['active'] ?? 'Y').toString().toUpperCase() == 'Y',
-      notes: json['notes']?.toString() ?? '',
-    );
-  }
-}
-
-class InventoryChange {
-  final DateTime? timestamp;
-  final String userEmail;
-  final String userName;
-  final String changeType;
-  final String itemId;
-  final String brand;
-  final String seriesOrSize;
-  final String orientation;
-  final String condition;
-  final int oldQty;
-  final int newQty;
-  final int delta;
-  final String jobRef;
-  final String note;
-
-  InventoryChange({
-    required this.timestamp,
-    required this.userEmail,
-    required this.userName,
-    required this.changeType,
-    required this.itemId,
-    required this.brand,
-    required this.seriesOrSize,
-    required this.orientation,
-    required this.condition,
-    required this.oldQty,
-    required this.newQty,
-    required this.delta,
-    required this.jobRef,
-    required this.note,
-  });
-
-  factory InventoryChange.fromJson(Map<String, dynamic> json) {
-    DateTime? parseDate(dynamic v) {
-      if (v == null) return null;
-      try {
-        return DateTime.parse(v.toString());
-      } catch (_) {
-        return null;
-      }
-    }
-
-    int parseInt(dynamic v) {
-      if (v == null) return 0;
-      if (v is int) return v;
-      return int.tryParse(v.toString()) ?? 0;
-    }
-
-    return InventoryChange(
-      timestamp: parseDate(json['timestamp']),
-      userEmail: json['user_email']?.toString() ?? '',
-      userName: json['user_name']?.toString() ?? '',
-      changeType: json['change_type']?.toString() ?? '',
-      itemId: json['item_id']?.toString() ?? '',
-      brand: json['brand']?.toString() ?? '',
-      seriesOrSize: json['series_or_size']?.toString() ?? '',
-      orientation: json['orientation']?.toString() ?? '',
-      condition: json['condition']?.toString() ?? '',
-      oldQty: parseInt(json['old_qty']),
-      newQty: parseInt(json['new_qty']),
-      delta: parseInt(json['delta']),
-      jobRef: json['job_ref']?.toString() ?? '',
-      note: json['note']?.toString() ?? '',
-    );
-  }
-}
-
-/// Per-lift record
-class LiftRecord {
-  final String liftId;
-  final String serialNumber;
-  final String brand;
-  final String series;
-  final String orientation;
-  final String foldType;
-  final String condition;
-  final String dateAcquired;
-  final String status; // e.g. New, Assigned, Installed, Removed, Scrapped
-  final String currentLocation; // address or short label
-  final String currentJob;
-  final String installDate;
-  final String installerName;
-  final String preppedStatus; // Needs prepping / Prepped / Not applicable
-  final String lastPrepDate;
-  final String notes;
-  final String binNumber; // Bin number for used lifts
-  final String cleanBatteriesStatus; // 'Needs Cleaning' or 'Clean'
-  final List<String> photoUrls; // Google Drive direct-view URLs
-  final String railType; // 'Straight' or 'Curved'
-  final String acquisitionSource; // 'VA', 'CCALS', 'Web Lead', etc.
-
-  LiftRecord({
-    required this.liftId,
-    required this.serialNumber,
-    required this.brand,
-    required this.series,
-    required this.orientation,
-    required this.foldType,
-    required this.condition,
-    required this.dateAcquired,
-    required this.status,
-    required this.currentLocation,
-    required this.currentJob,
-    required this.installDate,
-    required this.installerName,
-    required this.preppedStatus,
-    required this.lastPrepDate,
-    required this.notes,
-    required this.binNumber,
-    this.cleanBatteriesStatus = '',
-    this.photoUrls = const [],
-    this.railType = 'Straight',
-    this.acquisitionSource = '',
-  });
-
-  factory LiftRecord.fromJson(Map<String, dynamic> json) {
-    String s(dynamic v) => v?.toString() ?? '';
-
-    return LiftRecord(
-      liftId: s(json['lift_id']),
-      serialNumber: s(json['serial_number']),
-      brand: s(json['brand']),
-      series: s(json['series']),
-      orientation: s(json['orientation']),
-      foldType: s(json['fold_type']),
-      condition: s(json['condition']),
-      dateAcquired: s(json['date_acquired']),
-      status: s(json['status']),
-      currentLocation: s(json['current_location']),
-      binNumber: s(json['bin_number']),
-      currentJob: s(json['current_job']),
-      installDate: s(json['install_date']),
-      installerName: s(json['installer_name']),
-      preppedStatus: s(json['prepped_status']),
-      lastPrepDate: s(json['last_prep_date']),
-      notes: s(json['notes']),
-      cleanBatteriesStatus: s(json['clean_batteries_status']),
-      photoUrls: s(json['photo_urls']).isEmpty
-          ? []
-          : s(json['photo_urls']).split(',').map((u) => u.trim()).where((u) => u.isNotEmpty).map(normalizeDrivePhotoUrl).toList(),
-      railType: s(json['rail_type']).isEmpty ? 'Straight' : s(json['rail_type']),
-      acquisitionSource: s(json['acquisition_source']),
-    );
-  }
-}
-
-/// Single movement/location history entry for a lift
-class LiftHistoryEvent {
-  final DateTime? timestamp;
-  final String status; // e.g. New, Assigned, Installed, Removed, Scrapped
-  final String location; // customer/address / shop / etc.
-  final String jobRef;
-  final String note;
-
-  LiftHistoryEvent({
-    required this.timestamp,
-    required this.status,
-    required this.location,
-    required this.jobRef,
-    required this.note,
-  });
-
-  factory LiftHistoryEvent.fromJson(Map<String, dynamic> json) {
-    DateTime? parseDate(dynamic v) {
-      if (v == null) return null;
-      try {
-        return DateTime.parse(v.toString());
-      } catch (_) {
-        return null;
-      }
-    }
-
-    String s(dynamic v) => v?.toString() ?? '';
-
-    return LiftHistoryEvent(
-      timestamp: parseDate(json['timestamp']),
-      status: s(json['status']),
-      location: s(json['location']),
-      jobRef: s(json['job_ref']),
-      note: s(json['note']),
-    );
-  }
-}
-
-/// Service history entry for a lift
-class LiftServiceRecord {
-  final DateTime? serviceDate;
-  final String serviceType;
-  final String description;
-  final String invoiceNumber;
-  final String technicianName;
-  final String jobRef;
-  final String customerName;
-  final String notes;
-
-  LiftServiceRecord({
-    required this.serviceDate,
-    required this.serviceType,
-    required this.description,
-    required this.invoiceNumber,
-    required this.technicianName,
-    required this.jobRef,
-    required this.customerName,
-    required this.notes,
-  });
-
-  factory LiftServiceRecord.fromJson(Map<String, dynamic> json) {
-    DateTime? parseDate(dynamic v) {
-      if (v == null) return null;
-      try {
-        return DateTime.parse(v.toString());
-      } catch (_) {
-        return null;
-      }
-    }
-
-    String s(dynamic v) => v?.toString() ?? '';
-
-    return LiftServiceRecord(
-      serviceDate: parseDate(json['service_date']),
-      serviceType: s(json['service_type']),
-      description: s(json['description']),
-      invoiceNumber: s(json['invoice_number']),
-      technicianName: s(json['technician_name']),
-      jobRef: s(json['job_ref']),
-      customerName: s(json['customer_name']),
-      notes: s(json['notes']),
-    );
-  }
-}
-
-class PrepChecklist {
-  final String checklistId;
-  final DateTime? timestamp;
-  final String liftId;
-  final String serialNumber;
-  final String brand;
-  final String series;
-  final String prepDate;
-  final String preppedByName;
-  final String preppedByEmail;
-  final String notes;
-  final Map<String, bool> checklistItems;
-
-  PrepChecklist({
-    required this.checklistId,
-    this.timestamp,
-    required this.liftId,
-    required this.serialNumber,
-    required this.brand,
-    required this.series,
-    required this.prepDate,
-    required this.preppedByName,
-    required this.preppedByEmail,
-    required this.notes,
-    required this.checklistItems,
-  });
-
-  factory PrepChecklist.fromJson(Map<String, dynamic> json) {
-    String s(dynamic v) => v?.toString() ?? '';
-
-    DateTime? parseDate(dynamic v) {
-      if (v == null) return null;
-      try {
-        return DateTime.parse(v.toString());
-      } catch (_) {
-        return null;
-      }
-    }
-
-    // Extract checklist items (all boolean fields)
-    final checklistItems = <String, bool>{};
-    json.forEach((key, value) {
-      if (value == true || value == 'TRUE' || value == false || value == 'FALSE') {
-        checklistItems[key] = (value == true || value == 'TRUE');
-      }
-    });
-
-    return PrepChecklist(
-      checklistId: s(json['checklist_id']),
-      timestamp: parseDate(json['timestamp']),
-      liftId: s(json['lift_id']),
-      serialNumber: s(json['serial_number']),
-      brand: s(json['brand']),
-      series: s(json['series']),
-      prepDate: s(json['prep_date']),
-      preppedByName: s(json['prepped_by_name']),
-      preppedByEmail: s(json['prepped_by_email']),
-      notes: s(json['notes']),
-      checklistItems: checklistItems,
-    );
-  }
-}
-
-class InventoryData {
-  final List<StairliftItem> stairlifts;
-  final List<RampItem> ramps;
-
-  InventoryData({
-    required this.stairlifts,
-    required this.ramps,
-  });
-}
 
 /// =======================
 /// UTILITY FUNCTIONS
@@ -1031,7 +886,7 @@ bool isLiftRecordFoldingRail(LiftRecord lift) {
 
 /// Custom sort order for stairlift series names
 const _seriesOrder = [
-  'Elan 3050', 'Elan 3000', 'Elite', 'Outdoor Elite',
+  'Elan 5000', 'Elan 3050', 'Elan 3000', 'Elite', 'Elite Curve', 'Outdoor Elite',
   '120', '130', 'T700', 'Outdoor 120', 'Outdoor 130', 'Outdoor T700',
   'SL300', 'SL600',
 ];
@@ -1040,7 +895,7 @@ const _seriesOrder = [
 const Map<String, List<String>> _seriesByBrandHardcoded = {
   'Acorn': ['T700', '130', '120', 'Outdoor T700', 'Outdoor 130', 'Outdoor 120'],
   'Brooks': ['T700', '130', '120', 'Outdoor T700', 'Outdoor 130', 'Outdoor 120'],
-  'Bruno': ['Elan 3050', 'Elan 3000', 'Elite', 'Outdoor Elite'],
+  'Bruno': ['Elan 5000', 'Elan 3050', 'Elan 3000', 'Elite', 'Elite Curve', 'Outdoor Elite'],
   'Harmar': ['SL300', 'SL600', 'Helix'],
 };
 
@@ -1080,7 +935,8 @@ String getRampDisplayTitle(RampItem item) {
 /// =======================
 
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key});
+  final UserProfile profile;
+  const HomeShell({super.key, required this.profile});
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -1674,199 +1530,6 @@ class PrepChecklistDetailScreen extends StatelessWidget {
   }
 }
 
-// =======================
-// ANNUALS MODEL + API
-// =======================
-
-class AnnualRecord {
-  final String annualId;
-  final String customerName;
-  final String address;
-  final String phone;
-  final String liftType;
-  final String lastServiceDate;
-  final String dateRequested;
-  final String notes;
-  final bool scheduled;
-  final String liftId;
-  final String serialNumber;
-
-  AnnualRecord({
-    required this.annualId,
-    required this.customerName,
-    required this.address,
-    required this.phone,
-    required this.liftType,
-    required this.lastServiceDate,
-    required this.dateRequested,
-    required this.notes,
-    required this.scheduled,
-    this.liftId = '',
-    this.serialNumber = '',
-  });
-
-  factory AnnualRecord.fromJson(Map<String, dynamic> json) {
-    String s(dynamic v) => v?.toString() ?? '';
-    final sched = s(json['scheduled']).toLowerCase();
-    return AnnualRecord(
-      annualId: s(json['annual_id']),
-      customerName: s(json['customer_name']),
-      address: s(json['address']),
-      phone: s(json['phone']),
-      liftType: s(json['lift_type']),
-      lastServiceDate: s(json['last_service_date']),
-      dateRequested: s(json['date_requested']),
-      notes: s(json['notes']),
-      scheduled: sched == 'true' || sched == 'yes' || sched == '1',
-      liftId: s(json['lift_id']),
-      serialNumber: s(json['serial_number']),
-    );
-  }
-}
-
-// =======================
-// SERVICE JOB MODEL
-// =======================
-
-class ServiceJobRecord {
-  final String jobId;
-  final String jobType;
-  final String status;
-  final String title;
-  final String customerName;
-  final String address;
-  final String phone;
-  final String liftType;
-  final String liftId;
-  final String serialNumber;
-  final String dateRequested;
-  final String scheduledDate;
-  final String notes;
-
-  ServiceJobRecord({
-    required this.jobId,
-    required this.jobType,
-    required this.status,
-    this.title = '',
-    required this.customerName,
-    required this.address,
-    required this.phone,
-    required this.liftType,
-    this.liftId = '',
-    this.serialNumber = '',
-    required this.dateRequested,
-    required this.scheduledDate,
-    required this.notes,
-  });
-
-  factory ServiceJobRecord.fromJson(Map<String, dynamic> json) {
-    String s(dynamic v) => v?.toString() ?? '';
-    return ServiceJobRecord(
-      jobId: s(json['job_id']),
-      jobType: s(json['job_type']),
-      status: s(json['status']),
-      title: s(json['title']),
-      customerName: s(json['customer_name']),
-      address: s(json['address']),
-      phone: s(json['phone']),
-      liftType: s(json['lift_type']),
-      liftId: s(json['lift_id']),
-      serialNumber: s(json['serial_number']),
-      dateRequested: s(json['date_requested']),
-      scheduledDate: s(json['scheduled_date']),
-      notes: s(json['notes']),
-    );
-  }
-}
-
-// =======================
-// REMOVAL JOB MODEL
-// =======================
-
-class RemovalJobRecord {
-  final String jobId;
-  final String status;
-  final String title;
-  final String customerName;
-  final String address;
-  final String phone;
-  final String liftType;
-  final String liftId;
-  final String serialNumber;
-  final String scheduledDate;
-  final String notes;
-
-  RemovalJobRecord({
-    required this.jobId,
-    required this.status,
-    this.title = '',
-    required this.customerName,
-    required this.address,
-    required this.phone,
-    required this.liftType,
-    this.liftId = '',
-    this.serialNumber = '',
-    required this.scheduledDate,
-    required this.notes,
-  });
-
-  factory RemovalJobRecord.fromJson(Map<String, dynamic> json) {
-    String s(dynamic v) => v?.toString() ?? '';
-    return RemovalJobRecord(
-      jobId: s(json['job_id']),
-      status: s(json['status']),
-      title: s(json['title']),
-      customerName: s(json['customer_name']),
-      address: s(json['address']),
-      phone: s(json['phone']),
-      liftType: s(json['lift_type']),
-      liftId: s(json['lift_id']),
-      serialNumber: s(json['serial_number']),
-      scheduledDate: s(json['scheduled_date']),
-      notes: s(json['notes']),
-    );
-  }
-}
-
-// =======================
-// WEB LEAD MODEL
-// =======================
-
-class WebLeadRecord {
-  final int id;
-  final DateTime createdAt;
-  final String name;
-  final String email;
-  final String phone;
-  final String message;
-  final String source;
-  final String status;
-
-  WebLeadRecord({
-    required this.id,
-    required this.createdAt,
-    required this.name,
-    required this.email,
-    required this.phone,
-    required this.message,
-    required this.source,
-    required this.status,
-  });
-
-  factory WebLeadRecord.fromJson(Map<String, dynamic> json) {
-    String s(dynamic v) => v?.toString() ?? '';
-    return WebLeadRecord(
-      id: (json['id'] as num).toInt(),
-      createdAt: DateTime.parse(json['created_at'].toString()),
-      name: s(json['name']),
-      email: s(json['email']),
-      phone: s(json['phone']),
-      message: s(json['message']),
-      source: s(json['source']),
-      status: s(json['status']),
-    );
-  }
-}
 
 // =======================
 // ANNUALS SCREEN
@@ -1895,8 +1558,8 @@ class _AnnualsScreenState extends State<AnnualsScreen> {
   Future<Map<String, String>> _loadUser() async {
     final prefs = await SharedPreferences.getInstance();
     return {
-      'name': prefs.getString('user_name') ?? '',
-      'email': prefs.getString('user_email') ?? '',
+      'name': prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
+      'email': AuthService.instance.profile?.email ?? '',
     };
   }
 
@@ -1942,8 +1605,8 @@ class _AnnualsScreenState extends State<AnnualsScreen> {
       final prefs = await SharedPreferences.getInstance();
       await sbDeleteAnnual(
         annualId: record.annualId,
-        userEmail: prefs.getString('user_email') ?? '',
-        userName: prefs.getString('user_name') ?? '',
+        userEmail: AuthService.instance.profile?.email ?? '',
+        userName: prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
       );
       _refresh();
     } catch (e) {
@@ -2255,8 +1918,8 @@ class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
   Future<Map<String, String>> _loadUser() async {
     final prefs = await SharedPreferences.getInstance();
     return {
-      'name': prefs.getString('user_name') ?? '',
-      'email': prefs.getString('user_email') ?? '',
+      'name': prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
+      'email': AuthService.instance.profile?.email ?? '',
     };
   }
 
@@ -2817,8 +2480,8 @@ class _AnnualFormScreenState extends State<AnnualFormScreen> {
     setState(() => _saving = true);
     try {
       final prefs = await SharedPreferences.getInstance();
-      final userName = prefs.getString('user_name') ?? '';
-      final userEmail = prefs.getString('user_email') ?? '';
+      final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
+      final userEmail = AuthService.instance.profile?.email ?? '';
 
       await sbUpsertAnnual(
         userEmail: userEmail,
@@ -3121,45 +2784,6 @@ class _PickupListScreenState extends State<PickupListScreen> {
 
   Future<void> _refresh() async => _fetchItems();
 
-  Future<void> _openUserSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    final userName = prefs.getString('user_name') ?? '';
-
-    final nameController = TextEditingController(text: userName);
-
-    await showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('User Settings'),
-          content: TextField(
-            controller: nameController,
-            decoration:
-                const InputDecoration(labelText: 'Your name (for logs)'),
-          ),
-          actions: [
-            TextButton(
-              child: const Text('Cancel'),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: kBrandGreen,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Save'),
-              onPressed: () async {
-                await prefs.setString('user_name', nameController.text.trim());
-                if (!context.mounted) return;
-                Navigator.of(context).pop();
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-
   @override
   void dispose() {
     _controller.dispose();
@@ -3175,11 +2799,6 @@ class _PickupListScreenState extends State<PickupListScreen> {
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _refresh,
-          ),
-          IconButton(
-            icon: const Icon(Icons.person),
-            tooltip: 'User settings',
-            onPressed: _openUserSettings,
           ),
         ],
       ),
@@ -3410,14 +3029,16 @@ class _JobsScreenState extends State<JobsScreen>
       // Ramp job: explicit Ramp Install or Ramp Removal type
       if ((jobType == 'Ramp Install' || jobType == 'Ramp Removal') && liftIds.isEmpty && mounted) {
         final isInstall = jobType == 'Ramp Install';
+        final fundingSource = (meta?['funding_source'] as String?) ?? 'Private';
+        final isCcals = fundingSource == 'CCALS';
         final confirm = await showDialog<bool>(
           context: context,
           builder: (_) => AlertDialog(
             title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
             content: Text(
               isInstall
-                  ? 'Select the ramps and quantities used on this job to deduct them from inventory.'
-                  : 'Select the ramps and quantities recovered on this job to add them back to inventory.',
+                  ? 'Select the ramps and quantities used on this job to deduct them from ${isCcals ? 'CCALS' : 'Able Home'} inventory.'
+                  : 'Select the ramps and quantities recovered on this job to add them back to ${isCcals ? 'CCALS' : 'Able Home'} inventory.',
             ),
             actions: [
               TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
@@ -3435,6 +3056,7 @@ class _JobsScreenState extends State<JobsScreen>
               builder: (_) => JobAdjustmentScreen(
                 initialJobRef: event.title,
                 initialTabIndex: isInstall ? 0 : 1,
+                isCcals: isCcals,
               ),
             ),
           );
@@ -3443,8 +3065,8 @@ class _JobsScreenState extends State<JobsScreen>
 
       if (jobType != null && liftIds.isNotEmpty && mounted) {
         final prefs = await SharedPreferences.getInstance();
-        final userName = prefs.getString('user_name') ?? '';
-        final userEmail = prefs.getString('user_email') ?? '';
+        final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
+        final userEmail = AuthService.instance.profile?.email ?? '';
         for (final liftId in liftIds) {
           final lift = await sbFetchLiftById(liftId);
           if (lift == null || !mounted) continue;
@@ -3486,7 +3108,11 @@ class _JobsScreenState extends State<JobsScreen>
                 userEmail: userEmail,
                 userName: userName,
                 note: 'Marked $newStatus via schedule event: ${event.title}',
+                eventDate: newStatus == 'Installed' ? event.start : null,
               );
+              if (newStatus == 'Installed' && lift.customerId.isEmpty && mounted) {
+                await _offerCreateCustomerForLift(context, lift, event);
+              }
             }
           } else if ((jobType == 'Stairlift Service' || jobType == 'Stairlift Annual Service') && mounted) {
             final serviceType = jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
@@ -4084,8 +3710,8 @@ class _RemovalsTabState extends State<_RemovalsTab> {
 
   Future<void> _convertToRemoval(BuildContext context, QbtScheduleEvent event) async {
     final prefs = await SharedPreferences.getInstance();
-    final userEmail = prefs.getString('user_email') ?? '';
-    final userName = prefs.getString('user_name') ?? '';
+    final userEmail = AuthService.instance.profile?.email ?? '';
+    final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
 
     final nameCtrl = TextEditingController(text: event.title);
     final addrCtrl = TextEditingController(text: event.location);
@@ -4263,8 +3889,8 @@ class _ServiceTabState extends State<_ServiceTab> {
 
   Future<void> _convertToServiceCall(BuildContext context, QbtScheduleEvent event) async {
     final prefs = await SharedPreferences.getInstance();
-    final userEmail = prefs.getString('user_email') ?? '';
-    final userName = prefs.getString('user_name') ?? '';
+    final userEmail = AuthService.instance.profile?.email ?? '';
+    final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
 
     final nameCtrl = TextEditingController(text: event.title);
     final addrCtrl = TextEditingController(text: event.location);
@@ -4450,6 +4076,7 @@ class RemovalJobFormScreen extends StatefulWidget {
 class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
   final _formKey = GlobalKey<FormState>();
   bool _saving = false;
+  String _fundingSource = 'Private';
 
   late final TextEditingController _titleController;
   late final TextEditingController _nameController;
@@ -4463,10 +4090,13 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
   String? _linkedSerialNumber;
   String? _linkedLiftLabel;
 
+  static const _fundingSources = ['Private', 'VA', 'CCALS', 'NaviCare', 'Summit', 'Fallon', 'Mass Health', 'Other'];
+
   @override
   void initState() {
     super.initState();
     final e = widget.existing;
+    _fundingSource = e?.fundingSource ?? 'Private';
     _titleController = TextEditingController(text: e?.title ?? '');
     _nameController = TextEditingController(text: e?.customerName ?? '');
     _addressController = TextEditingController(text: e?.address ?? '');
@@ -4563,8 +4193,8 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       await sbUpsertRemovalJob(
-        userEmail: prefs.getString('user_email') ?? '',
-        userName: prefs.getString('user_name') ?? '',
+        userEmail: AuthService.instance.profile?.email ?? '',
+        userName: prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
         jobId: widget.existing?.jobId,
         title: _titleController.text.trim(),
         customerName: _nameController.text.trim(),
@@ -4575,6 +4205,7 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
         notes: _notesController.text.trim(),
         liftId: _linkedLiftId ?? '',
         serialNumber: _linkedSerialNumber ?? '',
+        fundingSource: _fundingSource,
       );
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
@@ -4600,6 +4231,13 @@ class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
+              DropdownButtonFormField<String>(
+                value: _fundingSource,
+                decoration: const InputDecoration(labelText: 'Funding source', border: OutlineInputBorder()),
+                items: _fundingSources.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
+                onChanged: (v) => setState(() => _fundingSource = v ?? 'Private'),
+              ),
+              const SizedBox(height: 12),
               TextFormField(
                 controller: _titleController,
                 decoration: const InputDecoration(
@@ -4952,6 +4590,7 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
   final _formKey = GlobalKey<FormState>();
   bool _saving = false;
   String _jobType = 'Service';
+  String _fundingSource = 'Private';
 
   late final TextEditingController _titleController;
   late final TextEditingController _nameController;
@@ -4966,11 +4605,14 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
   String? _linkedSerialNumber;
   String? _linkedLiftLabel;
 
+  static const _fundingSources = ['Private', 'VA', 'CCALS', 'NaviCare', 'Summit', 'Fallon', 'Mass Health', 'Other'];
+
   @override
   void initState() {
     super.initState();
     final e = widget.existing;
     _jobType = e?.jobType ?? 'Service';
+    _fundingSource = e?.fundingSource ?? 'Private';
     _titleController = TextEditingController(text: e?.title ?? '');
     _nameController = TextEditingController(text: e?.customerName ?? '');
     _addressController = TextEditingController(text: e?.address ?? '');
@@ -5070,8 +4712,8 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       await sbUpsertServiceJob(
-        userEmail: prefs.getString('user_email') ?? '',
-        userName: prefs.getString('user_name') ?? '',
+        userEmail: AuthService.instance.profile?.email ?? '',
+        userName: prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
         jobId: widget.existing?.jobId,
         jobType: _jobType,
         title: _titleController.text.trim(),
@@ -5084,6 +4726,7 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
         notes: _notesController.text.trim(),
         liftId: _linkedLiftId ?? '',
         serialNumber: _linkedSerialNumber ?? '',
+        fundingSource: _fundingSource,
       );
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
@@ -5119,6 +4762,13 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
                       value: 'Annual Service', child: Text('Annual Service')),
                 ],
                 onChanged: (v) => setState(() => _jobType = v ?? 'Service'),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<String>(
+                value: _fundingSource,
+                decoration: const InputDecoration(labelText: 'Funding source', border: OutlineInputBorder()),
+                items: _fundingSources.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
+                onChanged: (v) => setState(() => _fundingSource = v ?? 'Private'),
               ),
               const SizedBox(height: 12),
               TextFormField(
@@ -5253,58 +4903,109 @@ class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
 class _HomeShellState extends State<HomeShell> {
   int _selectedIndex = 0;
 
-  // Keep pages in the same order as the bottom navigation bar.
-  // Use only widgets that exist in this file (or the local placeholder above).
-  final List<Widget> _pages = [
-    const LiftsScreen(),
-    const RampsScreen(),
-    const ScheduleScreen(),
-    const SchedulingQueueScreen(),
-    const PrepScreen(),
-    // const PickupListScreen(), // Hidden for now - not currently in use
-  ];
+  static const double _desktopBreakpoint = 700;
+
+  bool _isDesktop(BuildContext context) =>
+      MediaQuery.of(context).size.width >= _desktopBreakpoint;
+
+  /// Full item list for desktop — all tabs shown.
+  List<({IconData icon, String label, Widget page})> get _desktopItems {
+    final p = widget.profile;
+    return [
+      if (p.canSeeDashboard)
+        (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
+      (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
+      if (p.canSeeOpsHub)
+        (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
+      if (p.canSeeLifts)
+        (icon: Icons.list_alt_rounded, label: 'Lifts', page: const LiftsScreen()),
+      if (p.canSeeRamps)
+        (icon: Icons.stairs_rounded, label: 'Ramps', page: const RampsScreen()),
+      if (p.canSeeCustomers)
+        (icon: Icons.people_outline_rounded, label: 'Customers', page: const CustomersScreen()),
+      if (p.canSeePrepScreen)
+        (icon: Icons.build_rounded, label: 'Prep', page: const PrepScreen()),
+      if (p.canSeeSettings)
+        (icon: Icons.folder_outlined, label: 'Docs', page: const DocumentsScreen()),
+    ];
+  }
+
+  /// Mobile item list — Lifts+Ramps grouped as Inventory; Docs+Prep move to Account menu.
+  List<({IconData icon, String label, Widget page})> get _mobileItems {
+    final p = widget.profile;
+    if (p.isAdmin) {
+      return [
+        (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
+        (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
+        (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
+        (icon: Icons.inventory_2_outlined, label: 'Inventory', page: InventoryScreen(
+          onLifts: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const LiftsScreen())),
+          onRamps: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const RampsScreen())),
+        )),
+        if (p.canSeeCustomers)
+          (icon: Icons.people_outline_rounded, label: 'Customers', page: const CustomersScreen()),
+      ];
+    } else {
+      // Installer — Hub, Schedule, Inventory, Customers, Prep
+      return [
+        (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
+        (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
+        (icon: Icons.inventory_2_outlined, label: 'Inventory', page: InventoryScreen(
+          onLifts: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const LiftsScreen())),
+          onRamps: () => Navigator.of(context).push(
+              MaterialPageRoute(builder: (_) => const RampsScreen())),
+        )),
+        if (p.canSeeCustomers)
+          (icon: Icons.people_outline_rounded, label: 'Customers', page: const CustomersScreen()),
+        if (p.canSeePrepScreen)
+          (icon: Icons.build_rounded, label: 'Prep', page: const PrepScreen()),
+      ];
+    }
+  }
 
   void _onItemTapped(int index) {
     if (_selectedIndex == index) return;
-    setState(() {
-      _selectedIndex = index;
-    });
+    setState(() => _selectedIndex = index);
   }
 
   @override
   Widget build(BuildContext context) {
+    final desktop = _isDesktop(context);
+    final items = desktop ? _desktopItems : _mobileItems;
+    final safeIndex = _selectedIndex.clamp(0, items.length - 1);
     return Scaffold(
       body: IndexedStack(
-        index: _selectedIndex,
-        children: _pages,
+        index: safeIndex,
+        children: items.map((e) => e.page).toList(),
       ),
       bottomNavigationBar: _FloatingNavBar(
-        currentIndex: _selectedIndex,
+        items: items.map((e) => (e.icon, e.label)).toList(),
+        currentIndex: safeIndex,
         onTap: _onItemTapped,
+        onAccountTap: () => showUserMenu(context),
       ),
     );
   }
 }
 
 class _FloatingNavBar extends StatelessWidget {
+  final List<(IconData, String)> items;
   final int currentIndex;
   final ValueChanged<int> onTap;
+  final VoidCallback onAccountTap;
 
   const _FloatingNavBar({
+    required this.items,
     required this.currentIndex,
     required this.onTap,
+    required this.onAccountTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final items = [
-      (Icons.list_alt_rounded, 'Lifts'),
-      (Icons.stairs_rounded, 'Ramps'),
-      (Icons.calendar_month_rounded, 'Schedule'),
-      (Icons.pending_actions_rounded, 'Queue'),
-      (Icons.build_rounded, 'Prep'),
-    ];
-
     return Container(
       color: kBrandGreenDark,
       child: SafeArea(
@@ -5313,6 +5014,7 @@ class _FloatingNavBar extends StatelessWidget {
           height: 62,
           child: Row(
             children: [
+              // Nav items
               ...List.generate(items.length, (i) {
                 final selected = i == currentIndex;
                 final (icon, label) = items[i];
@@ -5338,16 +5040,38 @@ class _FloatingNavBar extends StatelessWidget {
                         ),
                         const SizedBox(height: 2),
                         Text(label,
-                          style: GoogleFonts.nunito(
-                            fontSize: 10,
-                            fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
-                            color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
-                          )),
+                            style: GoogleFonts.nunito(
+                              fontSize: 10,
+                              fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+                              color: selected ? Colors.white : Colors.white.withValues(alpha: 0.4),
+                            )),
                       ],
                     ),
                   ),
                 );
               }),
+              // Account icon — always visible on the right
+              GestureDetector(
+                onTap: onAccountTap,
+                behavior: HitTestBehavior.opaque,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.account_circle_outlined, size: 22,
+                          color: Colors.white.withValues(alpha: 0.7)),
+                      const SizedBox(height: 2),
+                      Text('Account',
+                          style: GoogleFonts.nunito(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w400,
+                            color: Colors.white.withValues(alpha: 0.7),
+                          )),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -5389,7 +5113,7 @@ class _RampsScreenState extends State<RampsScreen> {
   Future<void> _loadUserPrefs() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _userName = prefs.getString('user_name') ?? '';
+      _userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
     });
   }
 
@@ -5405,42 +5129,6 @@ class _RampsScreenState extends State<RampsScreen> {
     setState(() {
       _future = sbFetchInventory();
     });
-  }
-
-  Future<void> _openUserSettings() async {
-    final nameController = TextEditingController(text: _userName);
-
-    await showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('User Settings'),
-          content: TextField(
-            controller: nameController,
-            decoration:
-                const InputDecoration(labelText: 'Your name (for logs)'),
-          ),
-          actions: [
-            TextButton(
-              child: const Text('Cancel'),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: kBrandGreen,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Save'),
-              onPressed: () async {
-                await _saveUserPrefs(nameController.text.trim());
-                if (!context.mounted) return;
-                Navigator.of(context).pop();
-              },
-            ),
-          ],
-        );
-      },
-    );
   }
 
   void _openFullCheck() async {
@@ -5792,11 +5480,6 @@ class _RampsScreenState extends State<RampsScreen> {
             onPressed: _refresh,
             tooltip: 'Refresh',
           ),
-          IconButton(
-            icon: const Icon(Icons.person),
-            tooltip: 'User settings',
-            onPressed: _openUserSettings,
-          ),
         ],
       ),
       body: Column(
@@ -6031,8 +5714,8 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
   Future<Map<String, String>> _loadUser() async {
     final prefs = await SharedPreferences.getInstance();
     return {
-      'name': prefs.getString('user_name') ?? '',
-      'email': prefs.getString('user_email') ?? '',
+      'name': prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
+      'email': AuthService.instance.profile?.email ?? '',
     };
   }
 
@@ -6323,8 +6006,8 @@ class _JobAdjustmentScreenState extends State<JobAdjustmentScreen>
   Future<Map<String, String>> _loadUser() async {
     final prefs = await SharedPreferences.getInstance();
     return {
-      'name': prefs.getString('user_name') ?? '',
-      'email': prefs.getString('user_email') ?? '',
+      'name': prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
+      'email': AuthService.instance.profile?.email ?? '',
     };
   }
 
@@ -6743,45 +6426,6 @@ class _LiftsScreenState extends State<LiftsScreen> {
     );
   }
 
-  Future<void> _openUserSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    final userName = prefs.getString('user_name') ?? '';
-
-    final nameController = TextEditingController(text: userName);
-
-    await showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text('User Settings'),
-          content: TextField(
-            controller: nameController,
-            decoration:
-                const InputDecoration(labelText: 'Your name (for logs)'),
-          ),
-          actions: [
-            TextButton(
-              child: const Text('Cancel'),
-              onPressed: () => Navigator.of(context).pop(),
-            ),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: kBrandGreen,
-                foregroundColor: Colors.white,
-              ),
-              child: const Text('Save'),
-              onPressed: () async {
-                await prefs.setString('user_name', nameController.text.trim());
-                if (!context.mounted) return;
-                Navigator.of(context).pop();
-              },
-            ),
-          ],
-        );
-      },
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -6789,23 +6433,27 @@ class _LiftsScreenState extends State<LiftsScreen> {
         title: const Text('Lifts'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.view_module),
-            tooltip: 'Folding rails',
-            onPressed: _openFoldingRails,
-          ),
-          IconButton(
-            icon: const Icon(Icons.list_alt),
-            tooltip: 'Stairlift quantities',
-            onPressed: _openStairliftQuantities,
-          ),
-          IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _refresh,
           ),
-          IconButton(
-            icon: const Icon(Icons.person),
-            tooltip: 'User settings',
-            onPressed: _openUserSettings,
+          PopupMenuButton<String>(
+            icon: const Icon(Icons.more_vert),
+            tooltip: 'More',
+            onSelected: (v) {
+              switch (v) {
+                case 'folding_rails': _openFoldingRails(); break;
+                case 'quantities':   _openStairliftQuantities(); break;
+                case 'bins':
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const BinWhiteboardScreen()),
+                  );
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'folding_rails', child: Text('Folding Rails')),
+              PopupMenuItem(value: 'quantities',   child: Text('Stairlift Quantities')),
+              PopupMenuItem(value: 'bins',         child: Text('Bin Whiteboard')),
+            ],
           ),
         ],
       ),
@@ -7759,8 +7407,8 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
   Future<void> _adjustFoldingRailQuantity(StairliftItem item, int delta) async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final userName = prefs.getString('user_name') ?? '';
-      final userEmail = prefs.getString('user_email') ?? '';
+      final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
+      final userEmail = AuthService.instance.profile?.email ?? '';
 
       if (userName.isEmpty) {
         if (!mounted) return;
@@ -7845,8 +7493,8 @@ class _FoldingRailsScreenState extends State<FoldingRailsScreen>
     if (result != null && result != item.currentQty) {
       try {
         final prefs = await SharedPreferences.getInstance();
-        final userName = prefs.getString('user_name') ?? '';
-        final userEmail = prefs.getString('user_email') ?? '';
+        final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
+        final userEmail = AuthService.instance.profile?.email ?? '';
 
         if (userName.isEmpty) {
           if (!mounted) return;
@@ -8493,6 +8141,72 @@ class _ChangeHistoryScreenState extends State<ChangeHistoryScreen> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Shared lift history event tile — used in both history tabs and inline views.
+// ---------------------------------------------------------------------------
+
+class _LiftHistoryTile extends StatelessWidget {
+  final LiftHistoryEvent event;
+  const _LiftHistoryTile({required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    final who = event.userName.isNotEmpty ? event.userName : event.userEmail;
+    final ts = formatDate(event.timestamp);
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    event.status.isEmpty ? (event.eventType.isNotEmpty ? event.eventType : 'Update') : event.status,
+                    style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                  ),
+                ),
+                Text(ts, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+              ],
+            ),
+            if (event.location.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text('Location: ${event.location}',
+                    style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+              ),
+            if (event.jobRef.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text('Job: ${event.jobRef}',
+                    style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+              ),
+            if (event.note.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(event.note,
+                    style: TextStyle(fontSize: 12, color: Colors.grey[600])),
+              ),
+            if (who.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 5),
+                child: Row(
+                  children: [
+                    Icon(Icons.person_outline, size: 12, color: Colors.grey[500]),
+                    const SizedBox(width: 3),
+                    Text(who, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// =======================
 /// LIFT DETAIL (with history + service tabs)
 /// =======================
@@ -8510,6 +8224,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
   late Future<List<LiftHistoryEvent>> _historyFuture;
   late Future<List<LiftServiceRecord>> _serviceFuture;
   late Future<List<PrepChecklist>> _prepChecklistsFuture;
+  late Future<List<LiftCustomerHistoryEntry>> _customerHistoryFuture;
 
   // Photos state — starts from the LiftRecord, refreshed after upload/delete
   late List<String> _photoUrls;
@@ -8538,6 +8253,8 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
     _prepChecklistsFuture = sbFetchPrepChecklists(
       serialNumber: _serialForApi,
     );
+
+    _customerHistoryFuture = sbFetchLiftCustomerHistory(_liftIdForApi);
   }
 
   void _openEdit() async {
@@ -8562,8 +8279,8 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      final userName = prefs.getString('user_name') ?? '';
-      final userEmail = prefs.getString('user_email') ?? '';
+      final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
+      final userEmail = AuthService.instance.profile?.email ?? '';
 
       await sbDeleteLift(
         liftId: widget.lift.liftId,
@@ -8702,6 +8419,141 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => _PhotoViewScreen(url: url),
     ));
+  }
+
+  Widget _buildCustomerTab() {
+    final lift = widget.lift;
+    return FutureBuilder<List<LiftCustomerHistoryEntry>>(
+      future: _customerHistoryFuture,
+      builder: (context, snap) {
+        final history = snap.data ?? [];
+        return ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            // Current customer
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: kCardSurface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.grey.withValues(alpha: 0.15)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Current Customer',
+                      style: GoogleFonts.nunito(
+                          fontSize: 12, fontWeight: FontWeight.w800,
+                          color: Colors.grey[600])),
+                  const SizedBox(height: 8),
+                  if (lift.customerName.isNotEmpty) ...[
+                    Text(lift.customerName,
+                        style: GoogleFonts.nunito(
+                            fontSize: 16, fontWeight: FontWeight.w700)),
+                    if (lift.qbCustomerId.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      InkWell(
+                        onTap: () => launchUrl(
+                          Uri.parse(
+                              'https://app.qbo.intuit.com/app/customerdetail?nameId=${lift.qbCustomerId}'),
+                          mode: LaunchMode.externalApplication,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.open_in_new, size: 14, color: kBrandGreen),
+                            const SizedBox(width: 5),
+                            Text('View in QuickBooks',
+                                style: GoogleFonts.nunito(
+                                    fontSize: 13,
+                                    color: kBrandGreen,
+                                    fontWeight: FontWeight.w600)),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ] else
+                    Text('No customer linked yet.',
+                        style: GoogleFonts.nunito(
+                            color: Colors.grey[500], fontSize: 13)),
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    label: Text(lift.customerName.isNotEmpty
+                        ? 'Change Customer'
+                        : 'Link Customer',
+                        style: GoogleFonts.nunito(fontSize: 13)),
+                    onPressed: _openEdit,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 18),
+            // Customer history
+            Text('Customer History',
+                style: GoogleFonts.nunito(
+                    fontSize: 13, fontWeight: FontWeight.w800,
+                    color: Colors.grey[700])),
+            const SizedBox(height: 8),
+            if (snap.connectionState == ConnectionState.waiting)
+              const Center(child: CircularProgressIndicator())
+            else if (history.isEmpty)
+              Text('No previous customers.',
+                  style: GoogleFonts.nunito(
+                      color: Colors.grey[500], fontSize: 13))
+            else
+              ...history.map((e) {
+                final assigned = '${e.assignedAt.month}/${e.assignedAt.day}/${e.assignedAt.year}';
+                final removed = e.removedAt != null
+                    ? '${e.removedAt!.month}/${e.removedAt!.day}/${e.removedAt!.year}'
+                    : 'Current';
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: kCardSurface,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.grey.withValues(alpha: 0.15)),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.person_outline,
+                          size: 18, color: Colors.grey[500]),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(e.customerName,
+                                style: GoogleFonts.nunito(
+                                    fontWeight: FontWeight.w700, fontSize: 14)),
+                            Text('$assigned → $removed',
+                                style: GoogleFonts.nunito(
+                                    fontSize: 11, color: Colors.grey[500])),
+                          ],
+                        ),
+                      ),
+                      if (e.qbCustomerId.isNotEmpty)
+                        IconButton(
+                          icon: const Icon(Icons.open_in_new, size: 16),
+                          color: kBrandGreen,
+                          tooltip: 'View in QB',
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          onPressed: () => launchUrl(
+                            Uri.parse(
+                                'https://app.qbo.intuit.com/app/customerdetail?nameId=${e.qbCustomerId}'),
+                            mode: LaunchMode.externalApplication,
+                          ),
+                        ),
+                    ],
+                  ),
+                );
+              }),
+          ],
+        );
+      },
+    );
   }
 
   Widget _buildPhotosTab() {
@@ -8908,22 +8760,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
           itemCount: filtered.length,
           itemBuilder: (context, index) {
             final e = filtered[index];
-            final ts = formatDate(e.timestamp);
-            return Card(
-              margin: const EdgeInsets.symmetric(vertical: 4),
-              child: ListTile(
-                title: Text(e.status.isEmpty ? 'Status change' : e.status),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(ts),
-                    if (e.location.isNotEmpty) Text('Location: ${e.location}'),
-                    if (e.jobRef.isNotEmpty) Text('Job: ${e.jobRef}'),
-                    if (e.note.isNotEmpty) Text('Note: ${e.note}'),
-                  ],
-                ),
-              ),
-            );
+            return _LiftHistoryTile(event: e);
           },
         );
       },
@@ -8956,25 +8793,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
         return ListView.builder(
           padding: const EdgeInsets.all(12.0),
           itemCount: events.length,
-          itemBuilder: (context, index) {
-            final e = events[index];
-            final ts = formatDate(e.timestamp);
-            return Card(
-              margin: const EdgeInsets.symmetric(vertical: 4),
-              child: ListTile(
-                title: Text(e.status.isEmpty ? '(no status)' : e.status),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(ts),
-                    if (e.location.isNotEmpty) Text('Location: ${e.location}'),
-                    if (e.jobRef.isNotEmpty) Text('Job: ${e.jobRef}'),
-                    if (e.note.isNotEmpty) Text('Note: ${e.note}'),
-                  ],
-                ),
-              ),
-            );
-          },
+          itemBuilder: (context, index) => _LiftHistoryTile(event: events[index]),
         );
       },
     );
@@ -9117,7 +8936,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
         : 'Lift details';
 
     return DefaultTabController(
-      length: 6,
+      length: 7,
       child: Scaffold(
         appBar: AppBar(
           title: Text(title),
@@ -9137,6 +8956,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
             isScrollable: true,
             tabs: [
               Tab(text: 'Details'),
+              Tab(text: 'Customer'),
               Tab(text: 'Locations'),
               Tab(text: 'Service'),
               Tab(text: 'Prep History'),
@@ -9148,6 +8968,7 @@ class _LiftDetailScreenState extends State<LiftDetailScreen> {
         body: TabBarView(
           children: [
             _buildDetailsTab(),
+            _buildCustomerTab(),
             _buildHistoryTab(),
             _buildServiceTab(),
             _buildPrepHistoryTab(),
@@ -9242,8 +9063,57 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
   XFile? _invoicePhoto;
   bool _uploadingPhoto = false;
   bool _saving = false;
+  bool _generatingSummary = false;
 
   String get _serialForApi => widget.lift.serialNumber;
+
+  Future<void> _generateSummary() async {
+    final qbId = widget.lift.qbCustomerId;
+    if (qbId.isEmpty) return;
+    setState(() => _generatingSummary = true);
+    try {
+      final summary = await QuickBooksService.fetchCustomerSummary(qbId);
+      if (!mounted) return;
+      if (summary == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not fetch QB data — check connection')),
+        );
+        return;
+      }
+      final lift = widget.lift;
+      final liftDesc = [lift.brand, lift.series, lift.orientation]
+          .where((s) => s.isNotEmpty && s != 'N/A').join(' ');
+      final lines = <String>[
+        '=== Service Call Summary ===',
+        if (liftDesc.isNotEmpty) 'Lift: $liftDesc',
+        if (lift.serialNumber.isNotEmpty) 'Serial: ${lift.serialNumber}',
+        if (lift.installDate.isNotEmpty) 'Installed: ${lift.installDate}',
+        if (lift.warrantyExpiry.isNotEmpty) 'Warranty expires: ${lift.warrantyExpiry}',
+        '',
+        'Customer: ${summary.customerName}',
+        if (summary.balance > 0)
+          'Outstanding balance: \$${summary.balance.toStringAsFixed(2)}',
+        if (summary.notes.isNotEmpty) ...[
+          '',
+          'QB Notes:',
+          summary.notes,
+        ],
+        if (summary.invoices.isNotEmpty) ...[
+          '',
+          'Recent invoices:',
+          ...summary.invoices.map((inv) =>
+            '  ${inv.date}  \$${inv.amount.toStringAsFixed(2)}'
+            '${inv.balance > 0 ? '  (balance \$${inv.balance.toStringAsFixed(2)})' : ''}'
+            '${inv.note.isNotEmpty ? ' — ${inv.note}' : ''}'),
+        ],
+      ];
+      final generated = lines.join('\n');
+      final existing = _notesController.text.trim();
+      _notesController.text = existing.isEmpty ? generated : '$existing\n\n$generated';
+    } finally {
+      if (mounted) setState(() => _generatingSummary = false);
+    }
+  }
 
   @override
   void initState() {
@@ -9268,8 +9138,8 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
   Future<Map<String, String>> _loadUser() async {
     final prefs = await SharedPreferences.getInstance();
     return {
-      'name': prefs.getString('user_name') ?? '',
-      'email': prefs.getString('user_email') ?? '',
+      'name': prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
+      'email': AuthService.instance.profile?.email ?? '',
     };
   }
 
@@ -9459,8 +9329,29 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
                 labelText: 'Notes',
                 border: OutlineInputBorder(),
               ),
-              maxLines: 3,
+              maxLines: 6,
             ),
+            if (widget.lift.qbCustomerId.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: _generatingSummary
+                      ? const SizedBox(width: 14, height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.auto_awesome_outlined, size: 16),
+                  label: Text(
+                    _generatingSummary ? 'Generating…' : 'Generate Customer Summary',
+                    style: GoogleFonts.nunito(fontSize: 13),
+                  ),
+                  onPressed: _generatingSummary ? null : _generateSummary,
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: kBrandGreen,
+                    side: BorderSide(color: kBrandGreen.withValues(alpha: 0.5)),
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             // Invoice photo picker
             if (widget.offerInvoicePhoto || _invoicePhoto != null) ...[
@@ -9538,6 +9429,11 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   String _railType = 'Straight';
   String? _acquisitionSource = 'Private Pay';
 
+  // Customer link
+  String? _linkedCustomerId;
+  String? _linkedCustomerName;
+  String? _linkedQbCustomerId;
+
   final _serialController = TextEditingController();
   final _binNumberController = TextEditingController();
   final _dateAcquiredController = TextEditingController();
@@ -9547,6 +9443,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   final _installerNameController = TextEditingController();
   final _lastPrepDateController = TextEditingController();
   final _notesController = TextEditingController();
+  final _buybackPriceController = TextEditingController();
 
   bool _saving = false;
 
@@ -9578,8 +9475,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
       final prefs = await SharedPreferences.getInstance();
       await sbDeleteLift(
         liftId: lift.liftId,
-        userEmail: prefs.getString('user_email') ?? '',
-        userName: prefs.getString('user_name') ?? '',
+        userEmail: AuthService.instance.profile?.email ?? '',
+        userName: prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Lift deleted')));
@@ -9617,6 +9514,12 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
       _cleanBatteriesStatus = existing.cleanBatteriesStatus;
       _railType = existing.railType.isEmpty ? 'Straight' : existing.railType;
       _acquisitionSource = existing.acquisitionSource.isEmpty ? 'Private Pay' : existing.acquisitionSource;
+      if (existing.buybackPrice != null) {
+        _buybackPriceController.text = existing.buybackPrice!.toStringAsFixed(0);
+      }
+      _linkedCustomerId = existing.customerId.isEmpty ? null : existing.customerId;
+      _linkedCustomerName = existing.customerName.isEmpty ? null : existing.customerName;
+      _linkedQbCustomerId = existing.qbCustomerId.isEmpty ? null : existing.qbCustomerId;
     }
 
     _loadInventory();
@@ -9745,8 +9648,8 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
   Future<Map<String, String>> _loadUser() async {
     final prefs = await SharedPreferences.getInstance();
     return {
-      'name': prefs.getString('user_name') ?? '',
-      'email': prefs.getString('user_email') ?? '',
+      'name': prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
+      'email': AuthService.instance.profile?.email ?? '',
     };
   }
 
@@ -9910,7 +9813,40 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
         cleanBatteriesStatus: _cleanBatteriesStatus,
         railType: _railType,
         acquisitionSource: _acquisitionSource ?? '',
+        customerId: _linkedCustomerId ?? '',
+        customerName: _linkedCustomerName ?? '',
+        qbCustomerId: _linkedQbCustomerId ?? '',
+        buybackPrice: double.tryParse(_buybackPriceController.text.trim()),
       );
+
+      // Customer history + QB note — fire-and-forget, don't block save
+      final prevCustomer = widget.existing?.qbCustomerId ?? '';
+      final newQbId = _linkedQbCustomerId ?? '';
+      final newName = _linkedCustomerName ?? '';
+      if (newQbId != prevCustomer) {
+        if (prevCustomer.isNotEmpty) {
+          // Customer changed — mark old one as removed
+          unawaited(sbLiftCustomerRemoved(liftId: savedLiftId));
+        }
+        if (newQbId.isNotEmpty) {
+          // New customer assigned — write history and append QB note
+          unawaited(sbLiftCustomerAssigned(
+            liftId: savedLiftId,
+            customerName: newName,
+            qbCustomerId: newQbId,
+          ));
+          final brand = _selectedBrand ?? '';
+          final series = _selectedSeries ?? '';
+          final serial = _serialController.text.trim();
+          final note = 'Lift assigned: $brand $series'
+              '${serial.isNotEmpty ? ' (SN $serial)' : ''}'
+              '${_installDateController.text.trim().isNotEmpty ? ', installed ${_installDateController.text.trim()}' : ''}';
+          unawaited(QuickBooksService.appendNoteToCustomer(
+            qbCustomerId: newQbId,
+            note: note,
+          ));
+        }
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -9976,6 +9912,7 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
     _installerNameController.dispose();
     _lastPrepDateController.dispose();
     _notesController.dispose();
+    _buybackPriceController.dispose();
     super.dispose();
   }
 
@@ -10129,14 +10066,84 @@ class _LiftFormScreenState extends State<LiftFormScreen> {
               value: _acquisitionSource,
               items: const [
                 DropdownMenuItem(value: 'VA', child: Text('VA')),
+                DropdownMenuItem(value: 'CCALS', child: Text('CCALS')),
+                DropdownMenuItem(value: 'NaviCare', child: Text('NaviCare')),
+                DropdownMenuItem(value: 'Summit', child: Text('Summit')),
+                DropdownMenuItem(value: 'Fallon', child: Text('Fallon')),
+                DropdownMenuItem(value: 'Mass Health', child: Text('Mass Health')),
                 DropdownMenuItem(value: 'Private Pay', child: Text('Private Pay')),
+                DropdownMenuItem(value: 'Buyback', child: Text('Buyback')),
+                DropdownMenuItem(value: 'Other', child: Text('Other')),
               ],
               decoration: const InputDecoration(
-                labelText: 'Job Type (optional)',
+                labelText: 'Acquisition Source (optional)',
                 border: OutlineInputBorder(),
               ),
               onChanged: (value) => setState(() => _acquisitionSource = value),
             ),
+            if (_acquisitionSource == 'Buyback') ...[
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _buybackPriceController,
+                decoration: const InputDecoration(
+                  labelText: 'Buyback Price Paid (\$)',
+                  border: OutlineInputBorder(),
+                  prefixText: '\$ ',
+                ),
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              ),
+            ],
+            const SizedBox(height: 12),
+            // Customer link
+            InkWell(
+              borderRadius: BorderRadius.circular(8),
+              onTap: () async {
+                final result = await showSearch<_QbCustomerResult?>(
+                  context: context,
+                  delegate: _CustomerSearchDelegate(),
+                );
+                if (result != null) {
+                  setState(() {
+                    _linkedCustomerId = null; // QB-linked lifts use qbCustomerId, not local UUID
+                    _linkedCustomerName = result.name;
+                    _linkedQbCustomerId = result.qbCustomerId;
+                  });
+                }
+              },
+              child: InputDecorator(
+                decoration: const InputDecoration(
+                  labelText: 'Linked Customer (optional)',
+                  border: OutlineInputBorder(),
+                  suffixIcon: Icon(Icons.search),
+                ),
+                child: Text(
+                  _linkedCustomerName ?? 'Tap to search customers…',
+                  style: TextStyle(
+                    color: _linkedCustomerName != null ? Colors.black87 : Colors.grey[500],
+                  ),
+                ),
+              ),
+            ),
+            if (_linkedCustomerId != null) ...[
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton(
+                  onPressed: () => setState(() {
+                    _linkedCustomerId = null;
+                    _linkedCustomerName = null;
+                    _linkedQbCustomerId = null;
+                  }),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.red,
+                    padding: EdgeInsets.zero,
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: const Text('Remove link', style: TextStyle(fontSize: 12)),
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             DropdownButtonFormField<String>(
               value: _selectedOrientation,
@@ -10857,14 +10864,16 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
       if ((jobType == 'Ramp Install' || jobType == 'Ramp Removal') && liftIds.isEmpty && mounted) {
         final isInstall = jobType == 'Ramp Install';
+        final fundingSource = (meta['funding_source'] as String?) ?? 'Private';
+        final isCcals = fundingSource == 'CCALS';
         final confirm = await showDialog<bool>(
           context: context,
           builder: (_) => AlertDialog(
             title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
             content: Text(
               isInstall
-                  ? 'Select the ramps and quantities used on this job to deduct them from inventory.'
-                  : 'Select the ramps and quantities recovered on this job to add them back to inventory.',
+                  ? 'Select the ramps and quantities used on this job to deduct them from ${isCcals ? 'CCALS' : 'Able Home'} inventory.'
+                  : 'Select the ramps and quantities recovered on this job to add them back to ${isCcals ? 'CCALS' : 'Able Home'} inventory.',
             ),
             actions: [
               TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
@@ -10882,6 +10891,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               builder: (_) => JobAdjustmentScreen(
                 initialJobRef: event.title,
                 initialTabIndex: isInstall ? 0 : 1,
+                isCcals: isCcals,
               ),
             ),
           );
@@ -10890,8 +10900,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
       if (jobType != null && liftIds.isNotEmpty && mounted) {
         final prefs = await SharedPreferences.getInstance();
-        final userName = prefs.getString('user_name') ?? '';
-        final userEmail = prefs.getString('user_email') ?? '';
+        final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
+        final userEmail = AuthService.instance.profile?.email ?? '';
         for (final liftId in liftIds) {
           final lift = await sbFetchLiftById(liftId);
           if (lift == null || !mounted) continue;
@@ -10933,7 +10943,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                 userEmail: userEmail,
                 userName: userName,
                 note: 'Marked $newStatus via schedule event: ${event.title}',
+                eventDate: newStatus == 'Installed' ? event.start : null,
               );
+              if (newStatus == 'Installed' && lift.customerId.isEmpty && mounted) {
+                await _offerCreateCustomerForLift(context, lift, event);
+              }
             }
           } else if ((jobType == 'Stairlift Service' || jobType == 'Stairlift Annual Service') && mounted) {
             final serviceType = jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
@@ -11468,6 +11482,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   bool _savingJobType = false;
   String? _eventSource;
   bool _savingSource = false;
+  String _eventFundingSource = 'Private';
   List<LiftRecord> _linkedLifts = [];
   bool _loadingMeta = true;
   bool _savingLift = false;
@@ -11519,6 +11534,9 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     setState(() {
       _jobType = jobType;
       _eventSource = meta['source'] as String?;
+      _eventFundingSource = (meta['funding_source'] as String?)?.isNotEmpty == true
+          ? meta['funding_source'] as String
+          : 'Private';
       _linkedLifts = lifts;
       _loadingMeta = false;
       _eventPhotoUrls = photos;
@@ -11638,8 +11656,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       await sbMarkLiftStatus(
         liftId: lift.liftId,
         newStatus: 'Assigned',
-        userEmail: prefs.getString('user_email') ?? '',
-        userName: prefs.getString('user_name') ?? '',
+        userEmail: AuthService.instance.profile?.email ?? '',
+        userName: prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
         note: 'Assigned to schedule event: ${widget.event.title}',
       );
     }
@@ -11670,8 +11688,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       await sbMarkLiftStatus(
         liftId: lift.liftId,
         newStatus: 'New',
-        userEmail: prefs.getString('user_email') ?? '',
-        userName: prefs.getString('user_name') ?? '',
+        userEmail: AuthService.instance.profile?.email ?? '',
+        userName: prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
         note: 'Unlinked from schedule event: ${widget.event.title}',
       );
     }
@@ -11740,8 +11758,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   Future<void> _handleSmartCompletion() async {
     debugPrint('[SmartComplete] jobType=$_jobType lifts=${_linkedLifts.map((l) => l.liftId).toList()}');
     final prefs = await SharedPreferences.getInstance();
-    final userName = prefs.getString('user_name') ?? '';
-    final userEmail = prefs.getString('user_email') ?? '';
+    final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
+    final userEmail = AuthService.instance.profile?.email ?? '';
 
     // Ramp job: explicit Ramp Install or Ramp Removal type
     if (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal') {
@@ -11772,6 +11790,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
             builder: (_) => JobAdjustmentScreen(
               initialJobRef: widget.event.title,
               initialTabIndex: isInstall ? 0 : 1,
+              isCcals: _eventFundingSource == 'CCALS',
             ),
           ),
         );
@@ -11811,6 +11830,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                 userEmail: userEmail,
                 userName: userName,
                 note: 'Marked installed via schedule event: ${widget.event.title}',
+                eventDate: widget.event.start,
               );
               debugPrint('[SmartComplete] sbMarkLiftStatus done');
             }
@@ -12868,6 +12888,7 @@ class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
           prefillLiftIds: liftIds,
           sourceJobId: job.jobId,
           sourceJobTable: 'service_jobs',
+          prefillFundingSource: job.fundingSource,
         ),
       ),
     );
@@ -12896,6 +12917,7 @@ class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
           prefillLiftIds: liftIds,
           sourceJobId: job.jobId,
           sourceJobTable: 'removal_jobs',
+          prefillFundingSource: job.fundingSource,
         ),
       ),
     );
@@ -13397,477 +13419,133 @@ class _QueueCardState extends State<_QueueCard> {
 }
 
 // ---------------------------------------------------------------------------
-// Schedule event form (create + edit)
+// ---------------------------------------------------------------------------
+// Customer search delegate — used by LiftFormScreen to link a lift to a customer
 // ---------------------------------------------------------------------------
 
-class ScheduleEventFormScreen extends StatefulWidget {
-  final Map<String, QbtUser> users;
-  final QbtScheduleEvent? existingEvent;
-  final DateTime initialDate;
+// QB-backed customer search — searches QuickBooks live.
+// Returns a (name, qbCustomerId) pair — no local Supabase customer record needed.
+typedef _QbCustomerResult = ({String name, String qbCustomerId});
 
-  // Pre-fill values when creating from a queue job
-  final String? prefillTitle;
-  final String? prefillLocation;
-  final String? prefillNotes;
-  final String? prefillJobType;
-  final List<String>? prefillLiftIds;
-  final String? sourceJobId;
-  final String? sourceJobTable; // 'service_jobs' or 'removal_jobs'
-
-  const ScheduleEventFormScreen({
-    super.key,
-    required this.users,
-    this.existingEvent,
-    required this.initialDate,
-    this.prefillTitle,
-    this.prefillLocation,
-    this.prefillNotes,
-    this.prefillJobType,
-    this.prefillLiftIds,
-    this.sourceJobId,
-    this.sourceJobTable,
-  });
+class _CustomerSearchDelegate extends SearchDelegate<_QbCustomerResult?> {
+  @override
+  List<Widget> buildActions(BuildContext context) => [
+    if (query.isNotEmpty)
+      IconButton(icon: const Icon(Icons.clear), onPressed: () => query = ''),
+  ];
 
   @override
-  State<ScheduleEventFormScreen> createState() => _ScheduleEventFormScreenState();
+  Widget buildLeading(BuildContext context) => IconButton(
+    icon: const Icon(Icons.arrow_back),
+    onPressed: () => close(context, null),
+  );
+
+  @override
+  Widget buildResults(BuildContext context) => _QbCustomerSearchResults(
+    query: query,
+    onSelected: (r) => close(context, r),
+  );
+
+  @override
+  Widget buildSuggestions(BuildContext context) => _QbCustomerSearchResults(
+    query: query,
+    onSelected: (r) => close(context, r),
+  );
 }
 
-class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
-  final _formKey = GlobalKey<FormState>();
-  late final TextEditingController _titleCtrl;
-  late final TextEditingController _notesCtrl;
-  late final TextEditingController _locationCtrl;
+class _QbCustomerSearchResults extends StatefulWidget {
+  final String query;
+  final void Function(_QbCustomerResult) onSelected;
+  const _QbCustomerSearchResults({required this.query, required this.onSelected});
 
-  late DateTime _date;
-  late TimeOfDay _startTime;
-  late TimeOfDay _endTime;
-  bool _allDay = false;
-  List<String> _selectedUserIds = [];
-  late String _selectedColor;
-  String? _jobType;
-  bool _saving = false;
-  bool _deleting = false;
+  @override
+  State<_QbCustomerSearchResults> createState() => _QbCustomerSearchResultsState();
+}
 
-  static const _jobTypeOptions = [
-    'Stairlift Install',
-    'Stairlift Removal',
-    'Stairlift Service',
-    'Stairlift Annual Service',
-    'Ramp Install',
-    'Ramp Removal',
-    'Reminder',
-    'Other',
-  ];
+class _QbCustomerSearchResultsState extends State<_QbCustomerSearchResults> {
+  List<QbCustomer> _results = [];
+  bool _loading = false;
+  bool _notConnected = false;
+  String _lastQuery = '';
 
-  static const _colorOptions = [
-    '#2196F3', // blue
-    '#EF6C00', // orange
-    '#43A047', // green
-    '#888888', // grey
-    '#F44336', // red (Steve)
-    '#8A2731', // dark red
-    '#9C27B0', // purple
-    '#827717', // olive/dark yellow
-    '#F8C499', // peach
-    '#010101', // black
-  ];
-
-  bool get _isEditing => widget.existingEvent != null;
+  @override
+  void didUpdateWidget(_QbCustomerSearchResults old) {
+    super.didUpdateWidget(old);
+    if (widget.query != _lastQuery) _search();
+  }
 
   @override
   void initState() {
     super.initState();
-    final e = widget.existingEvent;
-    _titleCtrl = TextEditingController(text: e?.title ?? widget.prefillTitle ?? '');
-    _notesCtrl = TextEditingController(text: e?.notes ?? widget.prefillNotes ?? '');
-    _locationCtrl = TextEditingController(text: e?.location ?? widget.prefillLocation ?? '');
-    _allDay = e?.allDay ?? false;
-    _selectedColor = e?.color ?? '#2196F3';
-    _selectedUserIds = List.from(e?.assignedUserIds ?? []);
+    _search();
+  }
 
-    if (e != null) {
-      final startLocal = e.start.toLocal();
-      final endLocal = e.end.toLocal();
-      _date = DateTime(startLocal.year, startLocal.month, startLocal.day);
-      _startTime = TimeOfDay.fromDateTime(startLocal);
-      _endTime = TimeOfDay.fromDateTime(endLocal);
-      // Load existing job type from Supabase metadata
-      sbGetEventMeta(e.id).then((meta) {
-        if (mounted) setState(() => _jobType = meta['job_type']);
-      });
-    } else {
-      _date = widget.initialDate;
-      _startTime = const TimeOfDay(hour: 8, minute: 0);
-      _endTime = const TimeOfDay(hour: 10, minute: 0);
-      if (widget.prefillJobType != null) _jobType = widget.prefillJobType;
+  Future<void> _search() async {
+    final q = widget.query.trim();
+    _lastQuery = q;
+    if (q.length < 2) {
+      setState(() { _results = []; _loading = false; });
+      return;
     }
-  }
-
-  @override
-  void dispose() {
-    _titleCtrl.dispose();
-    _notesCtrl.dispose();
-    _locationCtrl.dispose();
-    super.dispose();
-  }
-
-  DateTime _toDateTime(DateTime date, TimeOfDay time) =>
-      DateTime(date.year, date.month, date.day, time.hour, time.minute);
-
-  String _formatTimeOfDay(TimeOfDay t) {
-    final h = t.hour % 12 == 0 ? 12 : t.hour % 12;
-    final m = t.minute.toString().padLeft(2, '0');
-    final ampm = t.hour < 12 ? 'AM' : 'PM';
-    return '$h:$m $ampm';
-  }
-
-  Future<void> _pickDate() async {
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: _date,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2030),
-    );
-    if (picked != null) setState(() => _date = picked);
-  }
-
-  Future<void> _pickTime({required bool isStart}) async {
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: isStart ? _startTime : _endTime,
-      initialEntryMode: TimePickerEntryMode.input,
-    );
-    if (picked != null) {
-      setState(() {
-        if (isStart) {
-          _startTime = picked;
-          // Auto-advance end time if it's now before start
-          final startMin = picked.hour * 60 + picked.minute;
-          final endMin = _endTime.hour * 60 + _endTime.minute;
-          if (endMin <= startMin) {
-            final newEnd = startMin + 60;
-            _endTime = TimeOfDay(hour: newEnd ~/ 60 % 24, minute: newEnd % 60);
-          }
-        } else {
-          _endTime = picked;
-        }
-      });
-    }
-  }
-
-  Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) return;
-    setState(() => _saving = true);
-
-    final start = _allDay
-        ? DateTime(_date.year, _date.month, _date.day, 0, 0)
-        : _toDateTime(_date, _startTime);
-    final end = _allDay
-        ? DateTime(_date.year, _date.month, _date.day, 23, 59)
-        : _toDateTime(_date, _endTime);
-
-    final event = QbtScheduleEvent(
-      id: widget.existingEvent?.id ?? '',
-      title: _titleCtrl.text.trim(),
-      notes: _notesCtrl.text.trim(),
-      start: start,
-      end: end,
-      allDay: _allDay,
-      location: _locationCtrl.text.trim(),
-      color: _selectedColor,
-      assignedUserIds: _selectedUserIds,
-      active: true,
-    );
-
+    setState(() => _loading = true);
     try {
-      QbtScheduleEvent saved;
-      if (_isEditing) {
-        saved = await qbtUpdateScheduleEvent(event);
-      } else {
-        saved = await qbtCreateScheduleEvent(event);
+      final results = await QuickBooksService.searchCustomers(q);
+      if (mounted && widget.query.trim() == _lastQuery) {
+        setState(() { _results = results; _loading = false; });
       }
-      // Persist job type metadata (independent of QBT)
-      await sbSetEventJobType(saved.id, _jobType);
-
-      // Link lift IDs and source job when scheduling from the queue
-      final prefillLiftIds = widget.prefillLiftIds ?? [];
-      if (prefillLiftIds.isNotEmpty) {
-        await sbSetEventLiftIds(saved.id, prefillLiftIds);
-      }
-      final srcId = widget.sourceJobId;
-      final srcTable = widget.sourceJobTable;
-      if (srcId != null && srcId.isNotEmpty && srcTable != null) {
-        await sbSetEventSource(saved.id, '$srcTable:$srcId');
-        final scheduledDateStr =
-            '${_date.month.toString().padLeft(2, '0')}/${_date.day.toString().padLeft(2, '0')}/${_date.year}';
-        if (srcTable == 'service_jobs') {
-          await sbUpdateServiceJobStatus(jobId: srcId, status: 'Scheduled', scheduledDate: scheduledDateStr);
-        } else {
-          await sbUpdateRemovalJobStatus(jobId: srcId, status: 'Scheduled', scheduledDate: scheduledDateStr);
-        }
-      }
-
-      if (!mounted) return;
-      Navigator.pop(context, true);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.toString().replaceFirst('Exception: ', '')),
-          backgroundColor: Colors.red,
-        ),
-      );
-    }
-  }
-
-  Future<void> _delete() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Delete Event'),
-        content: const Text('Are you sure you want to delete this event?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    setState(() => _deleting = true);
-    try {
-      await qbtDeleteScheduleEvent(widget.existingEvent!.id);
-      if (!mounted) return;
-      Navigator.pop(context, true);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _deleting = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.toString().replaceFirst('Exception: ', '')),
-          backgroundColor: Colors.red,
-        ),
-      );
+    } on QbNotConnectedException {
+      if (mounted) setState(() { _loading = false; _notConnected = true; });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final sortedUsers = widget.users.values.toList()
-      ..sort((a, b) => a.displayName.compareTo(b.displayName));
-
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: kBrandGreenDark,
-        foregroundColor: Colors.white,
-        title: Text(_isEditing ? 'Edit Event' : 'New Event'),
-        actions: [
-          if (_isEditing)
-            IconButton(
-              icon: _deleting
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
-                    )
-                  : const Icon(Icons.delete_outline),
-              tooltip: 'Delete',
-              onPressed: _deleting ? null : _delete,
-            ),
-        ],
-      ),
-      body: Form(
-        key: _formKey,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            // Title
-            TextFormField(
-              controller: _titleCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Title *',
-                border: OutlineInputBorder(),
-              ),
-              validator: (v) =>
-                  (v == null || v.trim().isEmpty) ? 'Title is required' : null,
-              textCapitalization: TextCapitalization.sentences,
-            ),
-            const SizedBox(height: 16),
-
-            // Job type
-            DropdownButtonFormField<String>(
-              initialValue: _jobType,
-              decoration: const InputDecoration(
-                labelText: 'Job Type',
-                border: OutlineInputBorder(),
-              ),
-              hint: const Text('Select job type (optional)'),
-              items: [
-                const DropdownMenuItem<String>(value: null, child: Text('— None —')),
-                ..._jobTypeOptions.map((t) => DropdownMenuItem(value: t, child: Text(t))),
-              ],
-              onChanged: (v) => setState(() => _jobType = v),
-            ),
-            const SizedBox(height: 16),
-
-            // Date
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.calendar_today, color: kBrandGreen),
-              title: const Text('Date'),
-              subtitle: Text(
-                  '${_date.month}/${_date.day}/${_date.year}'),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: _pickDate,
-            ),
-            const Divider(height: 1),
-
-            // All day toggle
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('All Day'),
-              value: _allDay,
-              activeThumbColor: kBrandGreen,
-              onChanged: (v) => setState(() => _allDay = v),
-            ),
-            const Divider(height: 1),
-
-            // Start / end time (hidden when all day)
-            if (!_allDay) ...[
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.access_time, color: kBrandGreen),
-                title: const Text('Start time'),
-                subtitle: Text(_formatTimeOfDay(_startTime)),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => _pickTime(isStart: true),
-              ),
-              const Divider(height: 1),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.access_time_filled, color: kBrandGreen),
-                title: const Text('End time'),
-                subtitle: Text(_formatTimeOfDay(_endTime)),
-                trailing: const Icon(Icons.chevron_right),
-                onTap: () => _pickTime(isStart: false),
-              ),
-              const Divider(height: 1),
-            ],
-
-            const SizedBox(height: 16),
-
-            // Location
-            TextFormField(
-              controller: _locationCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Location / Address',
-                border: OutlineInputBorder(),
-                prefixIcon: Icon(Icons.location_on_outlined),
-              ),
-              textCapitalization: TextCapitalization.words,
-            ),
-            const SizedBox(height: 16),
-
-            // Notes
-            TextFormField(
-              controller: _notesCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Notes',
-                border: OutlineInputBorder(),
-                alignLabelWithHint: true,
-              ),
-              maxLines: 5,
-              textCapitalization: TextCapitalization.sentences,
-            ),
-            const SizedBox(height: 16),
-
-            // Assign to
-            const Text('Assign to',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: sortedUsers.map((user) {
-                final selected = _selectedUserIds.contains(user.id);
-                return FilterChip(
-                  label: Text(user.displayName),
-                  selected: selected,
-                  selectedColor: kBrandGreen.withAlpha(40),
-                  checkmarkColor: kBrandGreen,
-                  onSelected: (v) {
-                    setState(() {
-                      if (v) {
-                        _selectedUserIds.add(user.id);
-                      } else {
-                        _selectedUserIds.remove(user.id);
-                      }
-                    });
-                  },
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 16),
-
-            // Color
-            const Text('Color',
-                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 10,
-              children: _colorOptions.map((hex) {
-                final c = Color(int.parse('FF${hex.replaceAll('#', '')}', radix: 16));
-                final selected = _selectedColor == hex;
-                return GestureDetector(
-                  onTap: () => setState(() => _selectedColor = hex),
-                  child: Container(
-                    width: 34,
-                    height: 34,
-                    decoration: BoxDecoration(
-                      color: c,
-                      shape: BoxShape.circle,
-                      border: selected
-                          ? Border.all(color: Colors.black, width: 2.5)
-                          : null,
-                    ),
-                    child: selected
-                        ? Icon(Icons.check, color: c.computeLuminance() > 0.35 ? Colors.black87 : Colors.white, size: 18)
-                        : null,
-                  ),
-                );
-              }).toList(),
-            ),
-
-            const SizedBox(height: 24),
-
-            // Save button
-            ElevatedButton.icon(
-              onPressed: _saving ? null : _save,
-              icon: _saving
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.save),
-              label: Text(_saving ? 'Saving...' : 'Save Event'),
-              style: ElevatedButton.styleFrom(
-                minimumSize: const Size.fromHeight(48),
-                backgroundColor: kBrandGreen,
-                foregroundColor: Colors.white,
-              ),
-            ),
-          ],
+    if (_notConnected) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Text(
+            'QuickBooks not connected.\nConnect QB in the Account menu to search customers.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey[600]),
+          ),
         ),
-      ),
+      );
+    }
+    if (_loading) return const Center(child: CircularProgressIndicator());
+    if (widget.query.trim().length < 2) {
+      return Center(
+        child: Text('Type at least 2 characters to search',
+            style: TextStyle(color: Colors.grey[600])),
+      );
+    }
+    if (_results.isEmpty) {
+      return Center(
+        child: Text('No QB customers found for "${widget.query}"',
+            style: TextStyle(color: Colors.grey[600])),
+      );
+    }
+    return ListView.builder(
+      itemCount: _results.length,
+      itemBuilder: (ctx, i) {
+        final c = _results[i];
+        return ListTile(
+          leading: CircleAvatar(
+            backgroundColor: kBrandGreen.withValues(alpha: 0.12),
+            child: Text(
+              c.name.isNotEmpty ? c.name[0].toUpperCase() : '?',
+              style: const TextStyle(color: kBrandGreen, fontWeight: FontWeight.w700),
+            ),
+          ),
+          title: Text(c.name),
+          subtitle: Text(c.address.isNotEmpty ? c.address : c.phone,
+              style: TextStyle(color: Colors.grey[600], fontSize: 12)),
+          onTap: () => widget.onSelected((name: c.name, qbCustomerId: c.id)),
+        );
+      },
     );
   }
 }
+

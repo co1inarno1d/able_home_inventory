@@ -17,21 +17,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'qbt_api.dart' show QbtScheduleEvent;
 
-import 'main.dart'
-    show
-        AnnualRecord,
-        InventoryChange,
-        InventoryData,
-        LiftHistoryEvent,
-        LiftRecord,
-        LiftServiceRecord,
-        PrepChecklist,
-        RampItem,
-        RemovalJobRecord,
-        ServiceJobRecord,
-        StairliftItem,
-        WebLeadRecord,
-        normalizeDrivePhotoUrl;
+import 'auth/auth.dart' show UserProfile, UserRole;
+import 'models/models.dart';
+import 'utils/utils.dart' show normalizeDrivePhotoUrl, extractCity;
+
 
 // ---------------------------------------------------------------------------
 // CONFIG
@@ -42,6 +31,7 @@ const String _supabaseAnonKey =
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImthdWpjemJodGFqcWZyamdieGZ0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE0NDI3NjYsImV4cCI6MjA4NzAxODc2Nn0.WbxeNDGKlOVEy7_2F_VBoa0oRv0JHqK1NdpP1G6LDbk';
 
 const String _photosBucket = 'lift-photos';
+const String _docsBucket = 'documents';
 
 SupabaseClient get _sb => Supabase.instance.client;
 
@@ -302,6 +292,11 @@ Future<String> sbUpsertLift({
   required String cleanBatteriesStatus,
   String railType = 'Straight',
   String acquisitionSource = '',
+  String customerId = '',
+  String customerName = '',
+  String qbCustomerId = '',
+  String warrantyExpiry = '',
+  double? buybackPrice,
 }) async {
   // Get previous values for history diff
   LiftRecord? prev;
@@ -334,8 +329,33 @@ Future<String> sbUpsertLift({
     'clean_batteries_status': cleanBatteriesStatus,
     'rail_type': railType.isEmpty ? 'Straight' : railType,
     'acquisition_source': acquisitionSource,
+    'customer_id': customerId.isEmpty ? null : customerId,
+    'customer_name': customerName,
+    'qb_customer_id': qbCustomerId,
+    'buyback_price': buybackPrice,
     'updated_at': DateTime.now().toIso8601String(),
   };
+
+  // Auto-calculate warranty_expiry (2 years from install date) if not explicitly set
+  // and an install date is present.
+  String resolvedWarranty = warrantyExpiry;
+  if (resolvedWarranty.isEmpty && installDate.isNotEmpty) {
+    try {
+      // installDate may be MM/DD/YYYY or YYYY-MM-DD
+      DateTime? installDt;
+      if (installDate.contains('/')) {
+        final p = installDate.split('/');
+        if (p.length == 3) installDt = DateTime(int.parse(p[2]), int.parse(p[0]), int.parse(p[1]));
+      } else {
+        installDt = DateTime.tryParse(installDate);
+      }
+      if (installDt != null) {
+        final exp = DateTime(installDt.year + 2, installDt.month, installDt.day);
+        resolvedWarranty = exp.toIso8601String().substring(0, 10);
+      }
+    } catch (_) {}
+  }
+  data['warranty_expiry'] = resolvedWarranty.isEmpty ? null : resolvedWarranty;
 
   String resolvedLiftId;
 
@@ -421,22 +441,21 @@ Future<List<LiftHistoryEvent>> sbFetchLiftHistory({
       .select()
       .eq('serial_number', serialNumber)
       .order('timestamp', ascending: true);
+  return (raw as List)
+      .map((r) => LiftHistoryEvent.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
 
-  return (raw as List).map((r) {
-    final m = r as Map<String, dynamic>;
-    DateTime? parseDate(dynamic v) {
-      if (v == null) return null;
-      try { return DateTime.parse(v.toString()); } catch (_) { return null; }
-    }
-    String s(dynamic v) => v?.toString() ?? '';
-    return LiftHistoryEvent(
-      timestamp: parseDate(m['timestamp']),
-      status: s(m['to_status']).isNotEmpty ? s(m['to_status']) : s(m['from_status']),
-      location: s(m['to_location']).isNotEmpty ? s(m['to_location']) : s(m['from_location']),
-      jobRef: s(m['job_ref']),
-      note: s(m['note']),
-    );
-  }).toList();
+/// Global audit feed — most recent events across the entire app.
+Future<List<LiftHistoryEvent>> sbFetchAuditLog({int limit = 200}) async {
+  final raw = await _sb
+      .from('lift_history')
+      .select()
+      .order('timestamp', ascending: false)
+      .limit(limit);
+  return (raw as List)
+      .map((r) => LiftHistoryEvent.fromJson(r as Map<String, dynamic>))
+      .toList();
 }
 
 // ---------------------------------------------------------------------------
@@ -1079,6 +1098,7 @@ Future<void> sbUpsertServiceJob({
   required String notes,
   String liftId = '',
   String serialNumber = '',
+  String fundingSource = 'Private',
 }) async {
   final resolvedId = (jobId != null && jobId.isNotEmpty)
       ? jobId
@@ -1097,6 +1117,7 @@ Future<void> sbUpsertServiceJob({
     'notes': notes,
     'lift_id': liftId,
     'serial_number': serialNumber,
+    'funding_source': fundingSource,
     'updated_at': DateTime.now().toIso8601String(),
   };
 
@@ -1155,6 +1176,7 @@ Future<void> sbUpsertRemovalJob({
   required String notes,
   String liftId = '',
   String serialNumber = '',
+  String fundingSource = 'Private',
 }) async {
   final resolvedId = (jobId != null && jobId.isNotEmpty)
       ? jobId
@@ -1171,6 +1193,7 @@ Future<void> sbUpsertRemovalJob({
     'notes': notes,
     'lift_id': liftId,
     'serial_number': serialNumber,
+    'funding_source': fundingSource,
     'updated_at': DateTime.now().toIso8601String(),
   };
 
@@ -1211,6 +1234,7 @@ Future<void> sbMarkLiftStatus({
   required String userEmail,
   required String userName,
   String note = '',
+  DateTime? eventDate,
 }) async {
   final raw = await _sb
       .from('lifts')
@@ -1226,10 +1250,23 @@ Future<void> sbMarkLiftStatus({
   final prev = LiftRecord.fromJson(raw as Map<String, dynamic>);
   debugPrint('[sbMarkLiftStatus] updating status ${prev.status} -> $newStatus');
 
-  final updateResult = await _sb.from('lifts').update({
+  final update = <String, dynamic>{
     'status': newStatus,
     'updated_at': DateTime.now().toIso8601String(),
-  }).eq('lift_id', liftId).select();
+  };
+
+  // When marking Installed, record the event date as install_date and
+  // auto-calculate warranty_expiry (2 years) if not already set.
+  if (newStatus == 'Installed' && eventDate != null) {
+    final iso = '${eventDate.year}-${eventDate.month.toString().padLeft(2, '0')}-${eventDate.day.toString().padLeft(2, '0')}';
+    update['install_date'] = iso;
+    if (prev.warrantyExpiry.isEmpty) {
+      final expiry = DateTime(eventDate.year + 2, eventDate.month, eventDate.day);
+      update['warranty_expiry'] = '${expiry.year}-${expiry.month.toString().padLeft(2, '0')}-${expiry.day.toString().padLeft(2, '0')}';
+    }
+  }
+
+  final updateResult = await _sb.from('lifts').update(update).eq('lift_id', liftId).select();
   debugPrint('[sbMarkLiftStatus] update result: $updateResult');
 
   await _sb.from('lift_history').insert({
@@ -1290,7 +1327,7 @@ Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
   final rows = await _sb
       .from('app_config')
       .select('key, value')
-      .or('key.eq.event_job_type_$eventId,key.eq.event_lift_$eventId,key.eq.event_source_$eventId');
+      .or('key.eq.event_job_type_$eventId,key.eq.event_lift_$eventId,key.eq.event_source_$eventId,key.eq.event_funding_$eventId');
   final map = {for (final r in rows as List) r['key'] as String: r['value'] as String?};
   final liftRaw = map['event_lift_$eventId'];
   List<String> liftIds = [];
@@ -1311,7 +1348,20 @@ Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
     'job_type': map['event_job_type_$eventId'],
     'lift_ids': liftIds,
     'source': map['event_source_$eventId'],
+    'funding_source': map['event_funding_$eventId'] ?? 'Private',
   };
+}
+
+Future<void> sbSetEventFundingSource(String eventId, String? fundingSource) async {
+  final key = 'event_funding_$eventId';
+  if (fundingSource == null || fundingSource.isEmpty || fundingSource == 'Private') {
+    await _sb.from('app_config').delete().eq('key', key);
+  } else {
+    await _sb.from('app_config').upsert(
+      {'key': key, 'value': fundingSource, 'updated_at': DateTime.now().toIso8601String()},
+      onConflict: 'key',
+    );
+  }
 }
 
 Future<void> sbSetEventSource(String eventId, String? source) async {
@@ -1365,7 +1415,7 @@ Future<Map<String, Map<String, dynamic>>> sbGetAllEventMeta() async {
   final rows = await _sb
       .from('app_config')
       .select('key, value')
-      .or('key.like.event_job_type_%,key.like.event_lift_%,key.like.event_source_%');
+      .or('key.like.event_job_type_%,key.like.event_lift_%,key.like.event_source_%,key.like.event_funding_%');
   final result = <String, Map<String, dynamic>>{};
   for (final r in rows as List) {
     final key = r['key'] as String;
@@ -1381,13 +1431,18 @@ Future<Map<String, Map<String, dynamic>>> sbGetAllEventMeta() async {
     } else if (key.startsWith('event_source_')) {
       eventId = key.substring('event_source_'.length);
       field = 'source';
+    } else if (key.startsWith('event_funding_')) {
+      eventId = key.substring('event_funding_'.length);
+      field = 'funding_source';
     }
     if (eventId == null || field == null) continue;
-    result.putIfAbsent(eventId, () => {'job_type': null, 'lift_ids': <String>[], 'source': null});
+    result.putIfAbsent(eventId, () => {'job_type': null, 'lift_ids': <String>[], 'source': null, 'funding_source': 'Private'});
     if (field == 'job_type') {
       result[eventId]!['job_type'] = value;
     } else if (field == 'source') {
       result[eventId]!['source'] = value;
+    } else if (field == 'funding_source') {
+      result[eventId]!['funding_source'] = value ?? 'Private';
     } else if (field == 'lift_ids' && value != null && value.isNotEmpty) {
       try {
         final decoded = jsonDecode(value);
@@ -1524,7 +1579,8 @@ Map<String, dynamic> sbGetPrepChecklistTemplate({
   String checklistType;
   if (b.contains('bruno') && s.contains('elan')) {
     checklistType = 'bruno_elan';
-  } else if (b.contains('bruno') && s.contains('elite')) {
+  } else if (b.contains('bruno') && (s.contains('elite'))) {
+    // Elite Curve uses the same checklist as Elite
     checklistType = 'bruno_elite';
   } else if (b.contains('acorn') || b.contains('brooks')) {
     checklistType = 'brooks_acorn';
@@ -1647,4 +1703,489 @@ Future<List<QbtScheduleEvent>> sbSearchScheduleHistory({
       .limit(limit);
 
   return (raw as List).map(_mapHistoryRow).toList();
+}
+
+// ---------------------------------------------------------------------------
+// REVIEW REQUESTS
+// ---------------------------------------------------------------------------
+
+Future<Set<String>> sbFetchReviewDismissed() async {
+  final rows = await _sb
+      .from('app_config')
+      .select('key')
+      .like('key', 'review_dismissed_%');
+  return {
+    for (final r in rows as List)
+      (r['key'] as String).substring('review_dismissed_'.length)
+  };
+}
+
+Future<void> sbDismissReview(String liftId) async {
+  await _sb.from('app_config').upsert(
+    {
+      'key': 'review_dismissed_$liftId',
+      'value': DateTime.now().toIso8601String(),
+      'updated_at': DateTime.now().toIso8601String(),
+    },
+    onConflict: 'key',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CUSTOMERS
+// ---------------------------------------------------------------------------
+
+Future<List<CustomerRecord>> sbFetchCustomers({String search = ''}) async {
+  var q = _sb.from('customers').select();
+  if (search.trim().isNotEmpty) {
+    final t = search.trim().toLowerCase();
+    q = q.or('name.ilike.%$t%,address.ilike.%$t%,phone.ilike.%$t%,city.ilike.%$t%');
+  }
+  final raw = await q.order('name', ascending: true);
+  return (raw as List)
+      .map((r) => CustomerRecord.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+Future<CustomerRecord> sbUpsertCustomer(CustomerRecord c) async {
+  final data = c.toJson();
+  if (c.customerId.isEmpty) {
+    data.remove('customer_id');
+    final raw = await _sb.from('customers').insert(data).select().single();
+    return CustomerRecord.fromJson(raw);
+  } else {
+    await _sb.from('customers').update(data).eq('customer_id', c.customerId);
+    return c;
+  }
+}
+
+Future<void> sbDeleteCustomer(String customerId) async {
+  await _sb.from('customers').delete().eq('customer_id', customerId);
+}
+
+Future<List<LiftRecord>> sbFetchLiftsForCustomer(String customerId) async {
+  final raw = await _sb
+      .from('lifts')
+      .select()
+      .eq('customer_id', customerId)
+      .order('install_date', ascending: false);
+  return (raw as List)
+      .map((r) => LiftRecord.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+Future<List<LiftServiceRecord>> sbFetchServiceForCustomer(String customerId) async {
+  final raw = await _sb
+      .from('lift_service')
+      .select()
+      .eq('customer_id', customerId)
+      .order('service_date', ascending: false)
+      .limit(20);
+  return (raw as List)
+      .map((r) => LiftServiceRecord.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+// ---------------------------------------------------------------------------
+// OPERATIONS HUB
+// ---------------------------------------------------------------------------
+
+Future<List<OpsJob>> sbFetchOpsJobs({bool includeCompleted = false}) async {
+  var q = _sb.from('ops_jobs').select();
+  if (!includeCompleted) {
+    q = q.neq('status', 'completed');
+  }
+  final raw = await q.order('date_requested', ascending: true);
+  return (raw as List)
+      .map((r) => OpsJob.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+/// Fetches all pending work from ops_jobs + legacy service_jobs, removal_jobs,
+/// and annuals tables, merged into a unified OpsJob list.
+Future<List<OpsJob>> sbFetchAllOpsJobs({bool includeCompleted = false}) async {
+  final results = await Future.wait([
+    sbFetchOpsJobs(includeCompleted: includeCompleted),
+    sbFetchServiceJobs(),
+    sbFetchRemovalJobs(),
+    sbFetchAnnuals(),
+  ]);
+
+  final ops = List<OpsJob>.from(results[0] as List<OpsJob>);
+  final serviceJobs = results[1] as List<ServiceJobRecord>;
+  final removalJobs = results[2] as List<RemovalJobRecord>;
+  final annuals = results[3] as List<AnnualRecord>;
+
+  // Convert legacy service jobs → OpsJob (skip ones already tracked in ops_jobs)
+  final existingSourceIds = ops.map((j) => j.sourceId).toSet();
+
+  for (final j in serviceJobs) {
+    if (existingSourceIds.contains(j.jobId)) continue;
+    if (!includeCompleted && j.status == 'Completed') continue;
+    ops.add(OpsJob(
+      jobId: 'svc_${j.jobId}',
+      jobType: j.jobType.toLowerCase().contains('annual')
+          ? OpsJobType.annualService
+          : OpsJobType.stairliftService,
+      status: _legacyStatusToOps(j.status),
+      customerName: j.customerName,
+      address: j.address,
+      city: extractCity(j.address),
+      phone: j.phone,
+      liftType: j.liftType,
+      liftId: j.liftId,
+      serialNumber: j.serialNumber,
+      fundingSource: j.fundingSource,
+      notes: j.notes,
+      dateRequested: j.dateRequested.isNotEmpty ? DateTime.tryParse(j.dateRequested) : null,
+      sourceTable: 'service_jobs',
+      sourceId: j.jobId,
+    ));
+  }
+
+  for (final j in removalJobs) {
+    if (existingSourceIds.contains(j.jobId)) continue;
+    if (!includeCompleted && j.status == 'Completed') continue;
+    ops.add(OpsJob(
+      jobId: 'rem_${j.jobId}',
+      jobType: OpsJobType.stairliftRemoval,
+      status: _legacyStatusToOps(j.status),
+      customerName: j.customerName,
+      address: j.address,
+      city: extractCity(j.address),
+      phone: j.phone,
+      liftType: j.liftType,
+      liftId: j.liftId,
+      serialNumber: j.serialNumber,
+      fundingSource: j.fundingSource,
+      notes: j.notes,
+      sourceTable: 'removal_jobs',
+      sourceId: j.jobId,
+    ));
+  }
+
+  for (final a in annuals) {
+    if (existingSourceIds.contains(a.annualId)) continue;
+    if (!includeCompleted && a.scheduled) continue;
+    ops.add(OpsJob(
+      jobId: 'ann_${a.annualId}',
+      jobType: OpsJobType.annualService,
+      status: a.scheduled ? OpsJobStatus.scheduled : OpsJobStatus.readyToSchedule,
+      customerName: a.customerName,
+      address: a.address,
+      city: extractCity(a.address),
+      phone: a.phone,
+      liftType: a.liftType,
+      liftId: a.liftId,
+      serialNumber: a.serialNumber,
+      fundingSource: 'Private',
+      notes: a.notes,
+      dateRequested: a.dateRequested.isNotEmpty ? DateTime.tryParse(a.dateRequested) : null,
+      sourceTable: 'annuals',
+      sourceId: a.annualId,
+    ));
+  }
+
+  ops.sort((a, b) {
+    final aDate = a.dateRequested ?? DateTime.now();
+    final bDate = b.dateRequested ?? DateTime.now();
+    return aDate.compareTo(bDate);
+  });
+  return ops;
+}
+
+OpsJobStatus _legacyStatusToOps(String status) {
+  switch (status.toLowerCase()) {
+    case 'scheduled': return OpsJobStatus.scheduled;
+    case 'completed': return OpsJobStatus.completed;
+    default: return OpsJobStatus.readyToSchedule;
+  }
+}
+
+Future<OpsJob> sbCreateOpsJob(OpsJob job) async {
+  final data = job.toJson()..remove('job_id');
+  final raw = await _sb.from('ops_jobs').insert(data).select().single();
+  return OpsJob.fromJson(raw);
+}
+
+Future<void> sbUpdateOpsJobStatus(String jobId, OpsJobStatus status) async {
+  await _sb.from('ops_jobs').update({
+    'status': _opsStatusToString(status),
+  }).eq('job_id', jobId);
+}
+
+Future<void> sbUpdateOpsJob(OpsJob job) async {
+  await _sb.from('ops_jobs').update(job.toJson()).eq('job_id', job.jobId);
+}
+
+Future<void> sbDeleteOpsJob(String jobId) async {
+  await _sb.from('ops_jobs').delete().eq('job_id', jobId);
+}
+
+// ---------------------------------------------------------------------------
+// LIFT CUSTOMER HISTORY
+// ---------------------------------------------------------------------------
+
+class LiftCustomerHistoryEntry {
+  final String liftId;
+  final String customerName;
+  final String qbCustomerId;
+  final DateTime assignedAt;
+  final DateTime? removedAt;
+
+  const LiftCustomerHistoryEntry({
+    required this.liftId,
+    required this.customerName,
+    required this.qbCustomerId,
+    required this.assignedAt,
+    this.removedAt,
+  });
+
+  factory LiftCustomerHistoryEntry.fromJson(Map<String, dynamic> j) {
+    return LiftCustomerHistoryEntry(
+      liftId: j['lift_id']?.toString() ?? '',
+      customerName: j['customer_name']?.toString() ?? '',
+      qbCustomerId: j['qb_customer_id']?.toString() ?? '',
+      assignedAt: DateTime.parse(j['assigned_at'].toString()),
+      removedAt: j['removed_at'] != null
+          ? DateTime.tryParse(j['removed_at'].toString())
+          : null,
+    );
+  }
+}
+
+Future<void> sbLiftCustomerAssigned({
+  required String liftId,
+  required String customerName,
+  required String qbCustomerId,
+}) async {
+  await _sb.from('lift_customer_history').insert({
+    'lift_id': liftId,
+    'customer_name': customerName,
+    'qb_customer_id': qbCustomerId,
+    'assigned_at': DateTime.now().toIso8601String(),
+  });
+}
+
+Future<void> sbLiftCustomerRemoved({required String liftId}) async {
+  // Mark the most recent open entry for this lift as removed
+  await _sb
+      .from('lift_customer_history')
+      .update({'removed_at': DateTime.now().toIso8601String()})
+      .eq('lift_id', liftId)
+      .isFilter('removed_at', null);
+}
+
+Future<List<LiftCustomerHistoryEntry>> sbFetchLiftCustomerHistory(String liftId) async {
+  final rows = await _sb
+      .from('lift_customer_history')
+      .select()
+      .eq('lift_id', liftId)
+      .order('assigned_at', ascending: false);
+  return (rows as List)
+      .map((r) => LiftCustomerHistoryEntry.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+// ---------------------------------------------------------------------------
+// EMAIL REVIEW QUEUE
+// ---------------------------------------------------------------------------
+
+class EmailQueueItem {
+  final String key;        // app_config key, e.g. 'email_review_<gmailId>'
+  final String gmailId;
+  final String from;
+  final String subject;
+  final String snippet;
+  final String? fundingSource; // set for unmatched, null for review
+  final String? customerName;
+  final DateTime? scannedAt;
+
+  const EmailQueueItem({
+    required this.key,
+    required this.gmailId,
+    required this.from,
+    required this.subject,
+    required this.snippet,
+    this.fundingSource,
+    this.customerName,
+    this.scannedAt,
+  });
+}
+
+/// Fetches emails flagged for manual review (both unmatched and unrecognised).
+Future<List<EmailQueueItem>> sbFetchEmailQueue() async {
+  final rows = await _sb
+      .from('app_config')
+      .select('key, value')
+      .or('key.like.email_review_%,key.like.email_unmatched_%')
+      .order('updated_at', ascending: false);
+
+  return (rows as List).map((r) {
+    final key = r['key'] as String;
+    final gmailId = key.contains('email_review_')
+        ? key.substring('email_review_'.length)
+        : key.substring('email_unmatched_'.length);
+    Map<String, dynamic> data = {};
+    try {
+      data = Map<String, dynamic>.from(
+          (r['value'] is String ? jsonDecode(r['value'] as String) : r['value']) as Map);
+    } catch (_) {}
+    DateTime? scanned;
+    try { scanned = DateTime.tryParse(data['scannedAt'] as String? ?? ''); } catch (_) {}
+    return EmailQueueItem(
+      key: key,
+      gmailId: gmailId,
+      from: data['from'] as String? ?? '',
+      subject: data['subject'] as String? ?? '',
+      snippet: data['snippet'] as String? ?? '',
+      fundingSource: data['fundingSource'] as String?,
+      customerName: data['customerName'] as String?,
+      scannedAt: scanned,
+    );
+  }).toList();
+}
+
+/// Removes an email from the review queue (marks it handled).
+Future<void> sbDismissEmailQueueItem(String key) async {
+  await _sb.from('app_config').delete().eq('key', key);
+}
+
+String _opsStatusToString(OpsJobStatus s) {
+  switch (s) {
+    case OpsJobStatus.needsInfo: return 'needs_info';
+    case OpsJobStatus.waitingAgencyConfirmation: return 'waiting_agency_confirmation';
+    case OpsJobStatus.readyToSchedule: return 'ready_to_schedule';
+    case OpsJobStatus.scheduled: return 'scheduled';
+    case OpsJobStatus.completed: return 'completed';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// USER MANAGEMENT
+// ---------------------------------------------------------------------------
+
+Future<List<UserProfile>> sbFetchUserProfiles() async {
+  final rows = await _sb
+      .from('user_profiles')
+      .select()
+      .order('name', ascending: true);
+  return (rows as List).map((r) => UserProfile.fromJson(r as Map<String, dynamic>)).toList();
+}
+
+Future<void> sbUpdateUserProfile(String userId, {String? name, UserRole? role}) async {
+  final data = <String, dynamic>{};
+  if (name != null) data['name'] = name;
+  if (role != null) data['role'] = role.name;
+  if (data.isEmpty) return;
+  await _sb.from('user_profiles').update(data).eq('user_id', userId);
+}
+
+Future<void> sbDeleteUserProfile(String userId) async {
+  await _sb.from('user_profiles').delete().eq('user_id', userId);
+}
+
+// ---------------------------------------------------------------------------
+// DOCUMENT REPOSITORY
+// ---------------------------------------------------------------------------
+
+class DocRecord {
+  final String path;     // full storage path, used as stable ID and for delete
+  final String name;     // full path (kept for search filtering)
+  final String url;      // public URL
+  final int sizeBytes;
+  final DateTime? updatedAt;
+
+  const DocRecord({
+    required this.path,
+    required this.name,
+    required this.url,
+    required this.sizeBytes,
+    this.updatedAt,
+  });
+
+  /// Just the filename, no folder prefix.
+  String get fileName {
+    final slash = name.lastIndexOf('/');
+    return slash >= 0 ? name.substring(slash + 1) : name;
+  }
+
+  /// Folder name, or null if file is at root.
+  String? get folderName {
+    final slash = name.lastIndexOf('/');
+    if (slash <= 0) return null;
+    // Return only the immediate parent folder, not the full nested path.
+    final folder = name.substring(0, slash);
+    final parentSlash = folder.lastIndexOf('/');
+    return parentSlash >= 0 ? folder.substring(parentSlash + 1) : folder;
+  }
+
+  String get extension {
+    final dot = fileName.lastIndexOf('.');
+    return dot >= 0 ? fileName.substring(dot + 1).toLowerCase() : '';
+  }
+
+  bool get isPdf => extension == 'pdf';
+}
+
+Future<List<DocRecord>> sbFetchDocs() async {
+  final results = <DocRecord>[];
+  await _fetchDocsInFolder('', results);
+  results.sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
+  return results;
+}
+
+Future<void> _fetchDocsInFolder(String folder, List<DocRecord> out) async {
+  final items = await _sb.storage.from(_docsBucket).list(path: folder);
+  for (final item in items) {
+    if (item.name == '.emptyFolderPlaceholder') continue;
+    final fullPath = folder.isEmpty ? item.name : '$folder/${item.name}';
+    // Supabase returns folders as FileObject with id == null and metadata == null
+    final isFolder = item.id == null;
+    if (isFolder) {
+      // Recurse into the folder
+      await _fetchDocsInFolder(fullPath, out);
+    } else {
+      final url = _sb.storage.from(_docsBucket).getPublicUrl(fullPath);
+      out.add(DocRecord(
+        path: fullPath,
+        name: fullPath, // full path so folder structure is visible
+        url: url,
+        sizeBytes: item.metadata?['size'] as int? ?? 0,
+        updatedAt: item.updatedAt != null ? DateTime.tryParse(item.updatedAt!) : null,
+      ));
+    }
+  }
+}
+
+Future<String> sbUploadDoc({
+  required String fileName,
+  required Uint8List bytes,
+  String contentType = 'application/octet-stream',
+}) async {
+  // Avoid collisions: prefix with timestamp if file already exists
+  String safeName = fileName;
+  try {
+    await _sb.storage.from(_docsBucket).uploadBinary(
+      safeName,
+      bytes,
+      fileOptions: FileOptions(contentType: contentType, upsert: false),
+    );
+  } on StorageException catch (e) {
+    if (e.statusCode == '409' || (e.message.contains('already exists'))) {
+      // File exists — upsert instead
+      await _sb.storage.from(_docsBucket).uploadBinary(
+        safeName,
+        bytes,
+        fileOptions: FileOptions(contentType: contentType, upsert: true),
+      );
+    } else {
+      rethrow;
+    }
+  }
+  return _sb.storage.from(_docsBucket).getPublicUrl(safeName);
+}
+
+Future<void> sbDeleteDoc(String path) async {
+  await _sb.storage.from(_docsBucket).remove([path]);
 }
