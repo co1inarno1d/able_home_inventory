@@ -105,7 +105,8 @@ String? inferJobTypeFromTitle(String title) {
   // Explicit installs
   if (t.contains('install')) return hasRamp ? 'Ramp Install' : 'Stairlift Install';
 
-  // Explicit removals
+  // Explicit removals and buybacks/buyouts (treated as removals)
+  if (t.contains('buyback') || t.contains('buyout')) return 'Stairlift Removal';
   if (t.contains('removal') || t.contains('remove')) return hasRamp ? 'Ramp Removal' : 'Stairlift Removal';
 
   // Ramp jobs with no explicit install/removal keyword
@@ -11771,8 +11772,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       await sbSetEventCompleted(eventId: widget.event.id, completed: next);
       debugPrint('[Complete] marked=$next linkedLifts=${_linkedLifts.length} jobType=$_jobType');
       // Smart completion: trigger downstream actions when marking complete.
-      // Fires when lifts are linked, OR when it's an explicit ramp job type.
-      final isRampJob = next && (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal') && _linkedLifts.isEmpty;
+      final isRampJob = next && (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal');
       if (next && (_linkedLifts.isNotEmpty || isRampJob) && mounted) {
         await _handleSmartCompletion();
       }
@@ -11800,7 +11800,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
     final userEmail = AuthService.instance.profile?.email ?? '';
 
-    // Ramp job: explicit Ramp Install or Ramp Removal type
+    // Ramp job — always offer the adjustment form
     if (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal') {
       if (!mounted) return;
       final isInstall = _jobType == 'Ramp Install';
@@ -11877,11 +11877,15 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           break;
 
         case 'Stairlift Removal':
+        case 'Stairlift Buyback':
+        case 'Stairlift Buyout':
+        case 'Stairlift Buyback / Buyout':
           if (mounted) {
+            final isBuyback = _jobType == 'Stairlift Buyback' || _jobType == 'Stairlift Buyout';
             final confirm = await showDialog<bool>(
               context: context,
               builder: (_) => AlertDialog(
-                title: const Text('Mark lift as Removed?'),
+                title: Text(isBuyback ? 'Mark lift as Removed (Buyback)?' : 'Mark lift as Removed?'),
                 content: Text(
                   'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?',
                 ),
@@ -12078,7 +12082,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
               else
                 DropdownButton<String>(
                   value: (_jobType != null && const [
-                    'Stairlift Install', 'Stairlift Removal', 'Stairlift Service', 'Stairlift Annual Service',
+                    'Stairlift Install', 'Stairlift Removal', 'Stairlift Buyback / Buyout',
+                    'Stairlift Service', 'Stairlift Annual Service',
                     'Ramp Install', 'Ramp Removal', 'Reminder', 'Other',
                   ].contains(_jobType))
                       ? _jobType
@@ -12089,7 +12094,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                   items: [
                     const DropdownMenuItem(value: null, child: Text('— None —', style: TextStyle(color: Colors.grey))),
                     ...[
-                      'Stairlift Install', 'Stairlift Removal', 'Stairlift Service', 'Stairlift Annual Service',
+                      'Stairlift Install', 'Stairlift Removal', 'Stairlift Buyback / Buyout',
+                      'Stairlift Service', 'Stairlift Annual Service',
                       'Ramp Install', 'Ramp Removal', 'Reminder', 'Other',
                     ].map((t) => DropdownMenuItem(value: t, child: Text(t))),
                   ],
@@ -12104,7 +12110,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                   selectedItemBuilder: (_) => [
                     const SizedBox.shrink(),
                     ...[
-                      'Stairlift Install', 'Stairlift Removal', 'Stairlift Service', 'Stairlift Annual Service',
+                      'Stairlift Install', 'Stairlift Removal', 'Stairlift Buyback / Buyout',
+                      'Stairlift Service', 'Stairlift Annual Service',
                       'Ramp Install', 'Ramp Removal', 'Reminder', 'Other',
                     ].map((t) =>
                       Container(

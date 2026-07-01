@@ -77,6 +77,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
   static const _jobTypeOptions = [
     'Stairlift Install',
     'Stairlift Removal',
+    'Stairlift Buyback / Buyout',
     'Stairlift Service',
     'Stairlift Annual Service',
     'Ramp Install',
