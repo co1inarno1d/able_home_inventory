@@ -298,11 +298,12 @@ async function handleSearch(req: Request) {
     return err((e as Error).message, isAuthError ? 401 : 500);
   }
 
-  // QB IDS supports prefix LIKE and OR conditions.
-  // Search by name prefix OR billing address line prefix.
+  // QB IDS only supports prefix LIKE on string fields.
+  // BillAddr is a structured object — cannot be searched with LIKE.
+  // Search DisplayName and FamilyName with OR for best coverage.
   const safeQuery = query.replace(/'/g, "''").trim();
   const sql = encodeURIComponent(
-    `SELECT Id, DisplayName, PrimaryEmailAddr, PrimaryPhone, BillAddr FROM Customer WHERE DisplayName LIKE '${safeQuery}%' OR BillAddr LIKE '${safeQuery}%' MAXRESULTS 20`
+    `SELECT Id, DisplayName, FamilyName, PrimaryEmailAddr, PrimaryPhone, BillAddr FROM Customer WHERE DisplayName LIKE '${safeQuery}%' OR FamilyName LIKE '${safeQuery}%' MAXRESULTS 25`
   );
 
   const apiRes = await fetch(

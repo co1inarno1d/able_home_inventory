@@ -1327,29 +1327,50 @@ Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
   final rows = await _sb
       .from('app_config')
       .select('key, value')
-      .or('key.eq.event_job_type_$eventId,key.eq.event_lift_$eventId,key.eq.event_source_$eventId,key.eq.event_funding_$eventId');
+      .or('key.eq.event_job_type_$eventId,key.eq.event_lift_$eventId,key.eq.event_source_$eventId,key.eq.event_funding_$eventId,key.eq.event_customer_$eventId');
   final map = {for (final r in rows as List) r['key'] as String: r['value'] as String?};
   final liftRaw = map['event_lift_$eventId'];
   List<String> liftIds = [];
   if (liftRaw != null && liftRaw.isNotEmpty) {
     try {
-      // New format: JSON array e.g. '["id1","id2"]'
       final decoded = jsonDecode(liftRaw);
       if (decoded is List) {
         liftIds = decoded.map((e) => e.toString()).toList();
       } else {
-        liftIds = [liftRaw]; // legacy single-id format
+        liftIds = [liftRaw];
       }
     } catch (_) {
-      liftIds = [liftRaw]; // legacy single-id format
+      liftIds = [liftRaw];
     }
+  }
+  // Customer stored as JSON: {"name":"...","qb_id":"..."}
+  Map<String, String>? customer;
+  final custRaw = map['event_customer_$eventId'];
+  if (custRaw != null && custRaw.isNotEmpty) {
+    try {
+      final decoded = jsonDecode(custRaw) as Map<String, dynamic>;
+      customer = {'name': decoded['name']?.toString() ?? '', 'qb_id': decoded['qb_id']?.toString() ?? ''};
+    } catch (_) {}
   }
   return {
     'job_type': map['event_job_type_$eventId'],
     'lift_ids': liftIds,
     'source': map['event_source_$eventId'],
     'funding_source': map['event_funding_$eventId'] ?? 'Private',
+    'customer': customer,
   };
+}
+
+Future<void> sbSetEventCustomer(String eventId, {required String name, required String qbId}) async {
+  final key = 'event_customer_$eventId';
+  if (name.isEmpty && qbId.isEmpty) {
+    await _sb.from('app_config').delete().eq('key', key);
+  } else {
+    await _sb.from('app_config').upsert(
+      {'key': key, 'value': jsonEncode({'name': name, 'qb_id': qbId}), 'updated_at': DateTime.now().toIso8601String()},
+      onConflict: 'key',
+    );
+  }
 }
 
 Future<void> sbSetEventFundingSource(String eventId, String? fundingSource) async {

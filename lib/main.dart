@@ -11486,6 +11486,9 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   List<LiftRecord> _linkedLifts = [];
   bool _loadingMeta = true;
   bool _savingLift = false;
+  String? _linkedCustomerName;
+  String? _linkedCustomerQbId;
+  bool _savingCustomer = false;
 
   List<String> _eventPhotoUrls = [];
   bool _uploadingPhoto = false;
@@ -11540,7 +11543,43 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       _linkedLifts = lifts;
       _loadingMeta = false;
       _eventPhotoUrls = photos;
+      final customer = meta['customer'] as Map<String, String>?;
+      _linkedCustomerName = customer?['name'];
+      _linkedCustomerQbId = customer?['qb_id'];
     });
+  }
+
+  Future<void> _linkCustomer() async {
+    final result = await showSearch<_QbCustomerResult?>(
+      context: context,
+      delegate: _CustomerSearchDelegate(),
+    );
+    if (result == null || !mounted) return;
+    setState(() => _savingCustomer = true);
+    try {
+      await sbSetEventCustomer(widget.event.id, name: result.name, qbId: result.qbCustomerId);
+      if (mounted) setState(() {
+        _linkedCustomerName = result.name;
+        _linkedCustomerQbId = result.qbCustomerId;
+        _savingCustomer = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _savingCustomer = false);
+    }
+  }
+
+  Future<void> _unlinkCustomer() async {
+    setState(() => _savingCustomer = true);
+    try {
+      await sbSetEventCustomer(widget.event.id, name: '', qbId: '');
+      if (mounted) setState(() {
+        _linkedCustomerName = null;
+        _linkedCustomerQbId = null;
+        _savingCustomer = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _savingCustomer = false);
+    }
   }
 
   void _viewPhoto(BuildContext ctx, String url) {
@@ -12209,6 +12248,77 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
                             ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                             : Icon(Icons.chevron_right, color: Colors.grey[400]),
                         onTap: _savingLift ? null : _openLiftPicker,
+                      ),
+                    ],
+                  ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // Linked customer section
+          Container(
+            decoration: BoxDecoration(
+              color: Colors.grey.withAlpha(12),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.grey.withAlpha(40)),
+            ),
+            child: _loadingMeta
+                ? const Padding(
+                    padding: EdgeInsets.all(14),
+                    child: Row(children: [
+                      SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                      SizedBox(width: 10),
+                      Text('Loading...', style: TextStyle(color: Colors.black45)),
+                    ]),
+                  )
+                : Column(
+                    children: [
+                      if (_linkedCustomerName != null)
+                        ListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                          leading: Icon(Icons.person_outline, color: color),
+                          title: Text(
+                            _linkedCustomerName!,
+                            style: const TextStyle(fontWeight: FontWeight.w600),
+                          ),
+                          subtitle: const Text('Linked customer'),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (_linkedCustomerQbId != null && _linkedCustomerQbId!.isNotEmpty)
+                                IconButton(
+                                  icon: const Icon(Icons.open_in_new, size: 18),
+                                  tooltip: 'View in QuickBooks',
+                                  onPressed: () => launchUrl(
+                                    Uri.parse('https://app.qbo.intuit.com/app/customerdetail?nameId=$_linkedCustomerQbId'),
+                                    mode: LaunchMode.externalApplication,
+                                  ),
+                                ),
+                              IconButton(
+                                icon: const Icon(Icons.link_off, size: 18, color: Colors.red),
+                                tooltip: 'Remove customer',
+                                onPressed: _savingCustomer ? null : _unlinkCustomer,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ListTile(
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+                        leading: Icon(
+                          _linkedCustomerName == null ? Icons.person_search_outlined : Icons.person_add_alt_outlined,
+                          color: _linkedCustomerName == null ? Colors.grey[400] : color,
+                        ),
+                        title: Text(
+                          _linkedCustomerName == null ? 'Link a customer' : 'Change customer',
+                          style: TextStyle(
+                            color: _linkedCustomerName == null ? Colors.grey[600] : color,
+                            fontWeight: _linkedCustomerName == null ? FontWeight.normal : FontWeight.w500,
+                          ),
+                        ),
+                        trailing: _savingCustomer
+                            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                            : Icon(Icons.chevron_right, color: Colors.grey[400]),
+                        onTap: _savingCustomer ? null : _linkCustomer,
                       ),
                     ],
                   ),
