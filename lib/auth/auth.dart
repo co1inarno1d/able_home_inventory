@@ -11,7 +11,6 @@
 //   service    — schedule, lifts (view + service log), customers (view), prep
 //   installer  — schedule, lifts (view + prep), prep screen
 
-import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -104,26 +103,15 @@ class AuthService extends ChangeNotifier {
 
   /// Called on app start — restores session if Supabase has one cached.
   Future<void> restoreSession() async {
-    // In debug builds, skip Supabase auth and sign in as admin automatically.
-    if (kDebugMode) {
-      _profile = const UserProfile(
-        userId: 'debug',
-        email: 'colin@loml.org',
-        name: 'Colin (dev)',
-        role: UserRole.admin,
-      );
-      _loading = false;
-      notifyListeners();
-      return;
-    }
-    try {
-      final session = _sb.auth.currentSession;
-      if (session != null) {
-        await _loadProfile(session.user.id);
-      }
-    } catch (_) {
-      // Session restore failed — stay on login screen
-    }
+    // Auth temporarily bypassed — auto sign in as installer for team testing.
+    _profile = const UserProfile(
+      userId: 'temp',
+      email: 'team@ableha.com',
+      name: 'Able Home',
+      role: UserRole.installer,
+    );
+    _loading = false;
+    notifyListeners();
   }
 
   Future<String?> signIn(String email, String password) async {
