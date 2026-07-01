@@ -4,7 +4,9 @@
 // (e.g. OperationsHubScreen) can navigate to it directly.
 
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 
+import '../integrations/quickbooks_service.dart';
 import '../qbt_api.dart';
 import '../supabase_api.dart';
 import '../utils/utils.dart';
@@ -59,6 +61,14 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
   String _fundingSource = 'Private';
   bool _saving = false;
   bool _deleting = false;
+
+  // QB customer link
+  String? _linkedCustomerName;
+  String? _linkedQbCustomerId;
+  final List<QbCustomer> _qbResults = [];
+  bool _qbSearching = false;
+  bool _qbExpanded = false;
+  final _qbSearchCtrl = TextEditingController();
 
   static const _fundingSourceOptions = [
     'Private', 'VA', 'CCALS', 'NaviCare', 'Summit', 'Fallon', 'Mass Health', 'Other',
@@ -131,7 +141,40 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
     _titleCtrl.dispose();
     _notesCtrl.dispose();
     _locationCtrl.dispose();
+    _qbSearchCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _qbSearch() async {
+    final q = _qbSearchCtrl.text.trim();
+    if (q.length < 2) return;
+    setState(() { _qbSearching = true; _qbResults.clear(); });
+    try {
+      final results = await QuickBooksService.searchCustomers(q);
+      if (mounted) setState(() { _qbResults.addAll(results); _qbSearching = false; });
+    } on QbNotConnectedException {
+      if (mounted) setState(() => _qbSearching = false);
+    } catch (_) {
+      if (mounted) setState(() => _qbSearching = false);
+    }
+  }
+
+  void _selectQbCustomer(QbCustomer qb) {
+    setState(() {
+      _linkedCustomerName = qb.name;
+      _linkedQbCustomerId = qb.id;
+      _qbExpanded = false;
+      _qbResults.clear();
+      _qbSearchCtrl.clear();
+      // Auto-fill location if empty
+      if (_locationCtrl.text.trim().isEmpty && qb.address.isNotEmpty) {
+        _locationCtrl.text = qb.address;
+      }
+      // Prefix title with customer name if title is empty
+      if (_titleCtrl.text.trim().isEmpty && qb.name.isNotEmpty) {
+        _titleCtrl.text = qb.name;
+      }
+    });
   }
 
   DateTime _toDateTime(DateTime date, TimeOfDay time) =>
@@ -412,6 +455,89 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
               ),
               textCapitalization: TextCapitalization.words,
             ),
+            const SizedBox(height: 16),
+
+            // Customer (QB search)
+            _linkedCustomerName != null
+                ? ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.person_outline, color: kBrandGreen),
+                    title: Text(_linkedCustomerName!,
+                        style: GoogleFonts.nunito(fontWeight: FontWeight.w700)),
+                    subtitle: Text('Linked QB customer',
+                        style: GoogleFonts.nunito(fontSize: 11, color: Colors.grey[500])),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.close, size: 18),
+                      tooltip: 'Remove',
+                      onPressed: () => setState(() {
+                        _linkedCustomerName = null;
+                        _linkedQbCustomerId = null;
+                      }),
+                    ),
+                  )
+                : OutlinedButton.icon(
+                    icon: const Icon(Icons.person_search_outlined, size: 18),
+                    label: Text('Link QB Customer',
+                        style: GoogleFonts.nunito(fontSize: 13)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: kBrandGreen,
+                      side: BorderSide(color: kBrandGreen.withValues(alpha: 0.4)),
+                    ),
+                    onPressed: () => setState(() => _qbExpanded = !_qbExpanded),
+                  ),
+            if (_qbExpanded) ...[
+              const SizedBox(height: 8),
+              Row(children: [
+                Expanded(
+                  child: TextField(
+                    controller: _qbSearchCtrl,
+                    decoration: InputDecoration(
+                      hintText: 'Search by name or address…',
+                      hintStyle: GoogleFonts.nunito(fontSize: 13),
+                      isDense: true,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                    ),
+                    style: GoogleFonts.nunito(fontSize: 13),
+                    onSubmitted: (_) => _qbSearch(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: kBrandGreen, foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12)),
+                  onPressed: _qbSearching ? null : _qbSearch,
+                  child: _qbSearching
+                      ? const SizedBox(width: 16, height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.search, size: 18),
+                ),
+              ]),
+              if (_qbResults.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Container(
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade300),
+                    borderRadius: BorderRadius.circular(8),
+                    color: Colors.white,
+                  ),
+                  child: Column(
+                    children: _qbResults.map((qb) => ListTile(
+                      dense: true,
+                      title: Text(qb.name,
+                          style: GoogleFonts.nunito(fontWeight: FontWeight.w700, fontSize: 13)),
+                      subtitle: qb.address.isNotEmpty
+                          ? Text(qb.address,
+                              style: GoogleFonts.nunito(fontSize: 11, color: Colors.grey[600]))
+                          : null,
+                      trailing: const Icon(Icons.link, size: 16),
+                      onTap: () => _selectQbCustomer(qb),
+                    )).toList(),
+                  ),
+                ),
+              ],
+            ],
             const SizedBox(height: 16),
 
             // Notes
