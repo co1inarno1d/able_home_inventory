@@ -67,21 +67,16 @@ class _OperationsHubScreenState extends State<OperationsHubScreen>
   }
 
   Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+    setState(() { _loading = true; _error = null; });
     try {
-      final results = await Future.wait([
-        sbFetchAllOpsJobs(includeCompleted: _showCompleted),
-        qbtFetchUsers(),
-      ]);
+      // Load jobs and users independently — TSheets failure shouldn't kill the hub
+      final jobs = await sbFetchAllOpsJobs(includeCompleted: _showCompleted);
+      Map<String, QbtUser> users = _users; // keep existing if refresh fails
+      try {
+        users = await qbtFetchUsers();
+      } catch (_) {}
       if (!mounted) return;
-      setState(() {
-        _jobs = results[0] as List<OpsJob>;
-        _users = results[1] as Map<String, QbtUser>;
-        _loading = false;
-      });
+      setState(() { _jobs = jobs; _users = users; _loading = false; });
     } catch (e) {
       if (mounted) setState(() { _loading = false; _error = e.toString(); });
     }
@@ -198,7 +193,7 @@ class _OperationsHubScreenState extends State<OperationsHubScreen>
       return;
     }
 
-    await sbUpdateOpsJobStatus(job.jobId, next);
+    await sbAdvanceOpsJobStatus(job, next);
     _load();
   }
 
@@ -211,7 +206,7 @@ class _OperationsHubScreenState extends State<OperationsHubScreen>
     );
     if (!confirmed || !mounted) return;
     try {
-      await sbDeleteOpsJob(job.jobId);
+      await sbDeleteOpsJobAny(job);
       if (mounted) _load();
     } catch (e) {
       if (mounted) {

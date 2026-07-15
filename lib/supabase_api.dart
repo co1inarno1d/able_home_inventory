@@ -1935,12 +1935,61 @@ Future<void> sbUpdateOpsJobStatus(String jobId, OpsJobStatus status) async {
   }).eq('job_id', jobId);
 }
 
+/// Advances status for any job — native ops_jobs rows update in-place,
+/// legacy rows (service_jobs, removal_jobs, annuals) get promoted to a
+/// real ops_jobs row so status changes persist correctly.
+Future<void> sbAdvanceOpsJobStatus(OpsJob job, OpsJobStatus newStatus) async {
+  if (job.sourceTable == 'ops_jobs' || job.sourceTable.isEmpty) {
+    // Native ops_jobs row — simple update
+    await sbUpdateOpsJobStatus(job.jobId, newStatus);
+    return;
+  }
+  // Legacy row — promote to ops_jobs with the new status
+  final promoted = OpsJob(
+    jobId: '',
+    jobType: job.jobType,
+    status: newStatus,
+    customerName: job.customerName,
+    address: job.address,
+    city: job.city,
+    phone: job.phone,
+    liftType: job.liftType,
+    liftId: job.liftId,
+    serialNumber: job.serialNumber,
+    fundingSource: job.fundingSource,
+    notes: job.notes,
+    dateRequested: job.dateRequested,
+    buybackOfferPrice: job.buybackOfferPrice,
+    sourceTable: job.sourceTable,
+    sourceId: job.sourceId,
+  );
+  await sbCreateOpsJob(promoted);
+}
+
 Future<void> sbUpdateOpsJob(OpsJob job) async {
   await _sb.from('ops_jobs').update(job.toJson()).eq('job_id', job.jobId);
 }
 
 Future<void> sbDeleteOpsJob(String jobId) async {
   await _sb.from('ops_jobs').delete().eq('job_id', jobId);
+}
+
+/// Deletes an ops job regardless of whether it came from ops_jobs or a legacy table.
+Future<void> sbDeleteOpsJobAny(OpsJob job) async {
+  switch (job.sourceTable) {
+    case 'service_jobs':
+      await _sb.from('service_jobs').delete().eq('job_id', job.sourceId);
+      break;
+    case 'removal_jobs':
+      await _sb.from('removal_jobs').delete().eq('job_id', job.sourceId);
+      break;
+    case 'annuals':
+      await _sb.from('annuals').delete().eq('annual_id', job.sourceId);
+      break;
+    default:
+      // Native ops_jobs row — job_id is the real PK
+      await _sb.from('ops_jobs').delete().eq('job_id', job.jobId);
+  }
 }
 
 // ---------------------------------------------------------------------------
