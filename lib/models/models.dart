@@ -641,6 +641,82 @@ class WebLeadRecord {
 // CUSTOMER MODEL
 // ---------------------------------------------------------------------------
 
+/// Lifecycle pipeline for a customer — spans acquisition (lead -> won) and the
+/// long-lived post-close relationship (active) plus exit states. Recurring
+/// post-close items (reviews, annuals, service) are tracked as
+/// [CustomerActivity]s and ops_jobs, NOT as extra lifecycle statuses.
+enum CustomerLifecycleStatus {
+  newLead,        // came in, not yet contacted
+  contacted,      // reached out, qualifying
+  evalScheduled,  // in-home eval/measure booked
+  quoted,         // proposal sent, awaiting decision
+  won,            // accepted, install pending
+  active,         // owns installed equipment (long-lived state)
+  past,           // equipment removed/bought back
+  dormant,        // past but re-engageable
+  lost,           // lead that declined/went cold
+}
+
+CustomerLifecycleStatus customerLifecycleFromString(String v) {
+  switch (v) {
+    case 'new_lead': return CustomerLifecycleStatus.newLead;
+    case 'contacted': return CustomerLifecycleStatus.contacted;
+    case 'eval_scheduled': return CustomerLifecycleStatus.evalScheduled;
+    case 'quoted': return CustomerLifecycleStatus.quoted;
+    case 'won': return CustomerLifecycleStatus.won;
+    case 'active': return CustomerLifecycleStatus.active;
+    case 'past': return CustomerLifecycleStatus.past;
+    case 'dormant': return CustomerLifecycleStatus.dormant;
+    case 'lost': return CustomerLifecycleStatus.lost;
+    default: return CustomerLifecycleStatus.newLead;
+  }
+}
+
+String customerLifecycleToString(CustomerLifecycleStatus s) {
+  switch (s) {
+    case CustomerLifecycleStatus.newLead: return 'new_lead';
+    case CustomerLifecycleStatus.contacted: return 'contacted';
+    case CustomerLifecycleStatus.evalScheduled: return 'eval_scheduled';
+    case CustomerLifecycleStatus.quoted: return 'quoted';
+    case CustomerLifecycleStatus.won: return 'won';
+    case CustomerLifecycleStatus.active: return 'active';
+    case CustomerLifecycleStatus.past: return 'past';
+    case CustomerLifecycleStatus.dormant: return 'dormant';
+    case CustomerLifecycleStatus.lost: return 'lost';
+  }
+}
+
+String customerLifecycleLabel(CustomerLifecycleStatus s) {
+  switch (s) {
+    case CustomerLifecycleStatus.newLead: return 'New Lead';
+    case CustomerLifecycleStatus.contacted: return 'Contacted';
+    case CustomerLifecycleStatus.evalScheduled: return 'Eval Scheduled';
+    case CustomerLifecycleStatus.quoted: return 'Quoted';
+    case CustomerLifecycleStatus.won: return 'Won';
+    case CustomerLifecycleStatus.active: return 'Active';
+    case CustomerLifecycleStatus.past: return 'Past';
+    case CustomerLifecycleStatus.dormant: return 'Dormant';
+    case CustomerLifecycleStatus.lost: return 'Lost';
+  }
+}
+
+/// Ordered pre-close funnel used for the "advance to next stage" control.
+/// Returns null when there's no obvious linear next step (won/active/exits).
+CustomerLifecycleStatus? customerLifecycleNext(CustomerLifecycleStatus s) {
+  switch (s) {
+    case CustomerLifecycleStatus.newLead: return CustomerLifecycleStatus.contacted;
+    case CustomerLifecycleStatus.contacted: return CustomerLifecycleStatus.evalScheduled;
+    case CustomerLifecycleStatus.evalScheduled: return CustomerLifecycleStatus.quoted;
+    case CustomerLifecycleStatus.quoted: return CustomerLifecycleStatus.won;
+    case CustomerLifecycleStatus.won: return CustomerLifecycleStatus.active;
+    case CustomerLifecycleStatus.active:
+    case CustomerLifecycleStatus.past:
+    case CustomerLifecycleStatus.dormant:
+    case CustomerLifecycleStatus.lost:
+      return null;
+  }
+}
+
 class CustomerRecord {
   final String customerId;
   final String name;
@@ -651,6 +727,9 @@ class CustomerRecord {
   final String fundingSource;
   final String qbCustomerId;
   final String notes;
+  final CustomerLifecycleStatus lifecycleStatus;
+  final DateTime? lastContactAt;
+  final DateTime? annualDueDate;
   final DateTime? createdAt;
 
   const CustomerRecord({
@@ -663,6 +742,9 @@ class CustomerRecord {
     required this.fundingSource,
     required this.qbCustomerId,
     required this.notes,
+    this.lifecycleStatus = CustomerLifecycleStatus.newLead,
+    this.lastContactAt,
+    this.annualDueDate,
     this.createdAt,
   });
 
@@ -678,6 +760,9 @@ class CustomerRecord {
       fundingSource: s(json['funding_source']).isEmpty ? 'Private' : s(json['funding_source']),
       qbCustomerId: s(json['qb_customer_id']),
       notes: s(json['notes']),
+      lifecycleStatus: customerLifecycleFromString(s(json['lifecycle_status'])),
+      lastContactAt: parseJsonDate(json['last_contact_at']),
+      annualDueDate: parseJsonDate(json['annual_due_date']),
       createdAt: parseJsonDate(json['created_at']),
     );
   }
@@ -692,11 +777,171 @@ class CustomerRecord {
     'funding_source': fundingSource,
     'qb_customer_id': qbCustomerId,
     'notes': notes,
+    'lifecycle_status': customerLifecycleToString(lifecycleStatus),
+    'last_contact_at': lastContactAt?.toIso8601String(),
+    'annual_due_date': annualDueDate?.toIso8601String(),
   };
+
+  CustomerRecord copyWith({
+    String? customerId,
+    CustomerLifecycleStatus? lifecycleStatus,
+    DateTime? lastContactAt,
+    DateTime? annualDueDate,
+  }) => CustomerRecord(
+    customerId: customerId ?? this.customerId,
+    name: name,
+    address: address,
+    city: city,
+    phone: phone,
+    email: email,
+    fundingSource: fundingSource,
+    qbCustomerId: qbCustomerId,
+    notes: notes,
+    lifecycleStatus: lifecycleStatus ?? this.lifecycleStatus,
+    lastContactAt: lastContactAt ?? this.lastContactAt,
+    annualDueDate: annualDueDate ?? this.annualDueDate,
+    createdAt: createdAt,
+  );
+
+  String get statusLabel => customerLifecycleLabel(lifecycleStatus);
 
   String get qbUrl => qbCustomerId.isNotEmpty
       ? 'https://app.qbo.intuit.com/app/customerdetail?nameId=$qbCustomerId'
       : 'https://app.qbo.intuit.com/app/customers';
+}
+
+// ---------------------------------------------------------------------------
+// CUSTOMER ACTIVITY MODEL (reminder layer that feeds ops_jobs)
+// ---------------------------------------------------------------------------
+
+/// The kind of reminder tracked on a customer. Service/repairs are real
+/// ops_jobs and are NOT represented here.
+enum CustomerActivityType {
+  review,           // review request after an install/service (never a job)
+  annual,           // annual service due (acting spawns an annual_service ops_job)
+  buybackCandidate, // equipment end-of-life flag (acting spawns a buyback ops_job)
+}
+
+enum CustomerActivityStatus { pending, done, dismissed }
+
+CustomerActivityType customerActivityTypeFromString(String v) {
+  switch (v) {
+    case 'review': return CustomerActivityType.review;
+    case 'annual': return CustomerActivityType.annual;
+    case 'buyback_candidate': return CustomerActivityType.buybackCandidate;
+    default: return CustomerActivityType.review;
+  }
+}
+
+String customerActivityTypeToString(CustomerActivityType t) {
+  switch (t) {
+    case CustomerActivityType.review: return 'review';
+    case CustomerActivityType.annual: return 'annual';
+    case CustomerActivityType.buybackCandidate: return 'buyback_candidate';
+  }
+}
+
+String customerActivityTypeLabel(CustomerActivityType t) {
+  switch (t) {
+    case CustomerActivityType.review: return 'Review Request';
+    case CustomerActivityType.annual: return 'Annual Service Due';
+    case CustomerActivityType.buybackCandidate: return 'Buyback Candidate';
+  }
+}
+
+CustomerActivityStatus customerActivityStatusFromString(String v) {
+  switch (v) {
+    case 'done': return CustomerActivityStatus.done;
+    case 'dismissed': return CustomerActivityStatus.dismissed;
+    default: return CustomerActivityStatus.pending;
+  }
+}
+
+String customerActivityStatusToString(CustomerActivityStatus s) {
+  switch (s) {
+    case CustomerActivityStatus.pending: return 'pending';
+    case CustomerActivityStatus.done: return 'done';
+    case CustomerActivityStatus.dismissed: return 'dismissed';
+  }
+}
+
+class CustomerActivity {
+  final String activityId;
+  final String customerId;
+  final CustomerActivityType type;
+  final CustomerActivityStatus status;
+  final DateTime? dueDate;
+  final DateTime? completedAt;
+  final String sourceEventId;
+  final String spawnedJobId;
+  final String notes;
+  final DateTime? createdAt;
+  // Denormalized for the Follow-ups view (joined from customers) — not persisted.
+  final String customerName;
+  final String customerCity;
+
+  const CustomerActivity({
+    required this.activityId,
+    required this.customerId,
+    required this.type,
+    required this.status,
+    this.dueDate,
+    this.completedAt,
+    this.sourceEventId = '',
+    this.spawnedJobId = '',
+    this.notes = '',
+    this.createdAt,
+    this.customerName = '',
+    this.customerCity = '',
+  });
+
+  factory CustomerActivity.fromJson(Map<String, dynamic> json) {
+    String s(dynamic v) => v?.toString() ?? '';
+    // Supabase can return the joined customer as a nested object.
+    final cust = json['customers'];
+    String custName = '';
+    String custCity = '';
+    if (cust is Map) {
+      custName = cust['name']?.toString() ?? '';
+      custCity = cust['city']?.toString() ?? '';
+    }
+    return CustomerActivity(
+      activityId: s(json['activity_id']),
+      customerId: s(json['customer_id']),
+      type: customerActivityTypeFromString(s(json['type'])),
+      status: customerActivityStatusFromString(s(json['status'])),
+      dueDate: parseJsonDate(json['due_date']),
+      completedAt: parseJsonDate(json['completed_at']),
+      sourceEventId: s(json['source_event_id']),
+      spawnedJobId: s(json['spawned_job_id']),
+      notes: s(json['notes']),
+      createdAt: parseJsonDate(json['created_at']),
+      customerName: custName,
+      customerCity: custCity,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+    'activity_id': activityId,
+    'customer_id': customerId,
+    'type': customerActivityTypeToString(type),
+    'status': customerActivityStatusToString(status),
+    'due_date': dueDate?.toIso8601String(),
+    'completed_at': completedAt?.toIso8601String(),
+    'source_event_id': sourceEventId,
+    'spawned_job_id': spawnedJobId,
+    'notes': notes,
+  };
+
+  String get typeLabel => customerActivityTypeLabel(type);
+
+  /// True when this pending activity is at or past its due date (or has no due
+  /// date, i.e. an immediate review request).
+  bool get isDue {
+    if (status != CustomerActivityStatus.pending) return false;
+    if (dueDate == null) return true;
+    return !dueDate!.isAfter(DateTime.now());
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -730,6 +975,7 @@ class OpsJob {
   final OpsJobType jobType;
   OpsJobStatus status;
   final String customerName;
+  final String customerId; // FK to canonical customers row ('' if unlinked)
   final String address;
   final String city; // extracted from address for display + geo clustering
   final String phone;
@@ -751,6 +997,7 @@ class OpsJob {
     required this.jobType,
     required this.status,
     required this.customerName,
+    this.customerId = '',
     required this.address,
     required this.city,
     required this.phone,
@@ -805,6 +1052,7 @@ class OpsJob {
       jobType: parseType(s(json['job_type'])),
       status: parseStatus(s(json['status'])),
       customerName: s(json['customer_name']),
+      customerId: s(json['customer_id']),
       address: s(json['address']),
       city: s(json['city']),
       phone: s(json['phone']),
@@ -826,6 +1074,7 @@ class OpsJob {
     'job_type': _jobTypeToString(jobType),
     'status': _statusToString(status),
     'customer_name': customerName,
+    'customer_id': customerId,
     'address': address,
     'city': city,
     'phone': phone,

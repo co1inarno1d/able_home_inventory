@@ -1343,13 +1343,17 @@ Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
       liftIds = [liftRaw];
     }
   }
-  // Customer stored as JSON: {"name":"...","qb_id":"..."}
+  // Customer stored as JSON: {"name":"...","qb_id":"...","customer_id":"..."}
   Map<String, String>? customer;
   final custRaw = map['event_customer_$eventId'];
   if (custRaw != null && custRaw.isNotEmpty) {
     try {
       final decoded = jsonDecode(custRaw) as Map<String, dynamic>;
-      customer = {'name': decoded['name']?.toString() ?? '', 'qb_id': decoded['qb_id']?.toString() ?? ''};
+      customer = {
+        'name': decoded['name']?.toString() ?? '',
+        'qb_id': decoded['qb_id']?.toString() ?? '',
+        'customer_id': decoded['customer_id']?.toString() ?? '',
+      };
     } catch (_) {}
   }
   return {
@@ -1361,13 +1365,13 @@ Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
   };
 }
 
-Future<void> sbSetEventCustomer(String eventId, {required String name, required String qbId}) async {
+Future<void> sbSetEventCustomer(String eventId, {required String name, required String qbId, String customerId = ''}) async {
   final key = 'event_customer_$eventId';
-  if (name.isEmpty && qbId.isEmpty) {
+  if (name.isEmpty && qbId.isEmpty && customerId.isEmpty) {
     await _sb.from('app_config').delete().eq('key', key);
   } else {
     await _sb.from('app_config').upsert(
-      {'key': key, 'value': jsonEncode({'name': name, 'qb_id': qbId}), 'updated_at': DateTime.now().toIso8601String()},
+      {'key': key, 'value': jsonEncode({'name': name, 'qb_id': qbId, 'customer_id': customerId}), 'updated_at': DateTime.now().toIso8601String()},
       onConflict: 'key',
     );
   }
@@ -1807,6 +1811,182 @@ Future<List<LiftServiceRecord>> sbFetchServiceForCustomer(String customerId) asy
       .toList();
 }
 
+/// Fetch customers, optionally filtered by lifecycle status. Extends
+/// [sbFetchCustomers] which handles the free-text search path.
+Future<List<CustomerRecord>> sbFetchCustomersByStatus({
+  CustomerLifecycleStatus? status,
+}) async {
+  var q = _sb.from('customers').select();
+  if (status != null) {
+    q = q.eq('lifecycle_status', customerLifecycleToString(status));
+  }
+  final raw = await q.order('name', ascending: true);
+  return (raw as List)
+      .map((r) => CustomerRecord.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+/// Find a local customer by their QuickBooks id (used to resolve QB search
+/// results to the canonical local row).
+Future<CustomerRecord?> sbFindCustomerByQbId(String qbId) async {
+  if (qbId.isEmpty) return null;
+  final raw = await _sb
+      .from('customers')
+      .select()
+      .eq('qb_customer_id', qbId)
+      .maybeSingle();
+  if (raw == null) return null;
+  return CustomerRecord.fromJson(raw);
+}
+
+/// Resolve a QuickBooks customer to a canonical local `customers` row: return
+/// the existing row matched by qb id, otherwise create a minimal one. Used to
+/// guarantee we always have a real customer_id (never '') when linking from QB
+/// search results. Extra fields (address/phone/email) fill in when available.
+Future<CustomerRecord> sbResolveOrCreateCustomerByQb({
+  required String name,
+  required String qbId,
+  String address = '',
+  String phone = '',
+  String email = '',
+}) async {
+  if (qbId.isNotEmpty) {
+    final existing = await sbFindCustomerByQbId(qbId);
+    if (existing != null) return existing;
+  }
+  return sbUpsertCustomer(CustomerRecord(
+    customerId: '',
+    name: name,
+    address: address,
+    city: extractCity(address),
+    phone: phone,
+    email: email,
+    fundingSource: 'Private',
+    qbCustomerId: qbId,
+    notes: '',
+    // A QB customer we're only just linking is, by default, an active owner
+    // (they're already in QuickBooks / on the schedule), not a fresh lead.
+    lifecycleStatus: CustomerLifecycleStatus.active,
+  ));
+}
+
+Future<void> sbUpdateCustomerLifecycle(
+  String customerId,
+  CustomerLifecycleStatus status,
+) async {
+  await _sb.from('customers').update({
+    'lifecycle_status': customerLifecycleToString(status),
+    'last_contact_at': DateTime.now().toIso8601String(),
+  }).eq('customer_id', customerId);
+}
+
+Future<void> sbSetCustomerAnnualDue(String customerId, DateTime? dueDate) async {
+  await _sb.from('customers').update({
+    'annual_due_date': dueDate?.toIso8601String(),
+  }).eq('customer_id', customerId);
+}
+
+// ---------------------------------------------------------------------------
+// CUSTOMER ACTIVITIES (reminder layer feeding ops_jobs)
+// ---------------------------------------------------------------------------
+
+Future<List<CustomerActivity>> sbFetchActivitiesForCustomer(String customerId) async {
+  if (customerId.isEmpty) return [];
+  final raw = await _sb
+      .from('customer_activities')
+      .select()
+      .eq('customer_id', customerId)
+      .order('created_at', ascending: false);
+  return (raw as List)
+      .map((r) => CustomerActivity.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+/// Pending activities that are due (or have no due date), joined with the
+/// customer name/city — drives the Follow-ups view.
+Future<List<CustomerActivity>> sbFetchDueActivities() async {
+  final nowIso = DateTime.now().toIso8601String();
+  final raw = await _sb
+      .from('customer_activities')
+      .select('*, customers(name, city)')
+      .eq('status', 'pending')
+      .or('due_date.is.null,due_date.lte.$nowIso')
+      .order('due_date', ascending: true, nullsFirst: true);
+  return (raw as List)
+      .map((r) => CustomerActivity.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+/// Upcoming pending activities (due in the future) — for a "coming up" section.
+Future<List<CustomerActivity>> sbFetchUpcomingActivities() async {
+  final nowIso = DateTime.now().toIso8601String();
+  final raw = await _sb
+      .from('customer_activities')
+      .select('*, customers(name, city)')
+      .eq('status', 'pending')
+      .gt('due_date', nowIso)
+      .order('due_date', ascending: true);
+  return (raw as List)
+      .map((r) => CustomerActivity.fromJson(r as Map<String, dynamic>))
+      .toList();
+}
+
+Future<CustomerActivity> sbCreateActivity(CustomerActivity a) async {
+  final data = a.toJson()..remove('activity_id');
+  if ((data['spawned_job_id'] as String?)?.isEmpty ?? true) {
+    data['spawned_job_id'] = null;
+  }
+  final raw = await _sb.from('customer_activities').insert(data).select().single();
+  return CustomerActivity.fromJson(raw);
+}
+
+/// Create an activity only if there isn't already a pending one of this type
+/// for the customer (avoids duplicate reviews/annuals on re-completion).
+Future<void> sbEnsurePendingActivity({
+  required String customerId,
+  required CustomerActivityType type,
+  DateTime? dueDate,
+  String sourceEventId = '',
+}) async {
+  final existing = await _sb
+      .from('customer_activities')
+      .select('activity_id')
+      .eq('customer_id', customerId)
+      .eq('type', customerActivityTypeToString(type))
+      .eq('status', 'pending')
+      .maybeSingle();
+  if (existing != null) return;
+  await sbCreateActivity(CustomerActivity(
+    activityId: '',
+    customerId: customerId,
+    type: type,
+    status: CustomerActivityStatus.pending,
+    dueDate: dueDate,
+    sourceEventId: sourceEventId,
+  ));
+}
+
+Future<void> sbUpdateActivityStatus(
+  String activityId,
+  CustomerActivityStatus status, {
+  String? spawnedJobId,
+}) async {
+  final data = <String, dynamic>{
+    'status': customerActivityStatusToString(status),
+  };
+  if (status == CustomerActivityStatus.done) {
+    data['completed_at'] = DateTime.now().toIso8601String();
+  }
+  if (spawnedJobId != null && spawnedJobId.isNotEmpty) {
+    data['spawned_job_id'] = spawnedJobId;
+  }
+  await _sb.from('customer_activities').update(data).eq('activity_id', activityId);
+}
+
+Future<void> sbDeleteActivity(String activityId) async {
+  await _sb.from('customer_activities').delete().eq('activity_id', activityId);
+}
+
 // ---------------------------------------------------------------------------
 // OPERATIONS HUB
 // ---------------------------------------------------------------------------
@@ -1925,6 +2105,8 @@ OpsJobStatus _legacyStatusToOps(String status) {
 
 Future<OpsJob> sbCreateOpsJob(OpsJob job) async {
   final data = job.toJson()..remove('job_id');
+  // customer_id is a uuid column — an empty string is invalid, send null.
+  if ((data['customer_id'] as String?)?.isEmpty ?? true) data['customer_id'] = null;
   final raw = await _sb.from('ops_jobs').insert(data).select().single();
   return OpsJob.fromJson(raw);
 }
@@ -1967,7 +2149,29 @@ Future<void> sbAdvanceOpsJobStatus(OpsJob job, OpsJobStatus newStatus) async {
 }
 
 Future<void> sbUpdateOpsJob(OpsJob job) async {
-  await _sb.from('ops_jobs').update(job.toJson()).eq('job_id', job.jobId);
+  final data = job.toJson();
+  if ((data['customer_id'] as String?)?.isEmpty ?? true) data['customer_id'] = null;
+  await _sb.from('ops_jobs').update(data).eq('job_id', job.jobId);
+}
+
+/// Links (or updates) a job's customer FK in place. Native ops_jobs only.
+Future<void> sbSetOpsJobCustomer(String jobId, String? customerId) async {
+  await _sb.from('ops_jobs').update({
+    'customer_id': (customerId == null || customerId.isEmpty) ? null : customerId,
+  }).eq('job_id', jobId);
+}
+
+/// All ops_jobs linked to a customer (for the customer profile Jobs card).
+Future<List<OpsJob>> sbFetchJobsForCustomer(String customerId) async {
+  if (customerId.isEmpty) return [];
+  final raw = await _sb
+      .from('ops_jobs')
+      .select()
+      .eq('customer_id', customerId)
+      .order('date_requested', ascending: false);
+  return (raw as List)
+      .map((r) => OpsJob.fromJson(r as Map<String, dynamic>))
+      .toList();
 }
 
 Future<void> sbDeleteOpsJob(String jobId) async {

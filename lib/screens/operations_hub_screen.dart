@@ -194,7 +194,53 @@ class _OperationsHubScreenState extends State<OperationsHubScreen>
     }
 
     await sbAdvanceOpsJobStatus(job, next);
+    if (mounted) await _maybeSuggestCustomerStatus(job, next);
     _load();
+  }
+
+  /// When a job with a linked customer advances, offer a one-tap move of the
+  /// customer's lifecycle status. Never auto-applied.
+  Future<void> _maybeSuggestCustomerStatus(OpsJob job, OpsJobStatus newStatus) async {
+    if (job.customerId.isEmpty) return;
+    CustomerLifecycleStatus? target;
+    String label = '';
+    // Eval booked (a service/eval scheduled) → Eval Scheduled.
+    if (newStatus == OpsJobStatus.scheduled) {
+      if (job.jobType == OpsJobType.stairliftInstall ||
+          job.jobType == OpsJobType.rampInstall) {
+        target = CustomerLifecycleStatus.won;
+        label = 'Won';
+      }
+    } else if (newStatus == OpsJobStatus.completed) {
+      if (job.jobType == OpsJobType.buyback ||
+          job.jobType == OpsJobType.stairliftRemoval ||
+          job.jobType == OpsJobType.rampRemoval) {
+        target = CustomerLifecycleStatus.past;
+        label = 'Past customer';
+      } else if (job.jobType == OpsJobType.stairliftInstall ||
+          job.jobType == OpsJobType.rampInstall) {
+        target = CustomerLifecycleStatus.active;
+        label = 'Active';
+      }
+    }
+    if (target == null || !mounted) return;
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Mark ${job.customerName.isEmpty ? 'customer' : job.customerName} as $label?'),
+        content: Text('Update the customer’s lifecycle status to $label.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Not now')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text('Mark $label'),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await sbUpdateCustomerLifecycle(job.customerId, target);
+    }
   }
 
   Future<void> _deleteJob(OpsJob job) async {
@@ -346,6 +392,14 @@ Future<void> openCustomerFromJob(BuildContext context, OpsJob job) async {
   }
 
   if (target != null) {
+    // Bidirectional link: stamp the customer id back onto native ops_jobs rows
+    // that aren't linked yet, so the customer profile can show this job.
+    if (job.sourceTable == 'ops_jobs' &&
+        job.customerId.isEmpty &&
+        target.customerId.isNotEmpty) {
+      await sbSetOpsJobCustomer(job.jobId, target.customerId);
+    }
+    if (!context.mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => CustomerDetailScreen(customer: target!)),
     );
@@ -1024,6 +1078,7 @@ class _OpsJobFormScreenState extends State<OpsJobFormScreen> {
         jobType: _jobType,
         status: _status,
         customerName: _customerCtrl.text.trim(),
+        customerId: widget.existing?.customerId ?? '',
         address: address,
         city: city,
         phone: _phoneCtrl.text.trim(),
@@ -1048,6 +1103,7 @@ class _OpsJobFormScreenState extends State<OpsJobFormScreen> {
                 jobType: job.jobType,
                 status: OpsJobStatus.waitingAgencyConfirmation,
                 customerName: job.customerName,
+                customerId: job.customerId,
                 address: job.address,
                 city: job.city,
                 phone: job.phone,

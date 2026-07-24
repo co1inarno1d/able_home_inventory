@@ -11489,6 +11489,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
   bool _savingLift = false;
   String? _linkedCustomerName;
   String? _linkedCustomerQbId;
+  String? _linkedCustomerId;
   bool _savingCustomer = false;
 
   List<String> _eventPhotoUrls = [];
@@ -11547,6 +11548,9 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       final customer = meta['customer'] as Map<String, String>?;
       _linkedCustomerName = customer?['name'];
       _linkedCustomerQbId = customer?['qb_id'];
+      _linkedCustomerId = (customer?['customer_id']?.isNotEmpty ?? false)
+          ? customer!['customer_id']
+          : null;
     });
   }
 
@@ -11558,10 +11562,21 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     if (result == null || !mounted) return;
     setState(() => _savingCustomer = true);
     try {
-      await sbSetEventCustomer(widget.event.id, name: result.name, qbId: result.qbCustomerId);
+      // Resolve to a canonical local customer so the event links by real id,
+      // not just a name/qb-id string. This is what lets install-completion
+      // automation (reviews/annuals) attach to a real customer record.
+      final customer = await sbResolveOrCreateCustomerByQb(
+        name: result.name,
+        qbId: result.qbCustomerId,
+      );
+      await sbSetEventCustomer(widget.event.id,
+          name: result.name,
+          qbId: result.qbCustomerId,
+          customerId: customer.customerId);
       if (mounted) setState(() {
         _linkedCustomerName = result.name;
         _linkedCustomerQbId = result.qbCustomerId;
+        _linkedCustomerId = customer.customerId;
         _savingCustomer = false;
       });
     } catch (_) {
@@ -11576,6 +11591,7 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       if (mounted) setState(() {
         _linkedCustomerName = null;
         _linkedCustomerQbId = null;
+        _linkedCustomerId = null;
         _savingCustomer = false;
       });
     } catch (_) {
@@ -11786,6 +11802,11 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           ),
         );
       }
+      // CRM: when completing a job for a linked customer, drive their lifecycle
+      // and queue follow-ups (review request, annual reminder, recurrence).
+      if (next && (_linkedCustomerId?.isNotEmpty ?? false) && mounted) {
+        await _handleCustomerLifecycleOnComplete(_linkedCustomerId!);
+      }
     } catch (e) {
       debugPrint('[Complete] ERROR: $e');
       if (mounted) setState(() => _completed = !next);
@@ -11947,6 +11968,117 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
       }
     }
     if (mounted) await _loadMeta(); // refresh all lift statuses
+  }
+
+  /// CRM lifecycle automation, triggered when a schedule event tied to a
+  /// customer is marked complete. Uses the event's start date as the
+  /// completion date (per the technician check-off). Suggestions are one-tap
+  /// prompts; only the review/annual queuing on install is automatic.
+  Future<void> _handleCustomerLifecycleOnComplete(String customerId) async {
+    final completionDate = widget.event.start;
+    final jt = _jobType ?? '';
+    final isInstall = jt == 'Stairlift Install' || jt == 'Ramp Install';
+    final isAnnual = jt == 'Stairlift Annual Service';
+    final isBuybackOrRemoval = jt == 'Stairlift Removal' ||
+        jt == 'Stairlift Buyback' ||
+        jt == 'Stairlift Buyout' ||
+        jt == 'Stairlift Buyback / Buyout' ||
+        jt == 'Ramp Removal';
+
+    try {
+      if (isInstall) {
+        // Automatic: queue a review request + arm the annual clock (+1yr).
+        final annualDue = DateTime(
+            completionDate.year + 1, completionDate.month, completionDate.day);
+        await sbEnsurePendingActivity(
+          customerId: customerId,
+          type: CustomerActivityType.review,
+          sourceEventId: widget.event.id,
+        );
+        await sbEnsurePendingActivity(
+          customerId: customerId,
+          type: CustomerActivityType.annual,
+          dueDate: annualDue,
+          sourceEventId: widget.event.id,
+        );
+        await sbSetCustomerAnnualDue(customerId, annualDue);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Review request queued and annual reminder set for next year.'),
+            duration: Duration(seconds: 4),
+          ));
+        }
+        // Suggest moving the customer to Active.
+        await _suggestCustomerStatus(
+            customerId, CustomerLifecycleStatus.active, 'Active');
+      } else if (isAnnual) {
+        // Close the pending annual activity and roll the next one forward +1yr.
+        final activities = await sbFetchActivitiesForCustomer(customerId);
+        final pendingAnnual = activities
+            .where((a) =>
+                a.type == CustomerActivityType.annual &&
+                a.status == CustomerActivityStatus.pending)
+            .cast<CustomerActivity?>()
+            .firstWhere((_) => true, orElse: () => null);
+        if (pendingAnnual != null) {
+          await sbUpdateActivityStatus(
+              pendingAnnual.activityId, CustomerActivityStatus.done);
+        }
+        final nextDue = DateTime(
+            completionDate.year + 1, completionDate.month, completionDate.day);
+        await sbEnsurePendingActivity(
+          customerId: customerId,
+          type: CustomerActivityType.annual,
+          dueDate: nextDue,
+          sourceEventId: widget.event.id,
+        );
+        await sbSetCustomerAnnualDue(customerId, nextDue);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('Annual logged — next annual reminder set for next year.'),
+            duration: Duration(seconds: 4),
+          ));
+        }
+      } else if (isBuybackOrRemoval) {
+        // Mark any pending buyback-candidate flag done, and suggest Past.
+        final activities = await sbFetchActivitiesForCustomer(customerId);
+        for (final a in activities) {
+          if (a.type == CustomerActivityType.buybackCandidate &&
+              a.status == CustomerActivityStatus.pending) {
+            await sbUpdateActivityStatus(a.activityId, CustomerActivityStatus.done);
+          }
+        }
+        await _suggestCustomerStatus(
+            customerId, CustomerLifecycleStatus.past, 'Past customer');
+      }
+    } catch (e) {
+      debugPrint('[CRM lifecycle] ERROR: $e');
+    }
+  }
+
+  /// One-tap prompt to move a linked customer to [target]. Never auto-applied.
+  Future<void> _suggestCustomerStatus(
+      String customerId, CustomerLifecycleStatus target, String label) async {
+    if (!mounted) return;
+    final name = _linkedCustomerName ?? 'this customer';
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('Mark $name as $label?'),
+        content: Text('Update the customer’s lifecycle status to $label.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Not now')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+            child: Text('Mark $label'),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      await sbUpdateCustomerLifecycle(customerId, target);
+    }
   }
 
   Future<void> _openMaps(String location) async {
