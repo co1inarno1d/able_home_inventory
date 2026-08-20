@@ -10490,6 +10490,17 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   final ScrollController _scrollController = ScrollController();
   final Map<String, GlobalKey> _dayKeys = {};
 
+  // Archive health: warn if the nightly archive cron appears to have stalled,
+  // so a silent failure surfaces in days rather than months.
+  static const int _staleArchiveDays = 3;
+  DateTime? _latestArchivedAt;
+  bool _archiveWarningDismissed = false;
+
+  bool get _archiveStale {
+    if (_archiveWarningDismissed || _latestArchivedAt == null) return false;
+    return DateTime.now().difference(_latestArchivedAt!).inDays > _staleArchiveDays;
+  }
+
   // Live TSheets window: last 7 days through 60 days ahead
   static const int _liveWindowDays = 7;
   static const int _daysAhead = 60;
@@ -10554,6 +10565,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         sbFetchScheduleHistory(before: _archiveCutoff, after: _activeHistoryStart),
         qbtFetchUsers(),
         sbFetchCompletedEventIds(),
+        sbFetchLatestArchivedAt(),
       ]);
       if (!mounted) return;
       final liveEvents = results[0] as List<QbtScheduleEvent>;
@@ -10564,6 +10576,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         _events = merged;
         _users = results[2] as Map<String, QbtUser>;
         _completedIds = results[3] as Set<String>;
+        _latestArchivedAt = results[4] as DateTime?;
         _loading = false;
       });
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToToday(animate: false));
@@ -11103,7 +11116,12 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               ],
             ],
           ),
-          body: _buildBody(),
+          body: Column(
+            children: [
+              if (_archiveStale && !_isSearchMode) _staleArchiveBanner(),
+              Expanded(child: _buildBody()),
+            ],
+          ),
           floatingActionButton: FloatingActionButton(
             backgroundColor: kBrandGreen,
             foregroundColor: Colors.white,
@@ -11123,6 +11141,35 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
           ),
         );
       },
+    );
+  }
+
+  Widget _staleArchiveBanner() {
+    final last = _latestArchivedAt;
+    final lastLabel = last != null ? formatDate(last) : 'unknown';
+    return Material(
+      color: const Color(0xFFFFF3CD), // soft amber
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 10, 6, 10),
+        child: Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, size: 20, color: Colors.orange[900]),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Schedule archive may be stale — older jobs might not be searchable. '
+                'Last archived $lastLabel.',
+                style: TextStyle(fontSize: 12.5, color: Colors.orange[900]),
+              ),
+            ),
+            IconButton(
+              icon: Icon(Icons.close, size: 18, color: Colors.orange[900]),
+              tooltip: 'Dismiss',
+              onPressed: () => setState(() => _archiveWarningDismissed = true),
+            ),
+          ],
+        ),
+      ),
     );
   }
 

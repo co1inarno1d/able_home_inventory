@@ -1695,39 +1695,87 @@ Future<List<QbtScheduleEvent>> sbFetchScheduleHistory({
 /// [query] is the remaining text after date tokens are stripped.
 /// [startDate]/[endDate] are optional date bounds parsed from the query.
 /// Returns at most [limit] results ordered by [newestFirst].
+/// Searches all archived events. Uses the index-backed full-text RPC
+/// (search_schedule_history) for thorough, fast whole-word matching, and unions
+/// in a substring ILIKE pass so partial terms (a fragment of an address, a
+/// serial, etc.) still match. Results are deduped by tsheets_id.
 Future<List<QbtScheduleEvent>> sbSearchScheduleHistory({
   required String query,
   DateTime? startDate,
   DateTime? endDate,
   bool newestFirst = true,
-  int limit = 200,
+  int limit = 1000,
 }) async {
-  var q = _sb.from('schedule_history').select();
+  final text = query.trim();
+  if (text.isEmpty) return [];
 
-  if (startDate != null) {
-    q = q.gte('start_time', startDate.toUtc().toIso8601String());
+  final byId = <String, QbtScheduleEvent>{};
+
+  // 1) Full-text via RPC — matches the GIN index expression, so it's fast and
+  //    not capped at the old 200 rows.
+  try {
+    final rpcRaw = await _sb.rpc('search_schedule_history', params: {
+      'q': text,
+      'start_ts': startDate?.toUtc().toIso8601String(),
+      'end_ts': endDate?.toUtc().toIso8601String(),
+      'max_rows': limit,
+    });
+    for (final r in (rpcRaw as List)) {
+      final e = _mapHistoryRow(r);
+      byId[e.id] = e;
+    }
+  } catch (_) {
+    // RPC unavailable (e.g. migration not yet applied) — fall through to ILIKE,
+    // which alone still returns correct (if unindexed) results.
   }
-  if (endDate != null) {
-    q = q.lte('start_time', endDate.toUtc().toIso8601String());
+
+  // 2) Substring fallback — each term must appear in at least one text column
+  //    (AND across terms, OR across columns). Catches partial-word matches that
+  //    whole-word full-text search misses.
+  final terms =
+      text.split(RegExp(r'\s+')).where((t) => t.length >= 2).toList();
+  if (terms.isNotEmpty && byId.length < limit) {
+    var q = _sb.from('schedule_history').select();
+    if (startDate != null) {
+      q = q.gte('start_time', startDate.toUtc().toIso8601String());
+    }
+    if (endDate != null) {
+      q = q.lte('start_time', endDate.toUtc().toIso8601String());
+    }
+    for (final term in terms) {
+      final t = term.toLowerCase();
+      q = q.or(
+        'title.ilike.%$t%,'
+        'notes.ilike.%$t%,'
+        'location.ilike.%$t%,'
+        'assigned_user_names.ilike.%$t%',
+      );
+    }
+    final raw = await q.order('start_time', ascending: !newestFirst).limit(limit);
+    for (final r in (raw as List)) {
+      final e = _mapHistoryRow(r);
+      byId.putIfAbsent(e.id, () => e);
+    }
   }
 
-  // Each term must appear in at least one text column (AND between terms, OR across columns)
-  final terms = query.trim().split(RegExp(r'\s+')).where((t) => t.length >= 2).toList();
-  for (final term in terms) {
-    final t = term.toLowerCase();
-    q = q.or(
-      'title.ilike.%$t%,'
-      'notes.ilike.%$t%,'
-      'location.ilike.%$t%,'
-      'assigned_user_names.ilike.%$t%',
-    );
-  }
+  final results = byId.values.toList()
+    ..sort((a, b) =>
+        newestFirst ? b.start.compareTo(a.start) : a.start.compareTo(b.start));
+  return results;
+}
 
-  final raw = await q
-      .order('start_time', ascending: !newestFirst)
-      .limit(limit);
-
-  return (raw as List).map(_mapHistoryRow).toList();
+/// Newest archive timestamp in schedule_history, or null if the table is empty.
+/// Used by the schedule UI to warn when the nightly archive has gone stale.
+Future<DateTime?> sbFetchLatestArchivedAt() async {
+  final raw = await _sb
+      .from('schedule_history')
+      .select('archived_at')
+      .order('archived_at', ascending: false)
+      .limit(1)
+      .maybeSingle();
+  if (raw == null) return null;
+  final v = raw['archived_at'];
+  return v == null ? null : DateTime.tryParse(v.toString());
 }
 
 // ---------------------------------------------------------------------------
