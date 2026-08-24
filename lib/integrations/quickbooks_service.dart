@@ -3,12 +3,14 @@
 // QuickBooks Online integration — OAuth2 connect + customer search.
 // All API calls are proxied through the qb-proxy Supabase edge function
 // so credentials never live in the Flutter app.
+//
+// Platform-agnostic: the OAuth CSRF state token is persisted via
+// SharedPreferences rather than dart:html, so this file (and therefore the
+// dashboard, which imports it) builds for mobile and desktop as well as web.
 
 import 'dart:convert';
-// ignore: avoid_web_libraries_in_flutter
-import 'dart:html' as html;
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 const String _proxyBase =
@@ -155,8 +157,8 @@ class QuickBooksService {
   static const _stateKey = 'qb_oauth_state';
 
   /// Step 1: Get the authorization URL from the edge function and open it.
-  /// The server issues a state token for CSRF protection; we store it in
-  /// localStorage so we can read it back after the QB redirect.
+  /// The server issues a state token for CSRF protection; we persist it via
+  /// SharedPreferences so we can read it back after the QB redirect.
   static Future<String?> startOAuthFlow() async {
     try {
       final res = await http.post(
@@ -173,8 +175,11 @@ class QuickBooksService {
       final state = body['state']?.toString() ?? '';
       if (url.isEmpty) return 'No auth URL returned';
       // Persist state across the redirect so we can verify it on callback.
-      if (kIsWeb && state.isNotEmpty) {
-        html.window.localStorage[_stateKey] = state;
+      // SharedPreferences is backed by localStorage on web and by native
+      // stores elsewhere, so this survives the round trip on every platform.
+      if (state.isNotEmpty) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(_stateKey, state);
       }
       await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
       return null; // success — browser opened
@@ -185,16 +190,14 @@ class QuickBooksService {
 
   /// Step 2: After QB redirects back with ?code=...&realmId=...&state=...,
   /// call this to complete the token exchange. Passes state back to the server
-  /// for CSRF verification, then clears it from localStorage.
+  /// for CSRF verification, then clears the stored copy.
   static Future<String?> completeOAuthFlow({
     required String code,
     required String realmId,
   }) async {
-    String? state;
-    if (kIsWeb) {
-      state = html.window.localStorage[_stateKey];
-      html.window.localStorage.remove(_stateKey);
-    }
+    final prefs = await SharedPreferences.getInstance();
+    final String? state = prefs.getString(_stateKey);
+    await prefs.remove(_stateKey);
     // Also read state from the redirect URL itself as a fallback.
     final urlState = Uri.base.queryParameters['state'];
     final resolvedState = state ?? urlState ?? '';

@@ -680,25 +680,56 @@ Future<String> sbSavePrepChecklist({
 // PHOTOS — Supabase Storage
 // ---------------------------------------------------------------------------
 
+/// Compresses [imageFile] to a web-and-mobile-safe JPEG.
+///
+/// Both platforms compress. On web `compressWithFile` throws
+/// (`flutter_image_compress_web` doesn't implement it), so we read the bytes
+/// and use `compressWithList`, which resizes via canvas.
+///
+/// This matters in the field: a modern phone camera produces 3-8 MB images,
+/// and uploading that raw over weak LTE in a customer's basement is the
+/// difference between a 3-second upload and a 45-second one. Techs abandon
+/// flows that stall. Target is ~200-400 KB.
+///
+/// Falls back to the original bytes if compression fails — an uncompressed
+/// photo is better than a lost one.
+Future<Uint8List> _compressForUpload(XFile imageFile) async {
+  const minWidth = 1200;
+  const minHeight = 1200;
+  const quality = 80;
+
+  try {
+    if (kIsWeb) {
+      final raw = await imageFile.readAsBytes();
+      return await FlutterImageCompress.compressWithList(
+        raw,
+        minWidth: minWidth,
+        minHeight: minHeight,
+        quality: quality,
+        format: CompressFormat.jpeg,
+        keepExif: false,
+      );
+    }
+    final compressed = await FlutterImageCompress.compressWithFile(
+      imageFile.path,
+      minWidth: minWidth,
+      minHeight: minHeight,
+      quality: quality,
+      format: CompressFormat.jpeg,
+      keepExif: false,
+    );
+    if (compressed != null) return compressed;
+  } catch (_) {
+    // Fall through to the uncompressed bytes below.
+  }
+  return imageFile.readAsBytes();
+}
+
 Future<String> sbUploadLiftPhoto({
   required String liftId,
   required XFile imageFile,
 }) async {
-  final Uint8List imageBytes;
-  if (kIsWeb) {
-    imageBytes = await imageFile.readAsBytes();
-  } else {
-    final compressed = await FlutterImageCompress.compressWithFile(
-      imageFile.path,
-      minWidth: 1200,
-      minHeight: 1200,
-      quality: 85,
-      format: CompressFormat.jpeg,
-      keepExif: false,
-    );
-    if (compressed == null) throw Exception('Image compression failed');
-    imageBytes = compressed;
-  }
+  final imageBytes = await _compressForUpload(imageFile);
 
   final fileName =
       'lifts/$liftId/${DateTime.now().millisecondsSinceEpoch}.jpg';
@@ -795,21 +826,7 @@ Future<String> sbUploadEventPhoto({
   DateTime? eventDate,
   String eventLocation = '',
 }) async {
-  final Uint8List imageBytes;
-  if (kIsWeb) {
-    imageBytes = await imageFile.readAsBytes();
-  } else {
-    final compressed = await FlutterImageCompress.compressWithFile(
-      imageFile.path,
-      minWidth: 1200,
-      minHeight: 1200,
-      quality: 85,
-      format: CompressFormat.jpeg,
-      keepExif: false,
-    );
-    if (compressed == null) throw Exception('Image compression failed');
-    imageBytes = compressed;
-  }
+  final imageBytes = await _compressForUpload(imageFile);
 
   // Build a descriptive folder/filename: events/JobTitle_YYYY-MM-DD/location_N.jpg
   String sanitize(String s) =>
