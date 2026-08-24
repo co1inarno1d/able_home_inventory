@@ -5465,6 +5465,15 @@ class _RampsScreenState extends State<RampsScreen> {
     if (result == true) _refresh();
   }
 
+  void _openCcalsFullCheck() async {
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => const FullInventoryCheckScreen(isCcals: true),
+      ),
+    );
+    if (result == true) _refresh();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -5637,6 +5646,15 @@ class _RampsScreenState extends State<RampsScreen> {
                 icon: const Icon(Icons.fact_check),
                 label: const Text('Full Check'),
               ),
+            if (_showCcals)
+              FloatingActionButton.extended(
+                heroTag: 'ccals_full_check_fab_ramps',
+                onPressed: _openCcalsFullCheck,
+                backgroundColor: kBrandGreen,
+                foregroundColor: Colors.white,
+                icon: const Icon(Icons.fact_check),
+                label: const Text('CCALS Full Check'),
+              ),
             const SizedBox(width: 16),
           ],
         ),
@@ -5679,7 +5697,8 @@ class _SummaryStat extends StatelessWidget {
 /// =======================
 
 class FullInventoryCheckScreen extends StatefulWidget {
-  FullInventoryCheckScreen({super.key});
+  final bool isCcals;
+  const FullInventoryCheckScreen({super.key, this.isCcals = false});
 
   @override
   State<FullInventoryCheckScreen> createState() =>
@@ -5697,6 +5716,7 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
   void initState() {
     super.initState();
     _future = sbFetchInventory();
+    if (widget.isCcals) _rampCondition = 'Used';
   }
 
   String _keyFor(String itemId, String condition) => '$itemId|$condition';
@@ -5748,7 +5768,9 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
       int parseInt(String v) => int.tryParse(v) ?? 0;
 
       // Ramps only - only send items that have values entered
+      final condition = widget.isCcals ? 'Used' : _rampCondition;
       for (final item in data.ramps) {
+        if (item.condition != condition) continue;
         final key = _keyFor(item.itemId, item.condition);
         final raw = _newQuantities[key];
         if (raw == null || raw.isEmpty) continue;
@@ -5773,11 +5795,19 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
         return;
       }
 
-      await sbSubmitFullCheck(
-        userEmail: userEmail,
-        userName: userName,
-        items: items,
-      );
+      if (widget.isCcals) {
+        await sbSubmitCcalsFullCheck(
+          userEmail: userEmail,
+          userName: userName,
+          items: items,
+        );
+      } else {
+        await sbSubmitFullCheck(
+          userEmail: userEmail,
+          userName: userName,
+          items: items,
+        );
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -5851,7 +5881,9 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
                 subtitle: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('Current: ${item.currentQty} (Min: ${item.minQty})'),
+                    Text(widget.isCcals
+                        ? 'CCALS current: ${item.ccalsQty}'
+                        : 'Current: ${item.currentQty} (Min: ${item.minQty})'),
                     TextField(
                       key: ValueKey(key),
                       keyboardType: TextInputType.number,
@@ -5875,7 +5907,7 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Full Inventory Check – Ramps'),
+        title: Text(widget.isCcals ? 'CCALS Full Count – Ramps' : 'Full Inventory Check – Ramps'),
       ),
       body: FutureBuilder<InventoryData>(
         future: _future,
@@ -5892,18 +5924,21 @@ class _FullInventoryCheckScreenState extends State<FullInventoryCheckScreen> {
             );
           }
 
+          final condition = widget.isCcals ? 'Used' : _rampCondition;
           final data = snapshot.data!;
           return Column(
             children: [
               const SizedBox(height: 8),
-              _buildConditionToggle(_rampCondition, (value) {
-                setState(() {
-                  _rampCondition = value;
-                });
-              }),
-              const SizedBox(height: 8),
+              if (!widget.isCcals) ...[
+                _buildConditionToggle(_rampCondition, (value) {
+                  setState(() {
+                    _rampCondition = value;
+                  });
+                }),
+                const SizedBox(height: 8),
+              ],
               Expanded(
-                child: _buildRampList(data.ramps, _rampCondition),
+                child: _buildRampList(data.ramps, condition),
               ),
             ],
           );

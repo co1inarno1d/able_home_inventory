@@ -209,6 +209,46 @@ Future<void> sbSubmitCcalsAdjustment({
   }
 }
 
+Future<void> sbSubmitCcalsFullCheck({
+  required String userEmail,
+  required String userName,
+  required List<Map<String, dynamic>> items,
+}) async {
+  for (final item in items) {
+    final itemId = item['item_id'] as String;
+    final newQty = item['new_qty'] as int;
+    final condition = item['condition'] as String;
+
+    final existing = await _sb
+        .from('inventory_ramps')
+        .select('ccals_qty')
+        .eq('item_id', itemId)
+        .maybeSingle();
+    final oldQty = (existing?['ccals_qty'] as int?) ?? 0;
+    final delta = newQty - oldQty;
+
+    await _sb
+        .from('inventory_ramps')
+        .update({'ccals_qty': newQty}).eq('item_id', itemId);
+
+    await _sb.from('inventory_changes').insert({
+      'timestamp': DateTime.now().toIso8601String(),
+      'user_email': userEmail,
+      'user_name': userName,
+      'change_type': 'CCALS Full Check',
+      'item_id': itemId,
+      'brand': item['brand'] ?? '',
+      'series_or_size': item['size'] ?? '',
+      'orientation': '',
+      'condition': condition,
+      'old_qty': oldQty,
+      'new_qty': newQty,
+      'delta': delta,
+      'job_ref': '',
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // LIFTS MASTER
 // ---------------------------------------------------------------------------
