@@ -94,6 +94,19 @@ class QbtScheduleEvent {
     );
   }
 
+  QbtScheduleEvent copyWith({String? notes}) => QbtScheduleEvent(
+        id: id,
+        title: title,
+        notes: notes ?? this.notes,
+        start: start,
+        end: end,
+        allDay: allDay,
+        location: location,
+        color: color,
+        assignedUserIds: assignedUserIds,
+        active: active,
+      );
+
   Map<String, dynamic> toJson() => {
         'schedule_calendar_id': int.parse(_calendarId),
         'title': title,

@@ -180,6 +180,71 @@ Future<void> main() async {
 
 /// Shared user menu — shows current user name/role and a sign-out button.
 /// Call from any screen's app bar person icon.
+/// Marker that prefixes a generated service summary in an event's notes, so
+/// repeated check-offs replace the previous summary instead of stacking.
+const String kServiceSummaryMarker = '--- Service summary ---';
+
+/// Builds a short service summary from data the app already holds.
+///
+/// Deliberately composed from structured fields — job type, lift, serial,
+/// date, who was assigned, who pays — rather than asking the tech to type
+/// anything. The point is to lose no information at check-off without adding
+/// friction. Returns null when there is nothing worth recording.
+String? buildServiceSummary({
+  required QbtScheduleEvent event,
+  required String? jobType,
+  required String fundingSource,
+  required List<LiftRecord> lifts,
+  String assignedNames = '',
+  String completedBy = '',
+}) {
+  final jt = jobType ?? '';
+  final isService =
+      jt == 'Stairlift Service' || jt == 'Stairlift Annual Service';
+  if (!isService) return null;
+
+  final parts = <String>[];
+  parts.add(jt == 'Stairlift Annual Service' ? 'Annual service' : 'Service call');
+  parts.add('on ${formatDate(event.start)}');
+
+  if (lifts.isNotEmpty) {
+    final described = lifts.map((l) {
+      final model = '${l.brand} ${l.series}'.trim();
+      final sn = l.serialNumber.trim();
+      if (model.isNotEmpty && sn.isNotEmpty) return '$model (SN $sn)';
+      if (model.isNotEmpty) return model;
+      if (sn.isNotEmpty) return 'SN $sn';
+      return 'lift ${l.liftId}';
+    }).join(', ');
+    parts.add('— $described');
+  }
+
+  final who = completedBy.trim().isNotEmpty
+      ? completedBy.trim()
+      : assignedNames.trim();
+  if (who.isNotEmpty) parts.add('by $who');
+  if (fundingSource.isNotEmpty && fundingSource != kDefaultFundingSource) {
+    parts.add('($fundingSource)');
+  }
+
+  return '${parts.join(' ')}.';
+}
+
+/// Strips any previously generated summary, leaving the tech's own notes.
+String stripServiceSummary(String notes) {
+  final idx = notes.indexOf(kServiceSummaryMarker);
+  if (idx < 0) return notes.trimRight();
+  return notes.substring(0, idx).trimRight();
+}
+
+/// Appends [summary] to [notes], replacing an earlier generated summary.
+/// The tech's own notes are never modified — the summary lives below a marker.
+String mergeServiceSummary(String notes, String summary) {
+  final base = stripServiceSummary(notes);
+  final block = '$kServiceSummaryMarker\n$summary';
+  return base.isEmpty ? block : '$base\n\n$block';
+}
+
 // ---------------------------------------------------------------------------
 // Job completion — the single downstream handler
 // ---------------------------------------------------------------------------
@@ -9035,6 +9100,82 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     }
   }
 
+  /// Offers to save a generated service summary into the event's notes.
+  ///
+  /// Shown for confirmation rather than saved silently: the summary is
+  /// composed from stored metadata, and if any of that is wrong the tech is
+  /// the one who can see it. Editable before saving. The tech's own notes are
+  /// never overwritten — the summary goes below a marker, and re-completing
+  /// replaces the previous summary rather than stacking copies.
+  Future<void> _offerServiceSummary() async {
+    final summary = buildServiceSummary(
+      event: widget.event,
+      jobType: _jobType,
+      fundingSource: _eventFundingSource,
+      lifts: _linkedLifts,
+      assignedNames: widget.assignedNames,
+    );
+    if (summary == null || !mounted) return;
+
+    final controller = TextEditingController(text: summary);
+    final save = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Save service summary to notes?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Edit if anything is wrong.',
+                style: TextStyle(fontSize: 12.5, color: Colors.grey[600])),
+            const SizedBox(height: 10),
+            TextField(
+              controller: controller,
+              maxLines: 4,
+              style: const TextStyle(fontSize: 14),
+              decoration: const InputDecoration(border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Skip')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+            child: const Text('Save to Notes'),
+          ),
+        ],
+      ),
+    );
+
+    final text = controller.text.trim();
+    controller.dispose();
+    if (save != true || text.isEmpty || !mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await qbtUpdateScheduleEvent(widget.event.copyWith(
+        notes: mergeServiceSummary(widget.event.notes, text),
+      ));
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Summary saved to notes')),
+      );
+    } catch (e) {
+      // Non-fatal: the job is still completed, only the note failed. Say so
+      // rather than implying the check-off did not work.
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Job completed, but the summary could not be saved: $e'),
+          backgroundColor: Colors.orange[900],
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
   Future<void> _toggleCompleted() async {
     final next = !_completed;
     setState(() {
@@ -9084,6 +9225,10 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
             ),
           );
         }
+
+        // Service summary into the event notes, so what happened on the job
+        // is recorded without the tech typing anything.
+        if (mounted) await _offerServiceSummary();
 
         // CRM: drive the customer's lifecycle and queue follow-ups.
         if ((_linkedCustomerId?.isNotEmpty ?? false) && mounted) {
