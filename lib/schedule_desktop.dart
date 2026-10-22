@@ -34,6 +34,12 @@ class ScheduleDesktopView extends StatefulWidget {
   /// Latest date currently loaded in [events].
   final DateTime activeEnd;
 
+  /// Optional warning shown above the grid when schedule history looks
+  /// unreliable. Built by the parent, which owns the archive-health state.
+  /// Previously this banner existed only in the mobile layout, so desktop
+  /// users got no signal that older jobs might be missing from search.
+  final Widget? archiveBanner;
+
   const ScheduleDesktopView({
     super.key,
     required this.events,
@@ -47,6 +53,7 @@ class ScheduleDesktopView extends StatefulWidget {
     required this.onAddEvent,
     required this.activeStart,
     required this.activeEnd,
+    this.archiveBanner,
   });
 
   @override
@@ -243,6 +250,7 @@ class _ScheduleDesktopViewState extends State<ScheduleDesktopView> {
     return Column(
       children: [
         _buildNavBar(),
+        if (widget.archiveBanner != null && !_isSearchMode) widget.archiveBanner!,
         if (_isSearchLoading)
           const LinearProgressIndicator(color: kDesktopBrandGreen),
         if (!_isSearchMode) _buildDayHeaders(),

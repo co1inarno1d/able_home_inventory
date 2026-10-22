@@ -10551,9 +10551,18 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   DateTime? _latestArchivedAt;
   bool _archiveWarningDismissed = false;
 
+  /// True when schedule history looks unreliable, so older jobs may be
+  /// missing from search.
+  ///
+  /// A null _latestArchivedAt means schedule_history is EMPTY — the worst
+  /// case, not a benign one. The previous version returned false for null and
+  /// so stayed silent in exactly the situation most worth warning about.
   bool get _archiveStale {
-    if (_archiveWarningDismissed || _latestArchivedAt == null) return false;
-    return DateTime.now().difference(_latestArchivedAt!).inDays > _staleArchiveDays;
+    if (_archiveWarningDismissed) return false;
+    if (_loading || _error != null) return false; // nothing loaded yet
+    final last = _latestArchivedAt;
+    if (last == null) return true;
+    return DateTime.now().difference(last).inDays > _staleArchiveDays;
   }
 
   // Live TSheets window: last 7 days through 60 days ahead
@@ -11083,6 +11092,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               },
               activeStart: _activeHistoryStart,
               activeEnd: _liveRangeEnd,
+              archiveBanner: _archiveStale ? _staleArchiveBanner() : null,
             ),
           );
         }
@@ -11183,7 +11193,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   Widget _staleArchiveBanner() {
     final last = _latestArchivedAt;
-    final lastLabel = last != null ? formatDate(last) : 'unknown';
+    // An empty archive and a stalled one need different wording: the first
+    // means history was never captured, the second that capture stopped.
+    final detail = last == null
+        ? 'No archived history found at all.'
+        : 'Last archived ${formatDate(last)}.';
     return Material(
       color: const Color(0xFFFFF3CD), // soft amber
       child: Padding(
@@ -11194,8 +11208,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'Schedule archive may be stale — older jobs might not be searchable. '
-                'Last archived $lastLabel.',
+                'Schedule archive may be stale — older jobs might not be '
+                'searchable. $detail',
                 style: TextStyle(fontSize: 12.5, color: Colors.orange[900]),
               ),
             ),
