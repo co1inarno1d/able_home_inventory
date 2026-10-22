@@ -180,6 +180,346 @@ Future<void> main() async {
 
 /// Shared user menu — shows current user name/role and a sign-out button.
 /// Call from any screen's app bar person icon.
+// ---------------------------------------------------------------------------
+// Job completion — the single downstream handler
+// ---------------------------------------------------------------------------
+
+/// Everything that must happen when a schedule event is checked off:
+/// inventory movements, lift status changes, and service records.
+///
+/// WHY THIS IS SHARED: this logic existed as three divergent copies — the
+/// schedule list toggle, the event detail switch, and a third in the
+/// now-deleted JobsScreen. The same action produced different results
+/// depending on where it was performed. They disagreed about whether the ramp
+/// form appears when a lift is linked, whether a customer is offered after an
+/// install, whether buyback/buyout was handled at all, and whether the event
+/// date was recorded on the lift. Inventory accuracy depends on this running
+/// identically every time, so there is now exactly one implementation.
+///
+/// [liftIds] and [lifts] are alternatives: pass whichever the caller already
+/// has, to avoid refetching.
+///
+/// Returns true if every required follow-up completed. False means the tech
+/// backed out of a mandatory step, and the caller should treat the event as
+/// NOT completed.
+Future<bool> handleJobCompletion({
+  required BuildContext context,
+  required QbtScheduleEvent event,
+  required String? jobType,
+  required String fundingSource,
+  List<String> liftIds = const [],
+  List<LiftRecord>? lifts,
+}) async {
+  final prefs = await SharedPreferences.getInstance();
+  final userName =
+      prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
+  final userEmail = AuthService.instance.profile?.email ?? '';
+  final isCcals = fundingSource == 'CCALS';
+
+  // --- Ramp jobs -----------------------------------------------------------
+  // Ramp quantities are REQUIRED, not optional. Previously this dialog had a
+  // "Skip" button, and skipping left ramp inventory silently wrong with no
+  // record that anything was missed — the single largest source of inventory
+  // drift. A tech who genuinely cannot complete the form now leaves the job
+  // un-checked-off, which is visible, rather than checked off with bad counts.
+  if (jobType == 'Ramp Install' || jobType == 'Ramp Removal') {
+    final isInstall = jobType == 'Ramp Install';
+    final pool = isCcals ? 'CCALS' : 'Able Home';
+    if (!context.mounted) return false;
+    final proceed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: Text(isInstall ? 'Record ramp install' : 'Record ramp removal'),
+        content: Text(
+          isInstall
+              ? 'Enter the ramps and quantities used so they come out of $pool inventory.'
+              : 'Enter the ramps and quantities recovered so they go back into $pool inventory.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Can't right now"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+            child: const Text('Enter Quantities'),
+          ),
+        ],
+      ),
+    );
+    if (proceed != true) return false;
+    if (!context.mounted) return false;
+
+    // JobAdjustmentScreen pops true only after a successful submit, so this
+    // distinguishes "recorded" from "opened the form and backed out".
+    final submitted = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => JobAdjustmentScreen(
+          initialJobRef: event.title,
+          initialTabIndex: isInstall ? 0 : 1,
+          isCcals: isCcals,
+        ),
+      ),
+    );
+    return submitted == true;
+  }
+
+  // --- Stairlift jobs ------------------------------------------------------
+  var records = lifts;
+  if (records == null) {
+    records = [];
+    for (final id in liftIds) {
+      final l = await sbFetchLiftById(id);
+      if (l != null) records.add(l);
+    }
+  }
+
+  for (final lift in List<LiftRecord>.from(records)) {
+    if (!context.mounted) return true;
+    switch (jobType) {
+      case 'Stairlift Install':
+        final confirm = await _confirmLiftStatus(
+          context: context,
+          title: 'Mark lift as Installed?',
+          body:
+              'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?',
+          confirmLabel: 'Mark Installed',
+        );
+        if (confirm && context.mounted) {
+          await sbMarkLiftStatus(
+            liftId: lift.liftId,
+            newStatus: 'Installed',
+            userEmail: userEmail,
+            userName: userName,
+            note: 'Marked installed via schedule event: ${event.title}',
+            eventDate: event.start,
+          );
+          // Offered from both entry points now; previously only the list did
+          // this, so completing from the detail screen left the lift with no
+          // customer and no prompt.
+          if (lift.customerId.isEmpty && context.mounted) {
+            await _offerCreateCustomerForLift(context, lift, event);
+          }
+        }
+        break;
+
+      case 'Stairlift Removal':
+      case 'Stairlift Buyback':
+      case 'Stairlift Buyout':
+      case 'Stairlift Buyback / Buyout':
+        final isBuyback = jobType != 'Stairlift Removal';
+        final confirm = await _confirmLiftStatus(
+          context: context,
+          title: isBuyback
+              ? 'Mark lift as Removed (Buyback)?'
+              : 'Mark lift as Removed?',
+          body:
+              'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?',
+          confirmLabel: 'Mark Removed',
+        );
+        if (confirm && context.mounted) {
+          await sbMarkLiftStatus(
+            liftId: lift.liftId,
+            newStatus: 'Removed',
+            userEmail: userEmail,
+            userName: userName,
+            note: 'Marked removed via schedule event: ${event.title}',
+            // Recorded on removals too. The list path passed null here while
+            // the detail path omitted it, so when a removal happened was lost.
+            eventDate: event.start,
+          );
+        }
+        break;
+
+      case 'Stairlift Service':
+      case 'Stairlift Annual Service':
+        final serviceType = jobType == 'Stairlift Annual Service'
+            ? 'Annual Service'
+            : 'Service Call';
+        if (!context.mounted) return true;
+        final confirm = await _confirmLiftStatus(
+          context: context,
+          title: 'Log service record?',
+          body: 'Create a $serviceType record for ${lift.brand} ${lift.series}?',
+          confirmLabel: 'Log Service',
+        );
+        if (confirm && context.mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => LiftServiceFormScreen(
+                lift: lift,
+                prefillServiceType: serviceType,
+                prefillCustomerName: event.title,
+                prefillDate: formatDate(DateTime.now()),
+                offerInvoicePhoto: true,
+              ),
+            ),
+          );
+        }
+        break;
+    }
+  }
+  return true;
+}
+
+/// CRM lifecycle automation, triggered when a schedule event tied to a
+/// customer is marked complete. Uses the event's start date as the
+/// completion date (per the technician check-off). Suggestions are one-tap
+/// prompts; only the review/annual queuing on install is automatic.
+Future<void> _handleCustomerLifecycleOnComplete(
+  BuildContext context,
+  QbtScheduleEvent event,
+  String? jobType,
+  String customerId, {
+  String? customerName,
+}) async {
+  final completionDate = event.start;
+  final jt = jobType ?? '';
+  final isInstall = jt == 'Stairlift Install' || jt == 'Ramp Install';
+  final isAnnual = jt == 'Stairlift Annual Service';
+  final isBuybackOrRemoval = jt == 'Stairlift Removal' ||
+      jt == 'Stairlift Buyback' ||
+      jt == 'Stairlift Buyout' ||
+      jt == 'Stairlift Buyback / Buyout' ||
+      jt == 'Ramp Removal';
+
+  try {
+    if (isInstall) {
+      // Automatic: queue a review request + arm the annual clock (+1yr).
+      final annualDue = DateTime(
+          completionDate.year + 1, completionDate.month, completionDate.day);
+      await sbEnsurePendingActivity(
+        customerId: customerId,
+        type: CustomerActivityType.review,
+        sourceEventId: event.id,
+      );
+      await sbEnsurePendingActivity(
+        customerId: customerId,
+        type: CustomerActivityType.annual,
+        dueDate: annualDue,
+        sourceEventId: event.id,
+      );
+      await sbSetCustomerAnnualDue(customerId, annualDue);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Review request queued and annual reminder set for next year.'),
+          duration: Duration(seconds: 4),
+        ));
+      }
+      // Suggest moving the customer to Active.
+      if (!context.mounted) return;
+      await _suggestCustomerStatus(
+          context, customerId, CustomerLifecycleStatus.active, 'Active',
+          customerName: customerName);
+    } else if (isAnnual) {
+      // Close the pending annual activity and roll the next one forward +1yr.
+      final activities = await sbFetchActivitiesForCustomer(customerId);
+      final pendingAnnual = activities
+          .where((a) =>
+              a.type == CustomerActivityType.annual &&
+              a.status == CustomerActivityStatus.pending)
+          .cast<CustomerActivity?>()
+          .firstWhere((_) => true, orElse: () => null);
+      if (pendingAnnual != null) {
+        await sbUpdateActivityStatus(
+            pendingAnnual.activityId, CustomerActivityStatus.done);
+      }
+      final nextDue = DateTime(
+          completionDate.year + 1, completionDate.month, completionDate.day);
+      await sbEnsurePendingActivity(
+        customerId: customerId,
+        type: CustomerActivityType.annual,
+        dueDate: nextDue,
+        sourceEventId: event.id,
+      );
+      await sbSetCustomerAnnualDue(customerId, nextDue);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Annual logged — next annual reminder set for next year.'),
+          duration: Duration(seconds: 4),
+        ));
+      }
+    } else if (isBuybackOrRemoval) {
+      // Mark any pending buyback-candidate flag done, and suggest Past.
+      final activities = await sbFetchActivitiesForCustomer(customerId);
+      for (final a in activities) {
+        if (a.type == CustomerActivityType.buybackCandidate &&
+            a.status == CustomerActivityStatus.pending) {
+          await sbUpdateActivityStatus(a.activityId, CustomerActivityStatus.done);
+        }
+      }
+      if (!context.mounted) return;
+      await _suggestCustomerStatus(
+          context, customerId, CustomerLifecycleStatus.past, 'Past customer',
+          customerName: customerName);
+    }
+  } catch (e) {
+    debugPrint('[CRM lifecycle] ERROR: $e');
+  }
+}
+
+
+/// One-tap prompt to move a linked customer to [target]. Never auto-applied.
+Future<void> _suggestCustomerStatus(
+  BuildContext context,
+  String customerId,
+  CustomerLifecycleStatus target,
+  String label, {
+  String? customerName,
+}) async {
+  if (!context.mounted) return;
+  final name = customerName ?? 'this customer';
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text('Mark $name as $label?'),
+      content: Text('Update the customer’s lifecycle status to $label.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Not now')),
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context, true),
+          style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+          child: Text('Mark $label'),
+        ),
+      ],
+    ),
+  );
+  if (confirm == true) {
+    await sbUpdateCustomerLifecycle(customerId, target);
+  }
+}
+
+/// Shared confirm dialog for the lift status / service prompts above.
+Future<bool> _confirmLiftStatus({
+  required BuildContext context,
+  required String title,
+  required String body,
+  required String confirmLabel,
+}) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text(title),
+      content: Text(body),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Skip')),
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context, true),
+          style: ElevatedButton.styleFrom(
+              backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+          child: Text(confirmLabel),
+        ),
+      ],
+    ),
+  );
+  return result == true;
+}
+
 /// After marking a lift as Installed, offer to create or link a customer record.
 /// Shows a bottom sheet; skippable with no side-effects.
 Future<void> _offerCreateCustomerForLift(
@@ -7731,131 +8071,51 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       }
     });
     await sbSetEventCompleted(eventId: event.id, completed: next);
-    if (next && mounted) {
-      final meta = await sbGetEventMeta(event.id);
-      final jobType = meta['job_type'] as String?;
-      final liftIds = (meta['lift_ids'] as List<String>?) ?? [];
 
-      if ((jobType == 'Ramp Install' || jobType == 'Ramp Removal') && liftIds.isEmpty && mounted) {
-        final isInstall = jobType == 'Ramp Install';
-        final fundingSource = (meta['funding_source'] as String?) ?? 'Private';
-        final isCcals = fundingSource == 'CCALS';
-        final confirm = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
-            content: Text(
-              isInstall
-                  ? 'Select the ramps and quantities used on this job to deduct them from ${isCcals ? 'CCALS' : 'Able Home'} inventory.'
-                  : 'Select the ramps and quantities recovered on this job to add them back to ${isCcals ? 'CCALS' : 'Able Home'} inventory.',
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                child: const Text('Open Form'),
-              ),
-            ],
-          ),
-        );
-        if (confirm == true && mounted) {
-          await Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => JobAdjustmentScreen(
-                initialJobRef: event.title,
-                initialTabIndex: isInstall ? 0 : 1,
-                isCcals: isCcals,
-              ),
-            ),
-          );
-        }
-      }
+    if (!next || !mounted) return;
 
-      if (jobType != null && liftIds.isNotEmpty && mounted) {
-        final prefs = await SharedPreferences.getInstance();
-        final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
-        final userEmail = AuthService.instance.profile?.email ?? '';
-        for (final liftId in liftIds) {
-          final lift = await sbFetchLiftById(liftId);
-          if (lift == null || !mounted) continue;
-          String? newStatus;
-          String dialogTitle = '';
-          String dialogBody = '';
-          String confirmLabel = '';
-          if (jobType == 'Stairlift Install') {
-            newStatus = 'Installed';
-            dialogTitle = 'Mark lift as Installed?';
-            dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?';
-            confirmLabel = 'Mark Installed';
-          } else if (jobType == 'Stairlift Removal') {
-            newStatus = 'Removed';
-            dialogTitle = 'Mark lift as Removed?';
-            dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?';
-            confirmLabel = 'Mark Removed';
-          }
-          if (newStatus != null && mounted) {
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: Text(dialogTitle),
-                content: Text(dialogBody),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: Text(confirmLabel),
-                  ),
-                ],
-              ),
-            );
-            if (confirm == true && mounted) {
-              await sbMarkLiftStatus(
-                liftId: lift.liftId,
-                newStatus: newStatus,
-                userEmail: userEmail,
-                userName: userName,
-                note: 'Marked $newStatus via schedule event: ${event.title}',
-                eventDate: newStatus == 'Installed' ? event.start : null,
-              );
-              if (newStatus == 'Installed' && lift.customerId.isEmpty && mounted) {
-                await _offerCreateCustomerForLift(context, lift, event);
-              }
-            }
-          } else if ((jobType == 'Stairlift Service' || jobType == 'Stairlift Annual Service') && mounted) {
-            final serviceType = jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: const Text('Log service record?'),
-                content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: const Text('Log Service'),
-                  ),
-                ],
-              ),
-            );
-            if (confirm == true && mounted) {
-              await Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => LiftServiceFormScreen(
-                    lift: lift,
-                    prefillServiceType: serviceType,
-                    prefillCustomerName: event.title,
-                    prefillDate: formatDate(DateTime.now()),
-                    offerInvoicePhoto: true,
-                  ),
-                ),
-              );
-            }
-          }
-        }
-      }
+    final meta = await sbGetEventMeta(event.id);
+    if (!mounted) return;
+
+    // One shared handler, identical to the event detail screen's path.
+    final ok = await handleJobCompletion(
+      context: context,
+      event: event,
+      jobType: meta['job_type'] as String?,
+      fundingSource:
+          normalizeFundingSource(meta['funding_source'] as String?),
+      liftIds: (meta['lift_ids'] as List<String>?) ?? const [],
+    );
+
+    // Same CRM automation the detail screen runs. This used to fire only from
+    // the detail screen, so checking a job off from the list silently skipped
+    // the review request and annual reminder.
+    final customer = meta['customer'] as Map<String, String>?;
+    final customerId = customer?['customer_id'] ?? '';
+    if (ok && customerId.isNotEmpty && mounted) {
+      await _handleCustomerLifecycleOnComplete(
+        context,
+        event,
+        meta['job_type'] as String?,
+        customerId,
+        customerName: customer?['name'],
+      );
+    }
+
+    // A required step was abandoned (e.g. ramp quantities never entered), so
+    // the job is not actually done. Roll the check-off back rather than
+    // leaving inventory wrong behind a ticked box.
+    if (!ok) {
+      await sbSetEventCompleted(eventId: event.id, completed: false);
+      if (!mounted) return;
+      setState(() => _completedIds.remove(event.id));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Job left open — ramp quantities are needed to complete it.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
     }
   }
 
@@ -8697,300 +8957,75 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     });
     try {
       await sbSetEventCompleted(eventId: widget.event.id, completed: next);
-      debugPrint('[Complete] marked=$next linkedLifts=${_linkedLifts.length} jobType=$_jobType');
-      // Smart completion: trigger downstream actions when marking complete.
-      final isRampJob = next && (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal');
-      if (next && (_linkedLifts.isNotEmpty || isRampJob) && mounted) {
-        await _handleSmartCompletion();
-      }
-      // Warn if completing a service job with no lift linked
-      final isServiceType = _jobType == 'Stairlift Service' || _jobType == 'Stairlift Annual Service';
-      if (next && isServiceType && _linkedLifts.isEmpty && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No lift linked — use the Link Lift button to attach one so a service record can be logged.'),
-            duration: Duration(seconds: 5),
-          ),
+
+      if (next && mounted) {
+        // Same shared handler the schedule list toggle uses, so checking a job
+        // off from either place does exactly the same thing.
+        final ok = await handleJobCompletion(
+          context: context,
+          event: widget.event,
+          jobType: _jobType,
+          fundingSource: _eventFundingSource,
+          lifts: _linkedLifts,
         );
-      }
-      // CRM: when completing a job for a linked customer, drive their lifecycle
-      // and queue follow-ups (review request, annual reminder, recurrence).
-      if (next && (_linkedCustomerId?.isNotEmpty ?? false) && mounted) {
-        await _handleCustomerLifecycleOnComplete(_linkedCustomerId!);
+
+        if (!ok) {
+          // A required step was abandoned, so the job is not done. Undo the
+          // check-off instead of leaving inventory wrong behind a ticked box.
+          await sbSetEventCompleted(
+              eventId: widget.event.id, completed: false);
+          if (!mounted) return;
+          setState(() => _completed = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'Job left open — ramp quantities are needed to complete it.'),
+              duration: Duration(seconds: 4),
+            ),
+          );
+          return;
+        }
+
+        // Warn if completing a service job with no lift linked
+        final isServiceType = _jobType == 'Stairlift Service' ||
+            _jobType == 'Stairlift Annual Service';
+        if (isServiceType && _linkedLifts.isEmpty && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'No lift linked — use the Link Lift button to attach one so a service record can be logged.'),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
+
+        // CRM: drive the customer's lifecycle and queue follow-ups.
+        if ((_linkedCustomerId?.isNotEmpty ?? false) && mounted) {
+          await _handleCustomerLifecycleOnComplete(
+            context,
+            widget.event,
+            _jobType,
+            _linkedCustomerId!,
+            customerName: _linkedCustomerName,
+          );
+        }
+
+        if (mounted) await _loadMeta(); // refresh lift statuses
       }
     } catch (e) {
       debugPrint('[Complete] ERROR: $e');
-      if (mounted) setState(() => _completed = !next);
+      // The app_config write may already have succeeded, so re-read rather
+      // than assuming the previous local value is still correct.
+      if (mounted) {
+        setState(() => _completed = !next);
+        await _loadCompleted();
+      }
     } finally {
       if (mounted) setState(() => _savingComplete = false);
     }
   }
 
-  Future<void> _handleSmartCompletion() async {
-    debugPrint('[SmartComplete] jobType=$_jobType lifts=${_linkedLifts.map((l) => l.liftId).toList()}');
-    final prefs = await SharedPreferences.getInstance();
-    final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
-    final userEmail = AuthService.instance.profile?.email ?? '';
 
-    // Ramp job — always offer the adjustment form
-    if (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal') {
-      if (!mounted) return;
-      final isInstall = _jobType == 'Ramp Install';
-      final confirm = await showDialog<bool>(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
-          content: Text(
-            isInstall
-                ? 'Select the ramps and quantities used on this job to deduct them from inventory.'
-                : 'Select the ramps and quantities recovered on this job to add them back to inventory.',
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context, true),
-              style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-              child: const Text('Open Form'),
-            ),
-          ],
-        ),
-      );
-      if (confirm == true && mounted) {
-        await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => JobAdjustmentScreen(
-              initialJobRef: widget.event.title,
-              initialTabIndex: isInstall ? 0 : 1,
-              isCcals: _eventFundingSource == 'CCALS',
-            ),
-          ),
-        );
-      }
-      return;
-    }
-
-    for (final lift in List<LiftRecord>.from(_linkedLifts)) {
-      debugPrint('[SmartComplete] processing lift=${lift.liftId} status=${lift.status}');
-      if (!mounted) return;
-      switch (_jobType) {
-        case 'Stairlift Install':
-          if (mounted) {
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: const Text('Mark lift as Installed?'),
-                content: Text(
-                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?',
-                ),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: const Text('Mark Installed'),
-                  ),
-                ],
-              ),
-            );
-            debugPrint('[SmartComplete] Install confirm=$confirm');
-            if (confirm == true && mounted) {
-              debugPrint('[SmartComplete] calling sbMarkLiftStatus Installed for ${lift.liftId}');
-              await sbMarkLiftStatus(
-                liftId: lift.liftId,
-                newStatus: 'Installed',
-                userEmail: userEmail,
-                userName: userName,
-                note: 'Marked installed via schedule event: ${widget.event.title}',
-                eventDate: widget.event.start,
-              );
-              debugPrint('[SmartComplete] sbMarkLiftStatus done');
-            }
-          }
-          break;
-
-        case 'Stairlift Removal':
-        case 'Stairlift Buyback':
-        case 'Stairlift Buyout':
-        case 'Stairlift Buyback / Buyout':
-          if (mounted) {
-            final isBuyback = _jobType == 'Stairlift Buyback' || _jobType == 'Stairlift Buyout';
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: Text(isBuyback ? 'Mark lift as Removed (Buyback)?' : 'Mark lift as Removed?'),
-                content: Text(
-                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?',
-                ),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: const Text('Mark Removed'),
-                  ),
-                ],
-              ),
-            );
-            if (confirm == true && mounted) {
-              await sbMarkLiftStatus(
-                liftId: lift.liftId,
-                newStatus: 'Removed',
-                userEmail: userEmail,
-                userName: userName,
-                note: 'Marked removed via schedule event: ${widget.event.title}',
-              );
-            }
-          }
-          break;
-
-        case 'Stairlift Service':
-        case 'Stairlift Annual Service':
-          if (!mounted) return;
-          final serviceType = _jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
-          final confirm = await showDialog<bool>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text('Log service record?'),
-              content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                ElevatedButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                  child: const Text('Log Service'),
-                ),
-              ],
-            ),
-          );
-          if (confirm == true && mounted) {
-            await Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => LiftServiceFormScreen(
-                  lift: lift,
-                  prefillServiceType: serviceType,
-                  prefillCustomerName: widget.event.title,
-                  prefillDate: formatDate(DateTime.now()),
-                  offerInvoicePhoto: true,
-                ),
-              ),
-            );
-          }
-          break;
-      }
-    }
-    if (mounted) await _loadMeta(); // refresh all lift statuses
-  }
-
-  /// CRM lifecycle automation, triggered when a schedule event tied to a
-  /// customer is marked complete. Uses the event's start date as the
-  /// completion date (per the technician check-off). Suggestions are one-tap
-  /// prompts; only the review/annual queuing on install is automatic.
-  Future<void> _handleCustomerLifecycleOnComplete(String customerId) async {
-    final completionDate = widget.event.start;
-    final jt = _jobType ?? '';
-    final isInstall = jt == 'Stairlift Install' || jt == 'Ramp Install';
-    final isAnnual = jt == 'Stairlift Annual Service';
-    final isBuybackOrRemoval = jt == 'Stairlift Removal' ||
-        jt == 'Stairlift Buyback' ||
-        jt == 'Stairlift Buyout' ||
-        jt == 'Stairlift Buyback / Buyout' ||
-        jt == 'Ramp Removal';
-
-    try {
-      if (isInstall) {
-        // Automatic: queue a review request + arm the annual clock (+1yr).
-        final annualDue = DateTime(
-            completionDate.year + 1, completionDate.month, completionDate.day);
-        await sbEnsurePendingActivity(
-          customerId: customerId,
-          type: CustomerActivityType.review,
-          sourceEventId: widget.event.id,
-        );
-        await sbEnsurePendingActivity(
-          customerId: customerId,
-          type: CustomerActivityType.annual,
-          dueDate: annualDue,
-          sourceEventId: widget.event.id,
-        );
-        await sbSetCustomerAnnualDue(customerId, annualDue);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Review request queued and annual reminder set for next year.'),
-            duration: Duration(seconds: 4),
-          ));
-        }
-        // Suggest moving the customer to Active.
-        await _suggestCustomerStatus(
-            customerId, CustomerLifecycleStatus.active, 'Active');
-      } else if (isAnnual) {
-        // Close the pending annual activity and roll the next one forward +1yr.
-        final activities = await sbFetchActivitiesForCustomer(customerId);
-        final pendingAnnual = activities
-            .where((a) =>
-                a.type == CustomerActivityType.annual &&
-                a.status == CustomerActivityStatus.pending)
-            .cast<CustomerActivity?>()
-            .firstWhere((_) => true, orElse: () => null);
-        if (pendingAnnual != null) {
-          await sbUpdateActivityStatus(
-              pendingAnnual.activityId, CustomerActivityStatus.done);
-        }
-        final nextDue = DateTime(
-            completionDate.year + 1, completionDate.month, completionDate.day);
-        await sbEnsurePendingActivity(
-          customerId: customerId,
-          type: CustomerActivityType.annual,
-          dueDate: nextDue,
-          sourceEventId: widget.event.id,
-        );
-        await sbSetCustomerAnnualDue(customerId, nextDue);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Annual logged — next annual reminder set for next year.'),
-            duration: Duration(seconds: 4),
-          ));
-        }
-      } else if (isBuybackOrRemoval) {
-        // Mark any pending buyback-candidate flag done, and suggest Past.
-        final activities = await sbFetchActivitiesForCustomer(customerId);
-        for (final a in activities) {
-          if (a.type == CustomerActivityType.buybackCandidate &&
-              a.status == CustomerActivityStatus.pending) {
-            await sbUpdateActivityStatus(a.activityId, CustomerActivityStatus.done);
-          }
-        }
-        await _suggestCustomerStatus(
-            customerId, CustomerLifecycleStatus.past, 'Past customer');
-      }
-    } catch (e) {
-      debugPrint('[CRM lifecycle] ERROR: $e');
-    }
-  }
-
-  /// One-tap prompt to move a linked customer to [target]. Never auto-applied.
-  Future<void> _suggestCustomerStatus(
-      String customerId, CustomerLifecycleStatus target, String label) async {
-    if (!mounted) return;
-    final name = _linkedCustomerName ?? 'this customer';
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text('Mark $name as $label?'),
-        content: Text('Update the customer’s lifecycle status to $label.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Not now')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-            child: Text('Mark $label'),
-          ),
-        ],
-      ),
-    );
-    if (confirm == true) {
-      await sbUpdateCustomerLifecycle(customerId, target);
-    }
-  }
 
   Future<void> _openMaps(String location) async {
     final encoded = Uri.encodeComponent(location);
