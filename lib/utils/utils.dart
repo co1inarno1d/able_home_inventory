@@ -281,6 +281,87 @@ String normalizeFundingSource(String? raw) {
   return 'Other';
 }
 
+// ---------------------------------------------------------------------------
+// JOB TYPES
+// ---------------------------------------------------------------------------
+
+/// The job types a schedule event can carry.
+///
+/// This was hardcoded inline in four places (the event form and three times in
+/// the detail screen's dropdown). A value stored in app_config that is missing
+/// from the list it is rendered against silently displays as "unset", so there
+/// must be exactly one list.
+const List<String> kJobTypes = [
+  'Stairlift Install',
+  'Stairlift Removal',
+  'Stairlift Buyback / Buyout',
+  'Stairlift Service',
+  'Stairlift Annual Service',
+  'Ramp Install',
+  'Ramp Removal',
+  'Needs Scheduling',
+  'Reminder',
+  'Other',
+];
+
+/// Values [inferJobTypeFromTitle] can return that are NOT offered in the
+/// dropdown, mapped onto one that is.
+///
+/// The inference function predates the dropdown list and emits 'Eval',
+/// 'Schedule Service' and 'Schedule Removal'. Those were persisted to
+/// app_config and then rendered against a list that does not contain them, so
+/// the dropdown fell through to null and showed a stored job type as unset.
+const Map<String, String> kJobTypeAliases = {
+  'Schedule Service': 'Needs Scheduling',
+  'Schedule Removal': 'Needs Scheduling',
+  'Eval': 'Other',
+};
+
+/// Maps any stored or inferred job type onto [kJobTypes].
+/// Returns null only when there is genuinely no type.
+String? normalizeJobType(String? raw) {
+  final v = (raw ?? '').trim();
+  if (v.isEmpty) return null;
+  for (final t in kJobTypes) {
+    if (t.toLowerCase() == v.toLowerCase()) return t;
+  }
+  final alias = kJobTypeAliases[v];
+  if (alias != null) return alias;
+  for (final entry in kJobTypeAliases.entries) {
+    if (entry.key.toLowerCase() == v.toLowerCase()) return entry.value;
+  }
+  return 'Other';
+}
+
+/// True when the title reads like a to-do rather than a booked job —
+/// "Set up Leominster service", "Schedule the Dartmouth removal". These are
+/// the office's own reminders to book something, and they belong in the hub's
+/// Needs Scheduling bucket.
+bool titleLooksUnscheduled(String title) {
+  final t = title.toLowerCase().trimLeft();
+  return t.startsWith('set up') ||
+      t.startsWith('set-up') ||
+      t.startsWith('setup') ||
+      t.startsWith('schedule ') ||
+      t.startsWith('need to schedule') ||
+      t.startsWith('needs scheduling') ||
+      t.startsWith('call ') ||
+      t.startsWith('book ');
+}
+
+/// True when a stairlift job involves a curved rail.
+///
+/// Prefers the linked lift's rail type, which is authoritative. Falls back to
+/// the event title, because on a new install the lift is usually not linked
+/// until the work is done — exactly the jobs the hub most needs to show.
+/// Defaults to straight, which is the common case.
+bool isCurvedRailJob({String? liftRailType, String title = ''}) {
+  final rt = (liftRailType ?? '').trim().toLowerCase();
+  if (rt.isNotEmpty) return rt.startsWith('curv');
+  final t = title.toLowerCase();
+  return t.contains('curve') || t.contains('curved');
+}
+
 /// Returns true if the funding source requires agency confirmation before scheduling.
 bool requiresAgencyConfirmation(String fundingSource) {
   return fundingSource != 'Private' && fundingSource.isNotEmpty;
