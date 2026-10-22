@@ -1564,7 +1564,7 @@ Future<Map<String, Map<String, dynamic>>> sbGetAllEventMeta() async {
   final rows = await _sb
       .from('app_config')
       .select('key, value')
-      .or('key.like.event_job_type_%,key.like.event_lift_%,key.like.event_source_%,key.like.event_funding_%');
+      .or('key.like.event_job_type_%,key.like.event_lift_%,key.like.event_source_%,key.like.event_funding_%,key.like.event_customer_%');
   final result = <String, Map<String, dynamic>>{};
   for (final r in rows as List) {
     final key = r['key'] as String;
@@ -1583,15 +1583,39 @@ Future<Map<String, Map<String, dynamic>>> sbGetAllEventMeta() async {
     } else if (key.startsWith('event_funding_')) {
       eventId = key.substring('event_funding_'.length);
       field = 'funding_source';
+    } else if (key.startsWith('event_customer_')) {
+      // Previously omitted here, so bulk views could not see customer links
+      // even though the per-event read returned them.
+      eventId = key.substring('event_customer_'.length);
+      field = 'customer';
     }
     if (eventId == null || field == null) continue;
-    result.putIfAbsent(eventId, () => {'job_type': null, 'lift_ids': <String>[], 'source': null, 'funding_source': 'Private'});
+    result.putIfAbsent(
+        eventId,
+        () => {
+              'job_type': null,
+              'lift_ids': <String>[],
+              'source': null,
+              'funding_source': 'Private',
+              'customer': null,
+            });
     if (field == 'job_type') {
       result[eventId]!['job_type'] = value;
     } else if (field == 'source') {
       result[eventId]!['source'] = value;
     } else if (field == 'funding_source') {
       result[eventId]!['funding_source'] = value ?? 'Private';
+    } else if (field == 'customer' && value != null && value.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(value) as Map<String, dynamic>;
+        result[eventId]!['customer'] = {
+          'name': decoded['name']?.toString() ?? '',
+          'qb_id': decoded['qb_id']?.toString() ?? '',
+          'customer_id': decoded['customer_id']?.toString() ?? '',
+        };
+      } catch (_) {
+        // Malformed JSON — leave unlinked rather than failing the whole read.
+      }
     } else if (field == 'lift_ids' && value != null && value.isNotEmpty) {
       try {
         final decoded = jsonDecode(value);

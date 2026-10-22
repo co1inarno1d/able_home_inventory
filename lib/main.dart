@@ -27,7 +27,12 @@ import 'screens/user_management_screen.dart';
 import 'integrations/quickbooks_service.dart';
 import 'supabase_api.dart';
 import 'utils/utils.dart'
-    show extractCity, kFundingSources, kDefaultFundingSource, normalizeFundingSource;
+    show
+        extractCity,
+        inferJobTypeFromTitle,
+        kDefaultFundingSource,
+        kFundingSources,
+        normalizeFundingSource;
 import 'utils/schedule_search.dart';
 
 /// =======================
@@ -92,47 +97,6 @@ String normalizeBinDisplay(String raw) {
 bool eventIsRampJob(QbtScheduleEvent event) {
   final combined = '${event.title} ${event.notes}'.toLowerCase();
   return combined.contains('ramp');
-}
-
-/// Infer job type from a schedule event title.
-/// Returns one of: 'Stairlift Install', 'Stairlift Removal', 'Stairlift Service',
-/// 'Stairlift Annual Service', 'Ramp Install', 'Ramp Removal',
-/// 'Schedule Service', 'Schedule Removal', 'Eval', or null (unknown/untracked).
-String? inferJobTypeFromTitle(String title) {
-  final t = title.toLowerCase();
-
-  // Evals / measures / assessments → not a trackable job
-  if (t.contains('eval') || t.contains('measure') || t.contains('assessment')) {
-    return 'Eval';
-  }
-
-  // Scheduling notes: "set up …" or "schedule …" at the start
-  final isSetupNote = t.startsWith('set up') ||
-      t.startsWith('set-up') ||
-      t.startsWith('schedule ');
-  if (isSetupNote) {
-    if (t.contains('service') || t.contains('annual')) return 'Schedule Service';
-    if (t.contains('removal') || t.contains('remove')) return 'Schedule Removal';
-    return null; // other setup notes (ramp rental setup, etc.) — ignore
-  }
-
-  final hasRamp = t.contains('ramp') && !t.contains('adjustment') && !t.contains('meeting');
-
-  // Explicit installs
-  if (t.contains('install')) return hasRamp ? 'Ramp Install' : 'Stairlift Install';
-
-  // Explicit removals and buybacks/buyouts (treated as removals)
-  if (t.contains('buyback') || t.contains('buyout')) return 'Stairlift Removal';
-  if (t.contains('removal') || t.contains('remove')) return hasRamp ? 'Ramp Removal' : 'Stairlift Removal';
-
-  // Ramp jobs with no explicit install/removal keyword
-  if (hasRamp) return 'Ramp Install';
-
-  // Service calls
-  if (t.contains('annual')) return 'Stairlift Annual Service';
-  if (t.contains('service')) return 'Stairlift Service';
-
-  return null;
 }
 
 /// Convert any Drive URL format to the thumbnail format that Flutter can load.

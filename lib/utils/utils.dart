@@ -105,31 +105,50 @@ bool eventIsRampJob(QbtScheduleEvent event) {
 }
 
 /// Infer job type from a schedule event title.
+///
+/// This is the ONLY copy. It previously existed here and in main.dart with
+/// divergent logic — this copy had lost the buyback/buyout branch, so a
+/// "Smith buyback" event classified as untyped for any caller importing from
+/// here while main.dart classified it as a removal.
+///
+/// Returns values that may need [normalizeJobType] before display: 'Eval',
+/// 'Schedule Service' and 'Schedule Removal' are not in [kJobTypes].
 String? inferJobTypeFromTitle(String title) {
   final t = title.toLowerCase();
 
+  // Evals / measures / assessments → not a trackable job
   if (t.contains('eval') || t.contains('measure') || t.contains('assessment')) {
     return 'Eval';
   }
 
+  // Scheduling notes: "set up …" or "schedule …" at the start
   final isSetupNote = t.startsWith('set up') ||
       t.startsWith('set-up') ||
       t.startsWith('schedule ');
   if (isSetupNote) {
     if (t.contains('service') || t.contains('annual')) return 'Schedule Service';
     if (t.contains('removal') || t.contains('remove')) return 'Schedule Removal';
-    return null;
+    return null; // other setup notes (ramp rental setup, etc.) — ignore
   }
 
   final hasRamp = t.contains('ramp') &&
       !t.contains('adjustment') &&
       !t.contains('meeting');
 
+  // Explicit installs
   if (t.contains('install')) return hasRamp ? 'Ramp Install' : 'Stairlift Install';
+
+  // Buybacks and buyouts are removals: the lift comes back to us.
+  if (t.contains('buyback') || t.contains('buyout')) return 'Stairlift Removal';
+
   if (t.contains('removal') || t.contains('remove')) {
     return hasRamp ? 'Ramp Removal' : 'Stairlift Removal';
   }
+
+  // Ramp jobs with no explicit install/removal keyword
   if (hasRamp) return 'Ramp Install';
+
+  // Service calls
   if (t.contains('annual')) return 'Stairlift Annual Service';
   if (t.contains('service')) return 'Stairlift Service';
 
