@@ -34,6 +34,9 @@ class ScheduleDesktopView extends StatefulWidget {
   /// Latest date currently loaded in [events].
   final DateTime activeEnd;
 
+  /// Opens the Operations Hub — the same events in a tabular view.
+  final VoidCallback? onOpenHub;
+
   /// Optional warning shown above the grid when schedule history looks
   /// unreliable. Built by the parent, which owns the archive-health state.
   /// Previously this banner existed only in the mobile layout, so desktop
@@ -51,6 +54,7 @@ class ScheduleDesktopView extends StatefulWidget {
     required this.onRefresh,
     required this.onTapEvent,
     required this.onAddEvent,
+    this.onOpenHub,
     required this.activeStart,
     required this.activeEnd,
     this.archiveBanner,
@@ -309,6 +313,10 @@ class _ScheduleDesktopViewState extends State<ScheduleDesktopView> {
           _iconBtn(Icons.refresh, widget.onRefresh, 'Refresh'),
           // Add event
           _iconBtn(Icons.add_circle_outline, widget.onAddEvent, 'Add event'),
+          // Operations Hub — a different view of these same events
+          if (widget.onOpenHub != null)
+            _iconBtn(Icons.pending_actions_rounded, widget.onOpenHub!,
+                'Operations Hub'),
         ],
       ),
     );

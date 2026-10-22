@@ -310,25 +310,25 @@ class _Body extends StatelessWidget {
       children: [
         _StatRow(children: [
           _Stat(label: 'Installs', value: '$installs', color: kBrandGreen,
-              onTap: () => _goHub(context, tab: 1)),
+              onTap: () => _goHub(context, tab: HubTabs.installs)),
           _Stat(label: 'Removals', value: '$removals', color: Colors.blueGrey[700]!,
-              onTap: () => _goHub(context, tab: 2)),
+              onTap: () => _goHub(context, tab: HubTabs.removals)),
           _Stat(label: 'Service', value: '$service', color: Colors.orange[800]!,
-              onTap: () => _goHub(context, tab: 3)),
+              onTap: () => _goHub(context, tab: HubTabs.service)),
         ]),
         const SizedBox(height: 10),
         _StatRow(children: [
           _Stat(label: 'Annuals', value: '$annuals', color: Colors.blue[700]!,
-              onTap: () => _goHub(context, tab: 4)),
+              onTap: () => _goHub(context, tab: HubTabs.service)),
           _Stat(label: 'Web Leads', value: '$leads', color: Colors.purple[700]!,
-              onTap: () => _goHub(context, tab: 5)),
+              onTap: () => _goHub(context, tab: HubTabs.leads)),
           _Stat(label: 'Waiting Confirm', value: '$waitingConfirm', color: Colors.orange[700]!,
-              onTap: () => _goHub(context, tab: 0)),
+              onTap: () => _goHub(context, tab: HubTabs.toSchedule)),
         ]),
         if (aging > 0) ...[
           const SizedBox(height: 10),
           GestureDetector(
-            onTap: () => _goHub(context, tab: 0),
+            onTap: () => _goHub(context, tab: HubTabs.toSchedule),
             child: _AlertChip(
               label: '$aging job${aging == 1 ? '' : 's'} waiting 7+ days',
               color: Colors.red[700]!,
@@ -555,11 +555,11 @@ class _Body extends StatelessWidget {
         _StatRow(children: [
           _Stat(label: 'Pending', value: '$unscheduled',
               color: unscheduled > 0 ? Colors.orange[800]! : Colors.grey[600]!,
-              onTap: () => _goHub(context, tab: 4)),
+              onTap: () => _goHub(context, tab: HubTabs.service)),
           _Stat(label: 'Scheduled', value: '$scheduled', color: kBrandGreen,
-              onTap: () => _goHub(context, tab: 4)),
+              onTap: () => _goHub(context, tab: HubTabs.service)),
           _Stat(label: 'Total', value: '${annuals.length}', color: Colors.grey[600]!,
-              onTap: () => _goHub(context, tab: 4)),
+              onTap: () => _goHub(context, tab: HubTabs.service)),
         ]),
       ],
     );
@@ -571,7 +571,9 @@ class _Body extends StatelessWidget {
     final leads = d.webLeads;
     final newLeads = leads.where((l) => l.status.toLowerCase() == 'new').length;
     final contacted = leads.where((l) => l.status.toLowerCase() == 'contacted').length;
-    final won = leads.where((l) => l.status.toLowerCase() == 'won').length;
+    // The schema's terminal status is 'Closed'; this counted 'won', which no
+    // code ever writes, so the tile read 0 permanently.
+    final closed = leads.where((l) => l.status.toLowerCase() == 'closed').length;
 
     return _Section(
       title: 'Web Leads',
@@ -580,11 +582,11 @@ class _Body extends StatelessWidget {
         _StatRow(children: [
           _Stat(label: 'New', value: '$newLeads',
               color: newLeads > 0 ? Colors.purple[700]! : Colors.grey[600]!,
-              onTap: () => _goHub(context, tab: 5)),
+              onTap: () => _goHub(context, tab: HubTabs.leads)),
           _Stat(label: 'Contacted', value: '$contacted', color: Colors.blueGrey[600]!,
-              onTap: () => _goHub(context, tab: 5)),
-          _Stat(label: 'Won', value: '$won', color: kBrandGreen,
-              onTap: () => _goHub(context, tab: 5)),
+              onTap: () => _goHub(context, tab: HubTabs.leads)),
+          _Stat(label: 'Closed', value: '$closed', color: kBrandGreen,
+              onTap: () => _goHub(context, tab: HubTabs.leads)),
         ]),
       ],
     );

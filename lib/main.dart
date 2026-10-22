@@ -2112,9 +2112,10 @@ class _HomeShellState extends State<HomeShell> {
     return [
       if (p.canSeeDashboard)
         (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
+      // The Hub is reached from inside the Schedule rather than being its own
+      // tab: it is the same events in a tabular view, so a separate top-level
+      // destination implied two systems.
       (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
-      if (p.canSeeOpsHub)
-        (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
       if (p.canSeeLifts)
         (icon: Icons.list_alt_rounded, label: 'Lifts', page: const LiftsScreen()),
       if (p.canSeeRamps)
@@ -2138,7 +2139,6 @@ class _HomeShellState extends State<HomeShell> {
         // desktop but still visible to admins on mobile.
         if (p.canSeeDashboard)
           (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
-        (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
         (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
         (icon: Icons.inventory_2_outlined, label: 'Inventory', page: InventoryScreen(
           onLifts: () => Navigator.of(context).push(
@@ -2150,9 +2150,9 @@ class _HomeShellState extends State<HomeShell> {
           (icon: Icons.people_outline_rounded, label: 'Customers', page: const CustomersScreen()),
       ];
     } else {
-      // Installer — Hub, Schedule, Inventory, Customers, Prep
+      // Installer — Schedule, Inventory, Customers, Prep. The Hub lives
+      // inside the Schedule.
       return [
-        (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
         (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
         (icon: Icons.inventory_2_outlined, label: 'Inventory', page: InventoryScreen(
           onLifts: () => Navigator.of(context).push(
@@ -8149,6 +8149,41 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         .join(', ');
   }
 
+  /// Opens an event's detail screen. Shared by the mobile list, the desktop
+  /// grid and the Operations Hub, so all three routes land on the same screen
+  /// and there is only one place an event can be edited.
+  Future<bool?> _openEventDetail(QbtScheduleEvent event) async {
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ScheduleEventDetailScreen(
+          event: event,
+          users: _users,
+          assignedNames: _assignedNames(event),
+          color: _parseColor(event.color),
+          formatTime: _formatTime,
+        ),
+      ),
+    );
+    if (changed == true) _load();
+    return changed;
+  }
+
+  /// Opens the hub as a different view of the events already loaded here.
+  Future<void> _openHub() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OperationsHubScreen(
+          events: _events,
+          users: _users,
+          onOpenEvent: _openEventDetail,
+        ),
+      ),
+    );
+    if (mounted) _load();
+  }
+
   Future<void> _onToggleComplete(QbtScheduleEvent event) async {
     final next = !_completedIds.contains(event.id);
     setState(() {
@@ -8223,23 +8258,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               error: _error,
               onToggleComplete: _onToggleComplete,
               onRefresh: _load,
-              onTapEvent: (event) async {
-                final color = _parseColor(event.color);
-                final changed = await Navigator.push<bool>(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ScheduleEventDetailScreen(
-                      event: event,
-                      users: _users,
-                      assignedNames: _assignedNames(event),
-                      color: color,
-                      formatTime: _formatTime,
-                    ),
-                  ),
-                );
-                if (changed == true) _load();
-                return changed;
-              },
+              onTapEvent: _openEventDetail,
               onAddEvent: () async {
                 final created = await Navigator.push<bool>(
                   context,
@@ -8255,6 +8274,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               activeStart: _activeHistoryStart,
               activeEnd: _liveRangeEnd,
               archiveBanner: _archiveStale ? _staleArchiveBanner() : null,
+              onOpenHub: _openHub,
             ),
           );
         }
@@ -8307,6 +8327,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                   },
                 )
               else ...[
+                IconButton(
+                  icon: const Icon(Icons.pending_actions_rounded),
+                  tooltip: 'Operations Hub',
+                  onPressed: _openHub,
+                ),
                 IconButton(
                   icon: const Icon(Icons.search),
                   tooltip: 'Search',
