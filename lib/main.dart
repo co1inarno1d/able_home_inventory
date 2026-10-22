@@ -10539,6 +10539,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   final ScrollController _scrollController = ScrollController();
   final Map<String, GlobalKey> _dayKeys = {};
 
+  // Bounds the scroll-to-today settle loop (see _settleScrollToToday) so a
+  // list that never contains today can't spin post-frame callbacks forever.
+  static const int _kMaxScrollAttempts = 12;
+  int _scrollAttempt = 0;
+
   // Archive health: warn if the nightly archive cron appears to have stalled,
   // so a silent failure surfaces in days rather than months.
   static const int _staleArchiveDays = 3;
@@ -10643,48 +10648,111 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')}';
   }
 
-  /// Scroll to today. Uses a two-pass approach:
-  /// 1. Estimate offset from item counts to get roughly the right position.
-  /// 2. After the frame renders, use the GlobalKey to fine-tune with ensureVisible.
+  /// Scroll the mobile list so today's header sits at the top.
+  ///
+  /// The previous implementation estimated the offset from hardcoded item
+  /// heights (46px header / 70px card) and then tried a single ensureVisible
+  /// to correct itself. It consistently landed days-to-a-week BEFORE today,
+  /// because:
+  ///   * real heights vary (cards wrap to two lines, some have a location row),
+  ///     so the estimate always undershot;
+  ///   * the correction pass almost never ran — _dayKeys is populated lazily in
+  ///     itemBuilder, so after an undershooting jump today's header had not been
+  ///     built and its GlobalKey had no context yet;
+  ///   * on a slow first frame hasClients was still false and the whole thing
+  ///     returned silently, leaving the list at offset 0, i.e. 30 days back.
+  ///
+  /// Now it re-estimates and re-corrects across consecutive frames until
+  /// today's header is actually attached and aligned, then stops. Each pass
+  /// renders new items, which attaches more keys, so this converges in a few
+  /// frames instead of giving up after one.
   void _scrollToToday({bool animate = true}) {
-    if (!_scrollController.hasClients) return;
-    final items = _listItems;
-    final todayKey = _dayKey(DateTime.now());
+    _scrollAttempt = 0;
+    _settleScrollToToday(animate: animate);
+  }
 
-    // Count items before today for the initial estimate
+  /// The day header to land on: today if it has events, otherwise the next day
+  /// that does. Days only appear in the list when they contain events, so on a
+  /// quiet day (weekend, light schedule) there is no "today" header to target —
+  /// landing on the next upcoming day is what a tech wants anyway. Falls back to
+  /// the last day in the list when today is past everything loaded.
+  String? _scrollTargetDayKey(List<dynamic> items) {
+    final todayKey = _dayKey(DateTime.now());
+    String? lastDay;
+    for (final item in items) {
+      if (item is! String) continue;
+      // dayKeys are zero-padded YYYY-MM-DD, so lexical order is chronological.
+      if (item.compareTo(todayKey) >= 0) return item;
+      lastDay = item;
+    }
+    return lastDay;
+  }
+
+  /// Estimated offset of the given day header, in pixels from the top of the
+  /// list. Only used to get close enough that the real header gets built; final
+  /// positioning is always done by ensureVisible against the actual widget.
+  double _estimatedTodayOffset(List<dynamic> items, String targetDay) {
+    const headerHeight = 50.0;
+    const cardHeight = 80.0;
     double offset = 0;
     for (final item in items) {
       if (item is String) {
-        if (item == todayKey) break;
-        offset += 46.0;
+        if (item == targetDay) break;
+        offset += headerHeight;
       } else {
-        offset += 70.0;
+        offset += cardHeight;
       }
     }
+    return offset;
+  }
 
-    final maxExtent = _scrollController.position.maxScrollExtent;
-    final target = offset.clamp(0.0, maxExtent);
+  void _settleScrollToToday({bool animate = true}) {
+    if (!mounted) return;
 
-    if (animate) {
-      _scrollController.animateTo(target,
-          duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
-    } else {
+    // The ListView may not have been laid out yet (the body shows a spinner
+    // while loading). Wait for a frame rather than silently giving up.
+    if (!_scrollController.hasClients) {
+      if (_scrollAttempt++ >= _kMaxScrollAttempts) return;
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _settleScrollToToday(animate: animate));
+      return;
+    }
+
+    final items = _listItems;
+    final targetDay = _scrollTargetDayKey(items);
+    if (targetDay == null) return; // empty list — nothing to scroll to
+    final ctx = _dayKeys[targetDay]?.currentContext;
+
+    if (ctx != null) {
+      // The target header exists — position against the real widget.
+      final before = _scrollController.offset;
+      Scrollable.ensureVisible(
+        ctx,
+        alignment: 0.0,
+        duration: animate ? const Duration(milliseconds: 200) : Duration.zero,
+      );
+      // ensureVisible can change what is laid out above us, which moves our
+      // own offset, so re-check next frame. Stop as soon as the offset stops
+      // moving (or an animation is in flight, which settles on its own).
+      final settled = animate || (_scrollController.offset - before).abs() < 1.0;
+      if (!settled && _scrollAttempt++ < _kMaxScrollAttempts) {
+        WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _settleScrollToToday(animate: false));
+      }
+      return;
+    }
+
+    // Not built yet — jump to the estimate so the surrounding range renders,
+    // which attaches today's key, then try again next frame.
+    if (_scrollAttempt++ >= _kMaxScrollAttempts) return;
+
+    final target = _estimatedTodayOffset(items, targetDay)
+        .clamp(0.0, _scrollController.position.maxScrollExtent);
+    if ((target - _scrollController.offset).abs() > 1.0) {
       _scrollController.jumpTo(target);
     }
-
-    // Second pass: once the target area is rendered, ensureVisible fine-tunes it
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final gk = _dayKeys[todayKey];
-      if (gk?.currentContext != null) {
-        Scrollable.ensureVisible(
-          gk!.currentContext!,
-          alignment: 0.0,
-          duration: animate
-              ? const Duration(milliseconds: 200)
-              : Duration.zero,
-        );
-      }
-    });
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _settleScrollToToday(animate: false));
   }
 
   // ---------------------------------------------------------------------------
@@ -10741,11 +10809,15 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         _isSearchMode = true;
         _isSearchLoading = false;
       });
-      // Scroll to bottom so newest results are visible
+      // Show the start of the results. _listItems reverses the day order when
+      // sorting newest-first, so the most relevant result is already at the
+      // top — the previous jump to maxScrollExtent landed on the OLDEST match.
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-        }
+        if (!_scrollController.hasClients) return;
+        final pos = _sortBy == 'newest'
+            ? 0.0
+            : _scrollController.position.maxScrollExtent;
+        _scrollController.jumpTo(pos);
       });
     } catch (_) {
       if (!mounted) return;
