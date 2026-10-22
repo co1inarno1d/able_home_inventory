@@ -733,6 +733,44 @@ Future<String> sbSavePrepChecklist({
 ///
 /// Falls back to the original bytes if compression fails — an uncompressed
 /// photo is better than a lost one.
+/// Retries a storage upload through transient network failures.
+///
+/// Techs work in basements and stairwells where LTE drops for seconds at a
+/// time. Without this, a single blip surfaced as "Upload failed" and the
+/// picked image was discarded — unrecoverable work, and the most common
+/// complaint from the field. Three attempts with backoff turns most of those
+/// into a slightly slow success.
+///
+/// Deliberately does NOT retry forever: a genuine failure (bad auth, bucket
+/// gone, file too large) must still surface rather than hanging the UI. A
+/// durable cross-restart queue needs IndexedDB on web and is tracked
+/// separately; this covers the common transient case without a new dependency.
+Future<T> _retryUpload<T>(
+  Future<T> Function() attempt, {
+  int maxAttempts = 3,
+}) async {
+  Object? lastError;
+  for (var i = 0; i < maxAttempts; i++) {
+    try {
+      return await attempt();
+    } catch (e) {
+      lastError = e;
+      final msg = e.toString().toLowerCase();
+      // Don't burn retries on errors that cannot succeed on a second try.
+      final permanent = msg.contains('duplicate') ||
+          msg.contains('already exists') ||
+          msg.contains('unauthorized') ||
+          msg.contains('forbidden') ||
+          msg.contains('payload too large') ||
+          msg.contains('exceeded the maximum');
+      if (permanent || i == maxAttempts - 1) break;
+      await Future<void>.delayed(Duration(milliseconds: 600 * (1 << i)));
+      debugPrint('[photo] upload attempt ${i + 1} failed, retrying: $e');
+    }
+  }
+  throw Exception('Upload failed after $maxAttempts attempts: $lastError');
+}
+
 Future<Uint8List> _compressForUpload(XFile imageFile) async {
   const minWidth = 1200;
   const minHeight = 1200;
@@ -759,10 +797,21 @@ Future<Uint8List> _compressForUpload(XFile imageFile) async {
       keepExif: false,
     );
     if (compressed != null) return compressed;
-  } catch (_) {
+  } catch (e) {
     // Fall through to the uncompressed bytes below.
+    debugPrint('[photo] compression failed, sending full size: $e');
   }
-  return imageFile.readAsBytes();
+  // Compression failed. The raw bytes can be 3-8 MB straight off a phone
+  // camera, which on basement LTE is the difference between a few seconds and
+  // a stalled upload the tech abandons. Nothing here can fix that, but it must
+  // not be silent — the caller logs it so a systematic failure is visible
+  // rather than looking like a flaky network.
+  final raw = await imageFile.readAsBytes();
+  if (raw.lengthInBytes > 2 * 1024 * 1024) {
+    debugPrint('[photo] uncompressed upload of '
+        '${(raw.lengthInBytes / 1048576).toStringAsFixed(1)} MB');
+  }
+  return raw;
 }
 
 Future<String> sbUploadLiftPhoto({
@@ -774,11 +823,11 @@ Future<String> sbUploadLiftPhoto({
   final fileName =
       'lifts/$liftId/${DateTime.now().millisecondsSinceEpoch}.jpg';
 
-  await _sb.storage.from(_photosBucket).uploadBinary(
+  await _retryUpload(() => _sb.storage.from(_photosBucket).uploadBinary(
         fileName,
         imageBytes,
         fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: false),
-      );
+      ));
 
   final url = _sb.storage.from(_photosBucket).getPublicUrl(fileName);
 
@@ -879,16 +928,23 @@ Future<String> sbUploadEventPhoto({
   final locationLabel = sanitize(eventLocation.isNotEmpty ? eventLocation : 'photo');
   final folderPath = 'events/${folderTitle}_$dateStr';
 
-  // Fetch existing photos once — used for index and for saving the updated list
+  // Fetch existing photos once — used for saving the updated list below.
   final existing = await sbFetchEventPhotos(eventId);
-  final index = existing.length + 1;
 
-  final fileName = '$folderPath/${locationLabel}_$index.jpg';
-  await _sb.storage.from(_photosBucket).uploadBinary(
+  // The filename carries a timestamp and a short random suffix rather than
+  // `existing.length + 1`. That counter collided in two real situations: two
+  // techs uploading to the same event at once, and any upload after a photo
+  // had been deleted. With upsert:false a collision throws, so the tech lost
+  // the photo to an error that looked random.
+  final stamp = DateTime.now().millisecondsSinceEpoch;
+  final salt = (stamp % 1000).toString().padLeft(3, '0') +
+      identityHashCode(imageBytes).toRadixString(36);
+  final fileName = '$folderPath/${locationLabel}_${stamp}_$salt.jpg';
+  await _retryUpload(() => _sb.storage.from(_photosBucket).uploadBinary(
         fileName,
         imageBytes,
         fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: false),
-      );
+      ));
   final url = _sb.storage.from(_photosBucket).getPublicUrl(fileName);
 
   // Save URL to app_config

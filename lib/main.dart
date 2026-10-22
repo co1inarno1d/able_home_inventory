@@ -8875,8 +8875,15 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     if (imageFiles.isEmpty || !mounted) return;
 
     setState(() => _uploadingPhoto = true);
-    try {
-      for (final imageFile in imageFiles) {
+
+    // Upload each photo independently. Previously one failure threw out of the
+    // loop, so a tech who picked five photos and lost signal on the third was
+    // told "Upload failed" with no indication that two had actually landed —
+    // and the rest were never attempted.
+    var succeeded = 0;
+    Object? lastError;
+    for (final imageFile in imageFiles) {
+      try {
         await sbUploadEventPhoto(
           eventId: widget.event.id,
           imageFile: imageFile,
@@ -8885,25 +8892,45 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           eventDate: widget.event.start,
           eventLocation: widget.event.location,
         );
-      }
-      final urls = await sbFetchEventPhotos(widget.event.id);
-      if (mounted) {
-        setState(() {
-          _eventPhotoUrls = urls;
-          _uploadingPhoto = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(imageFiles.length == 1 ? 'Photo added' : '${imageFiles.length} photos added')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _uploadingPhoto = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Upload failed: $e')),
-        );
+        succeeded++;
+      } catch (e) {
+        lastError = e;
       }
     }
+
+    final failed = imageFiles.length - succeeded;
+    List<String> urls = _eventPhotoUrls;
+    try {
+      urls = await sbFetchEventPhotos(widget.event.id);
+    } catch (_) {
+      // Keep whatever we already had rather than blanking the grid.
+    }
+    if (!mounted) return;
+    setState(() {
+      _eventPhotoUrls = urls;
+      _uploadingPhoto = false;
+    });
+
+    final String message;
+    if (failed == 0) {
+      message = succeeded == 1 ? 'Photo added' : '$succeeded photos added';
+    } else if (succeeded == 0) {
+      message = imageFiles.length == 1
+          ? 'Photo could not be uploaded — tap + to try again. ($lastError)'
+          : 'No photos uploaded — tap + to try again. ($lastError)';
+    } else {
+      // Be explicit about the partial result so the tech knows exactly how
+      // many to re-add rather than guessing.
+      message = '$succeeded of ${imageFiles.length} uploaded — '
+          '$failed still need re-adding.';
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: failed > 0 ? Colors.orange[900] : null,
+        duration: Duration(seconds: failed > 0 ? 6 : 2),
+      ),
+    );
   }
 
   Future<void> _deleteEventPhoto(String url) async {
