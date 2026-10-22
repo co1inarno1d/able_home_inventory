@@ -27,6 +27,7 @@ import 'screens/user_management_screen.dart';
 import 'integrations/quickbooks_service.dart';
 import 'supabase_api.dart';
 import 'utils/utils.dart' show extractCity;
+import 'utils/schedule_search.dart';
 
 /// =======================
 /// CONFIG
@@ -780,7 +781,6 @@ class _PasswordGateState extends State<PasswordGate> {
     );
   }
 }
-
 
 
 /// =======================
@@ -10578,21 +10578,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return DateTime(now.year, now.month, now.day).subtract(const Duration(days: _activeHistoryDays));
   }
 
-  // Month name → number map used for date parsing
-  static const Map<String, int> _monthMap = {
-    'jan': 1, 'january': 1,
-    'feb': 2, 'february': 2,
-    'mar': 3, 'march': 3,
-    'apr': 4, 'april': 4,
-    'may': 5,
-    'jun': 6, 'june': 6,
-    'jul': 7, 'july': 7,
-    'aug': 8, 'august': 8,
-    'sep': 9, 'sept': 9, 'september': 9,
-    'oct': 10, 'october': 10,
-    'nov': 11, 'november': 11,
-    'dec': 12, 'december': 12,
-  };
 
   @override
   void initState() {
@@ -10778,7 +10763,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     final query = _searchQuery.trim();
     if (query.isEmpty) return;
 
-    final parsed = _parseDateRange(query);
+    final parsed = parseScheduleDateRange(query);
     final dateRange = parsed.$1; // (DateTime start, DateTime end)?
     final textQuery = parsed.$2;
 
@@ -10853,73 +10838,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     }).toList();
   }
 
-  /// Parse a date range out of [query].
-  /// Returns `((startDate, endDate)?, remainingText)`.
-  /// If no date is detected, the first element is null and the full query is returned as text.
-  ///
-  /// Handles: "april 21 2025", "oct 30 2019", "4/21/25", "4/21/2025",
-  ///          "april 2025" (whole month), "2024" (whole year).
-  ((DateTime, DateTime)?, String) _parseDateRange(String query) {
-    var q = query.toLowerCase().trim();
-
-    String strip(String src, Pattern pat) =>
-        src.replaceAll(pat, ' ').replaceAll(RegExp(r'\s{2,}'), ' ').trim();
-
-    (DateTime, DateTime) dayRange(int y, int mo, int d) =>
-        (DateTime(y, mo, d), DateTime(y, mo, d, 23, 59, 59));
-
-    // MM/DD/YY or MM/DD/YYYY
-    final slash = RegExp(r'\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b');
-    var m = slash.firstMatch(q);
-    if (m != null) {
-      var y = int.parse(m.group(3)!);
-      if (y < 100) y += 2000;
-      return (dayRange(y, int.parse(m.group(1)!), int.parse(m.group(2)!)), strip(q, slash));
-    }
-
-    // Month name patterns
-    for (final entry in _monthMap.entries) {
-      final mn = entry.key;
-      final mo = entry.value;
-
-      // "april 21 2025"
-      final pat1 = RegExp(r'\b' + mn + r'\s+(\d{1,2})\s+(20\d{2})\b');
-      m = pat1.firstMatch(q);
-      if (m != null) {
-        return (dayRange(int.parse(m.group(2)!), mo, int.parse(m.group(1)!)), strip(q, pat1));
-      }
-
-      // "21 april 2025"
-      final pat2 = RegExp(r'\b(\d{1,2})\s+' + mn + r'\s+(20\d{2})\b');
-      m = pat2.firstMatch(q);
-      if (m != null) {
-        return (dayRange(int.parse(m.group(2)!), mo, int.parse(m.group(1)!)), strip(q, pat2));
-      }
-
-      // "april 2025" → whole month
-      final pat3 = RegExp(r'\b' + mn + r'\s+(20\d{2})\b');
-      m = pat3.firstMatch(q);
-      if (m != null) {
-        final y = int.parse(m.group(1)!);
-        final lastDay = DateTime(y, mo + 1, 0).day;
-        return (
-          (DateTime(y, mo, 1), DateTime(y, mo, lastDay, 23, 59, 59)),
-          strip(q, pat3),
-        );
-      }
-    }
-
-    // "2024" → whole year
-    final yearPat = RegExp(r'\b(20\d{2})\b');
-    m = yearPat.firstMatch(q);
-    if (m != null) {
-      final y = int.parse(m.group(1)!);
-      return ((DateTime(y, 1, 1), DateTime(y, 12, 31, 23, 59, 59)), strip(q, yearPat));
-    }
-
-    // No date found — full query is text
-    return (null, q);
-  }
 
   // ---------------------------------------------------------------------------
   // List building

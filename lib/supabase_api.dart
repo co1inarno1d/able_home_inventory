@@ -1748,6 +1748,27 @@ Future<List<QbtScheduleEvent>> sbFetchScheduleHistory({
   return (raw as List).map(_mapHistoryRow).toList();
 }
 
+/// All archived events within a date range, with no text filter.
+/// Backs date-only searches, where the entire query was consumed by the date
+/// parser and there is no text left to match on.
+Future<List<QbtScheduleEvent>> sbFetchScheduleHistoryRange({
+  DateTime? startDate,
+  DateTime? endDate,
+  bool newestFirst = true,
+  int limit = 1000,
+}) async {
+  var q = _sb.from('schedule_history').select();
+  if (startDate != null) {
+    q = q.gte('start_time', startDate.toUtc().toIso8601String());
+  }
+  if (endDate != null) {
+    q = q.lte('start_time', endDate.toUtc().toIso8601String());
+  }
+  final raw =
+      await q.order('start_time', ascending: !newestFirst).limit(limit);
+  return (raw as List).map(_mapHistoryRow).toList();
+}
+
 /// Full-text search across all historical events.
 /// [query] is the remaining text after date tokens are stripped.
 /// [startDate]/[endDate] are optional date bounds parsed from the query.
@@ -1764,7 +1785,21 @@ Future<List<QbtScheduleEvent>> sbSearchScheduleHistory({
   int limit = 1000,
 }) async {
   final text = query.trim();
-  if (text.isEmpty) return [];
+
+  // A date-only query ("april 2025", "4/21/25", "2024") is legitimate: the
+  // caller strips the date tokens out of the text before calling, so `text`
+  // ends up empty while startDate/endDate carry the real query. Returning
+  // early here meant date searches only ever matched the in-memory live
+  // window and never the archive.
+  if (text.isEmpty) {
+    if (startDate == null && endDate == null) return [];
+    return sbFetchScheduleHistoryRange(
+      startDate: startDate,
+      endDate: endDate,
+      newestFirst: newestFirst,
+      limit: limit,
+    );
+  }
 
   final byId = <String, QbtScheduleEvent>{};
 
