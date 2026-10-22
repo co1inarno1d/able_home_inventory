@@ -1069,16 +1069,6 @@ Future<void> sbDeletePickupItem({required String id}) async {
 // ANNUALS
 // ---------------------------------------------------------------------------
 
-Future<List<AnnualRecord>> sbFetchAnnuals() async {
-  final raw = await _sb
-      .from('annuals')
-      .select()
-      .order('date_requested', ascending: false);
-
-  return (raw as List)
-      .map((r) => AnnualRecord.fromJson(r as Map<String, dynamic>))
-      .toList();
-}
 
 Future<void> sbUpsertAnnual({
   required String userEmail,
@@ -1131,26 +1121,6 @@ Future<void> sbUpsertAnnual({
   });
 }
 
-Future<void> sbMarkAnnualScheduled({
-  required String annualId,
-  required String userEmail,
-  required String userName,
-  String note = '',
-}) async {
-  await _sb
-      .from('annuals')
-      .update({'scheduled': true, 'updated_at': DateTime.now().toIso8601String()})
-      .eq('annual_id', annualId);
-
-  await _sb.from('annuals_history').insert({
-    'timestamp': DateTime.now().toIso8601String(),
-    'annual_id': annualId,
-    'event_type': 'Scheduled',
-    'changed_by_email': userEmail,
-    'changed_by_name': userName,
-    'note': note,
-  });
-}
 
 Future<void> sbDeleteAnnual({
   required String annualId,
@@ -1169,32 +1139,11 @@ Future<void> sbDeleteAnnual({
   });
 }
 
-Future<List<Map<String, dynamic>>> sbFetchAnnualHistory({
-  required String annualId,
-}) async {
-  final raw = await _sb
-      .from('annuals_history')
-      .select()
-      .eq('annual_id', annualId)
-      .order('timestamp', ascending: true);
-
-  return (raw as List).map((r) => r as Map<String, dynamic>).toList();
-}
 
 // ---------------------------------------------------------------------------
 // SERVICE JOBS
 // ---------------------------------------------------------------------------
 
-Future<List<ServiceJobRecord>> sbFetchServiceJobs() async {
-  final raw = await _sb
-      .from('service_jobs')
-      .select()
-      .order('created_at', ascending: false);
-
-  return (raw as List)
-      .map((r) => ServiceJobRecord.fromJson(r as Map<String, dynamic>))
-      .toList();
-}
 
 Future<void> sbUpsertServiceJob({
   required String userEmail,
@@ -1265,16 +1214,6 @@ Future<void> sbDeleteServiceJob({required String jobId}) async {
 // REMOVAL JOBS
 // ---------------------------------------------------------------------------
 
-Future<List<RemovalJobRecord>> sbFetchRemovalJobs() async {
-  final raw = await _sb
-      .from('removal_jobs')
-      .select()
-      .order('created_at', ascending: false);
-
-  return (raw as List)
-      .map((r) => RemovalJobRecord.fromJson(r as Map<String, dynamic>))
-      .toList();
-}
 
 Future<void> sbUpsertRemovalJob({
   required String userEmail,
@@ -1965,16 +1904,6 @@ Future<DateTime?> sbFetchLatestArchivedAt() async {
 // REVIEW REQUESTS
 // ---------------------------------------------------------------------------
 
-Future<Set<String>> sbFetchReviewDismissed() async {
-  final rows = await _sb
-      .from('app_config')
-      .select('key')
-      .like('key', 'review_dismissed_%');
-  return {
-    for (final r in rows as List)
-      (r['key'] as String).substring('review_dismissed_'.length)
-  };
-}
 
 Future<void> sbDismissReview(String liftId) async {
   await _sb.from('app_config').upsert(
@@ -2222,175 +2151,6 @@ Future<void> sbDeleteActivity(String activityId) async {
 // OPERATIONS HUB
 // ---------------------------------------------------------------------------
 
-Future<List<OpsJob>> sbFetchOpsJobs({bool includeCompleted = false}) async {
-  var q = _sb.from('ops_jobs').select();
-  if (!includeCompleted) {
-    q = q.neq('status', 'completed');
-  }
-  final raw = await q.order('date_requested', ascending: true);
-  return (raw as List)
-      .map((r) => OpsJob.fromJson(r as Map<String, dynamic>))
-      .toList();
-}
-
-/// Fetches all pending work from ops_jobs + legacy service_jobs, removal_jobs,
-/// and annuals tables, merged into a unified OpsJob list.
-Future<List<OpsJob>> sbFetchAllOpsJobs({bool includeCompleted = false}) async {
-  final results = await Future.wait([
-    sbFetchOpsJobs(includeCompleted: includeCompleted),
-    sbFetchServiceJobs(),
-    sbFetchRemovalJobs(),
-    sbFetchAnnuals(),
-  ]);
-
-  final ops = List<OpsJob>.from(results[0] as List<OpsJob>);
-  final serviceJobs = results[1] as List<ServiceJobRecord>;
-  final removalJobs = results[2] as List<RemovalJobRecord>;
-  final annuals = results[3] as List<AnnualRecord>;
-
-  // Convert legacy service jobs → OpsJob (skip ones already tracked in ops_jobs)
-  final existingSourceIds = ops.map((j) => j.sourceId).toSet();
-
-  for (final j in serviceJobs) {
-    if (existingSourceIds.contains(j.jobId)) continue;
-    if (!includeCompleted && j.status == 'Completed') continue;
-    ops.add(OpsJob(
-      jobId: 'svc_${j.jobId}',
-      jobType: j.jobType.toLowerCase().contains('annual')
-          ? OpsJobType.annualService
-          : OpsJobType.stairliftService,
-      status: _legacyStatusToOps(j.status),
-      customerName: j.customerName,
-      address: j.address,
-      city: extractCity(j.address),
-      phone: j.phone,
-      liftType: j.liftType,
-      liftId: j.liftId,
-      serialNumber: j.serialNumber,
-      fundingSource: j.fundingSource,
-      notes: j.notes,
-      dateRequested: j.dateRequested.isNotEmpty ? DateTime.tryParse(j.dateRequested) : null,
-      sourceTable: 'service_jobs',
-      sourceId: j.jobId,
-    ));
-  }
-
-  for (final j in removalJobs) {
-    if (existingSourceIds.contains(j.jobId)) continue;
-    if (!includeCompleted && j.status == 'Completed') continue;
-    ops.add(OpsJob(
-      jobId: 'rem_${j.jobId}',
-      jobType: OpsJobType.stairliftRemoval,
-      status: _legacyStatusToOps(j.status),
-      customerName: j.customerName,
-      address: j.address,
-      city: extractCity(j.address),
-      phone: j.phone,
-      liftType: j.liftType,
-      liftId: j.liftId,
-      serialNumber: j.serialNumber,
-      fundingSource: j.fundingSource,
-      notes: j.notes,
-      sourceTable: 'removal_jobs',
-      sourceId: j.jobId,
-    ));
-  }
-
-  for (final a in annuals) {
-    if (existingSourceIds.contains(a.annualId)) continue;
-    if (!includeCompleted && a.scheduled) continue;
-    ops.add(OpsJob(
-      jobId: 'ann_${a.annualId}',
-      jobType: OpsJobType.annualService,
-      status: a.scheduled ? OpsJobStatus.scheduled : OpsJobStatus.readyToSchedule,
-      customerName: a.customerName,
-      address: a.address,
-      city: extractCity(a.address),
-      phone: a.phone,
-      liftType: a.liftType,
-      liftId: a.liftId,
-      serialNumber: a.serialNumber,
-      fundingSource: 'Private',
-      notes: a.notes,
-      dateRequested: a.dateRequested.isNotEmpty ? DateTime.tryParse(a.dateRequested) : null,
-      sourceTable: 'annuals',
-      sourceId: a.annualId,
-    ));
-  }
-
-  ops.sort((a, b) {
-    final aDate = a.dateRequested ?? DateTime.now();
-    final bDate = b.dateRequested ?? DateTime.now();
-    return aDate.compareTo(bDate);
-  });
-  return ops;
-}
-
-OpsJobStatus _legacyStatusToOps(String status) {
-  switch (status.toLowerCase()) {
-    case 'scheduled': return OpsJobStatus.scheduled;
-    case 'completed': return OpsJobStatus.completed;
-    default: return OpsJobStatus.readyToSchedule;
-  }
-}
-
-Future<OpsJob> sbCreateOpsJob(OpsJob job) async {
-  final data = job.toJson()..remove('job_id');
-  // customer_id is a uuid column — an empty string is invalid, send null.
-  if ((data['customer_id'] as String?)?.isEmpty ?? true) data['customer_id'] = null;
-  final raw = await _sb.from('ops_jobs').insert(data).select().single();
-  return OpsJob.fromJson(raw);
-}
-
-Future<void> sbUpdateOpsJobStatus(String jobId, OpsJobStatus status) async {
-  await _sb.from('ops_jobs').update({
-    'status': _opsStatusToString(status),
-  }).eq('job_id', jobId);
-}
-
-/// Advances status for any job — native ops_jobs rows update in-place,
-/// legacy rows (service_jobs, removal_jobs, annuals) get promoted to a
-/// real ops_jobs row so status changes persist correctly.
-Future<void> sbAdvanceOpsJobStatus(OpsJob job, OpsJobStatus newStatus) async {
-  if (job.sourceTable == 'ops_jobs' || job.sourceTable.isEmpty) {
-    // Native ops_jobs row — simple update
-    await sbUpdateOpsJobStatus(job.jobId, newStatus);
-    return;
-  }
-  // Legacy row — promote to ops_jobs with the new status
-  final promoted = OpsJob(
-    jobId: '',
-    jobType: job.jobType,
-    status: newStatus,
-    customerName: job.customerName,
-    address: job.address,
-    city: job.city,
-    phone: job.phone,
-    liftType: job.liftType,
-    liftId: job.liftId,
-    serialNumber: job.serialNumber,
-    fundingSource: job.fundingSource,
-    notes: job.notes,
-    dateRequested: job.dateRequested,
-    buybackOfferPrice: job.buybackOfferPrice,
-    sourceTable: job.sourceTable,
-    sourceId: job.sourceId,
-  );
-  await sbCreateOpsJob(promoted);
-}
-
-Future<void> sbUpdateOpsJob(OpsJob job) async {
-  final data = job.toJson();
-  if ((data['customer_id'] as String?)?.isEmpty ?? true) data['customer_id'] = null;
-  await _sb.from('ops_jobs').update(data).eq('job_id', job.jobId);
-}
-
-/// Links (or updates) a job's customer FK in place. Native ops_jobs only.
-Future<void> sbSetOpsJobCustomer(String jobId, String? customerId) async {
-  await _sb.from('ops_jobs').update({
-    'customer_id': (customerId == null || customerId.isEmpty) ? null : customerId,
-  }).eq('job_id', jobId);
-}
 
 /// All ops_jobs linked to a customer (for the customer profile Jobs card).
 Future<List<OpsJob>> sbFetchJobsForCustomer(String customerId) async {
@@ -2409,23 +2169,6 @@ Future<void> sbDeleteOpsJob(String jobId) async {
   await _sb.from('ops_jobs').delete().eq('job_id', jobId);
 }
 
-/// Deletes an ops job regardless of whether it came from ops_jobs or a legacy table.
-Future<void> sbDeleteOpsJobAny(OpsJob job) async {
-  switch (job.sourceTable) {
-    case 'service_jobs':
-      await _sb.from('service_jobs').delete().eq('job_id', job.sourceId);
-      break;
-    case 'removal_jobs':
-      await _sb.from('removal_jobs').delete().eq('job_id', job.sourceId);
-      break;
-    case 'annuals':
-      await _sb.from('annuals').delete().eq('annual_id', job.sourceId);
-      break;
-    default:
-      // Native ops_jobs row — job_id is the real PK
-      await _sb.from('ops_jobs').delete().eq('job_id', job.jobId);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // LIFT CUSTOMER HISTORY

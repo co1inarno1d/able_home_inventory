@@ -18,7 +18,6 @@ import 'schedule_desktop.dart';
 import 'screens/bin_whiteboard_screen.dart';
 import 'screens/customers_screen.dart';
 import 'screens/inventory_screen.dart';
-import 'screens/dashboard_screen.dart';
 import 'screens/operations_hub_screen.dart';
 import 'screens/schedule_event_form_screen.dart';
 import 'screens/audit_log_screen.dart';
@@ -2110,8 +2109,6 @@ class _HomeShellState extends State<HomeShell> {
   List<({IconData icon, String label, Widget page})> get _desktopItems {
     final p = widget.profile;
     return [
-      if (p.canSeeDashboard)
-        (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
       // The Hub is reached from inside the Schedule rather than being its own
       // tab: it is the same events in a tabular view, so a separate top-level
       // destination implied two systems.
@@ -2134,11 +2131,6 @@ class _HomeShellState extends State<HomeShell> {
     final p = widget.profile;
     if (p.isAdmin) {
       return [
-        // Honours canSeeDashboard the same way the desktop list does. This was
-        // previously unconditional here, so the dashboard was hidden on
-        // desktop but still visible to admins on mobile.
-        if (p.canSeeDashboard)
-          (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
         (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
         (icon: Icons.inventory_2_outlined, label: 'Inventory', page: InventoryScreen(
           onLifts: () => Navigator.of(context).push(

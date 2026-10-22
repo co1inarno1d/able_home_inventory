@@ -75,7 +75,6 @@ class UserProfile {
   bool get canSeeSchedule => true;
   bool get canSeeOpsHub => true;
   bool get canEditOpsHub => true;
-  bool get canSeeDashboard => false; // temporarily hidden until team accounts are set up
   bool get canSeeCustomers => true;
   bool get canEditCustomers => true;
   bool get canSeePrepScreen => true;

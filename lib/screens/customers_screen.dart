@@ -19,8 +19,10 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../integrations/quickbooks_service.dart';
 import '../models/models.dart';
+import '../qbt_api.dart';
 import '../supabase_api.dart';
 import '../utils/utils.dart';
+import 'schedule_event_form_screen.dart';
 
 // ---------------------------------------------------------------------------
 // LIFECYCLE STATUS PRESENTATION
@@ -665,36 +667,48 @@ class _CustomersScreenState extends State<CustomersScreen> {
 
   /// Acting on an annual/buyback reminder spawns a real ops_job (the reminder
   /// layer feeding the jobs pipeline), then marks the reminder done.
+  /// Turns a follow-up into real work.
+  ///
+  /// Creates a SCHEDULE EVENT, not an ops_jobs row. Work lives in the schedule
+  /// now and the hub is a view of it, so a job created here has to land where
+  /// every other job lives — an ops_jobs row would be invisible in both views.
+  ///
+  /// Titled "Set up ..." deliberately: a follow-up means something needs
+  /// booking, not that it is booked. That phrasing puts it in the hub's
+  /// To Schedule bucket until a real date is set.
   Future<void> _actOnActivity(CustomerActivity a) async {
     final customer = _customers.cast<CustomerRecord?>().firstWhere(
         (c) => c?.customerId == a.customerId, orElse: () => null);
-    final jobType = a.type == CustomerActivityType.annual
-        ? OpsJobType.annualService
-        : OpsJobType.buyback;
+    final name = customer?.name ?? a.customerName;
+    final isAnnual = a.type == CustomerActivityType.annual;
     try {
-      final job = await sbCreateOpsJob(OpsJob(
-        jobId: '',
-        jobType: jobType,
-        status: OpsJobStatus.readyToSchedule,
-        customerName: customer?.name ?? a.customerName,
-        customerId: a.customerId,
-        address: customer?.address ?? '',
-        city: customer?.city ?? '',
-        phone: customer?.phone ?? '',
-        liftType: '',
-        fundingSource: customer?.fundingSource ?? 'Private',
-        notes: a.type == CustomerActivityType.annual
-            ? 'Auto-created from annual reminder'
-            : 'Auto-created from buyback candidate',
-        dateRequested: DateTime.now(),
-        sourceTable: 'ops_jobs',
-        sourceId: '',
-      ));
-      await sbUpdateActivityStatus(a.activityId, CustomerActivityStatus.done,
-          spawnedJobId: job.jobId);
+      final users = await qbtFetchUsers().catchError((_) => <String, QbtUser>{});
+      if (!mounted) return;
+
+      final created = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(
+          builder: (_) => ScheduleEventFormScreen(
+            users: users,
+            initialDate: DateTime.now(),
+            prefillTitle: isAnnual
+                ? 'Set up annual — $name'
+                : 'Set up buyback — $name',
+            prefillLocation: customer?.address ?? '',
+            prefillJobType: 'Needs Scheduling',
+            prefillFundingSource: customer?.fundingSource ?? 'Private',
+            prefillNotes: isAnnual
+                ? 'From annual reminder'
+                : 'From buyback candidate',
+          ),
+        ),
+      );
+      if (created != true) return;
+
+      await sbUpdateActivityStatus(a.activityId, CustomerActivityStatus.done);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('${customerActivityTypeLabel(a.type)} → job added to the Operations Hub.'),
+          content: Text(
+              '${customerActivityTypeLabel(a.type)} → added to the schedule.'),
         ));
         _load();
       }
