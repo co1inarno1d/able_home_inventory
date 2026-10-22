@@ -354,7 +354,10 @@ Future<bool> handleJobCompletion({
                 prefillServiceType: serviceType,
                 prefillCustomerName: event.title,
                 prefillDate: formatDate(DateTime.now()),
-                offerInvoicePhoto: true,
+                // Required, not merely offered: the office builds the service
+                // entry from this photo, so without it there is no record of
+                // what was actually done.
+                requireInvoicePhoto: true,
               ),
             ),
           );
@@ -6241,6 +6244,14 @@ class LiftServiceFormScreen extends StatefulWidget {
   final String? prefillDate;
   final bool offerInvoicePhoto;
 
+  /// When true the record cannot be saved without an invoice photo.
+  ///
+  /// Set for service jobs completed from the schedule: the office creates the
+  /// service entry from the photo afterwards, so the photo IS the record. An
+  /// optional prompt after saving was too easy to dismiss, which left service
+  /// history with entries nobody could reconstruct.
+  final bool requireInvoicePhoto;
+
   const LiftServiceFormScreen({
     super.key,
     required this.lift,
@@ -6248,6 +6259,7 @@ class LiftServiceFormScreen extends StatefulWidget {
     this.prefillCustomerName,
     this.prefillDate,
     this.offerInvoicePhoto = false,
+    this.requireInvoicePhoto = false,
   });
 
   @override
@@ -6351,6 +6363,18 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
 
+    // The invoice photo is the record the office works from, so block the
+    // save rather than asking afterwards.
+    if (widget.requireInvoicePhoto && _invoicePhoto == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('A photo of the invoice is required to save this service record.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
+
     final user = await _loadUser();
     final userEmail = user['email'] ?? '';
     final userName = user['name'] ?? '';
@@ -6392,8 +6416,28 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
             liftId: widget.lift.liftId,
             imageFile: _invoicePhoto!,
           );
-        } catch (_) {
-          // Non-fatal — record was already saved
+        } catch (e) {
+          // The service record itself is already saved, so this is not fatal.
+          // But when the photo was REQUIRED it is the thing the office works
+          // from, and silently swallowing the failure would defeat the point
+          // of requiring it — say so, and keep the screen open so the tech can
+          // retry rather than walking away from a lost photo.
+          if (mounted) {
+            setState(() => _uploadingPhoto = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(widget.requireInvoicePhoto
+                    ? 'Service record saved, but the invoice photo failed to upload: $e — please retry.'
+                    : 'Photo upload failed: $e'),
+                backgroundColor: Colors.orange[900],
+                duration: const Duration(seconds: 6),
+              ),
+            );
+            if (widget.requireInvoicePhoto) {
+              setState(() => _saving = false);
+              return; // stay on the form so the photo can be re-attached
+            }
+          }
         } finally {
           if (mounted) setState(() => _uploadingPhoto = false);
         }
@@ -6559,18 +6603,33 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
             ],
             const SizedBox(height: 12),
             // Invoice photo picker
-            if (widget.offerInvoicePhoto || _invoicePhoto != null) ...[
+            if (widget.offerInvoicePhoto ||
+                widget.requireInvoicePhoto ||
+                _invoicePhoto != null) ...[
               OutlinedButton.icon(
                 onPressed: () async {
-                  final picked = await ImagePicker().pickImage(source: ImageSource.camera);
+                  final picked = await ImagePicker()
+                      .pickImage(source: ImageSource.camera);
                   if (picked != null) setState(() => _invoicePhoto = picked);
                 },
                 icon: const Icon(Icons.camera_alt_outlined),
-                label: Text(_invoicePhoto != null ? 'Invoice photo selected ✓' : 'Attach invoice photo'),
+                label: Text(_invoicePhoto != null
+                    ? 'Invoice photo selected ✓'
+                    : widget.requireInvoicePhoto
+                        ? 'Photo of invoice (required)'
+                        : 'Attach invoice photo'),
                 style: OutlinedButton.styleFrom(
                   minimumSize: const Size.fromHeight(44),
-                  foregroundColor: _invoicePhoto != null ? kBrandGreen : null,
-                  side: _invoicePhoto != null ? const BorderSide(color: kBrandGreen) : null,
+                  foregroundColor: _invoicePhoto != null
+                      ? kBrandGreen
+                      : widget.requireInvoicePhoto
+                          ? Colors.orange[900]
+                          : null,
+                  side: _invoicePhoto != null
+                      ? const BorderSide(color: kBrandGreen)
+                      : widget.requireInvoicePhoto
+                          ? BorderSide(color: Colors.orange.shade700)
+                          : null,
                 ),
               ),
               const SizedBox(height: 12),
