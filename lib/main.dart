@@ -1761,7 +1761,11 @@ class _HomeShellState extends State<HomeShell> {
     final p = widget.profile;
     if (p.isAdmin) {
       return [
-        (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
+        // Honours canSeeDashboard the same way the desktop list does. This was
+        // previously unconditional here, so the dashboard was hidden on
+        // desktop but still visible to admins on mobile.
+        if (p.canSeeDashboard)
+          (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
         (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
         (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
         (icon: Icons.inventory_2_outlined, label: 'Inventory', page: InventoryScreen(
