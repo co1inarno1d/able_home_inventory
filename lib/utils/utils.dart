@@ -262,6 +262,25 @@ const List<String> kFundingSources = [
   'Other',
 ];
 
+/// The default funding source. Stored as NULL rather than this string — see
+/// sbSetEventFundingSource — so reads must fall back to it.
+const String kDefaultFundingSource = 'Private';
+
+/// Normalizes a stored funding source onto [kFundingSources].
+///
+/// Historical rows carry casing variants: one screen wrote 'Navicare' while
+/// another wrote 'NaviCare', and the schema has no check constraints to stop
+/// it. Without normalizing, a dropdown guarded by `contains()` falls through
+/// to null and shows a stored value as unset.
+String normalizeFundingSource(String? raw) {
+  final v = (raw ?? '').trim();
+  if (v.isEmpty) return kDefaultFundingSource;
+  for (final s in kFundingSources) {
+    if (s.toLowerCase() == v.toLowerCase()) return s;
+  }
+  return 'Other';
+}
+
 /// Returns true if the funding source requires agency confirmation before scheduling.
 bool requiresAgencyConfirmation(String fundingSource) {
   return fundingSource != 'Private' && fundingSource.isNotEmpty;

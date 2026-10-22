@@ -26,7 +26,8 @@ import 'screens/documents_screen.dart';
 import 'screens/user_management_screen.dart';
 import 'integrations/quickbooks_service.dart';
 import 'supabase_api.dart';
-import 'utils/utils.dart' show extractCity;
+import 'utils/utils.dart'
+    show extractCity, kFundingSources, kDefaultFundingSource, normalizeFundingSource;
 import 'utils/schedule_search.dart';
 
 /// =======================
@@ -11564,9 +11565,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
 
   String? _jobType;
   bool _savingJobType = false;
-  String? _eventSource;
-  bool _savingSource = false;
-  String _eventFundingSource = 'Private';
+  String _eventFundingSource = kDefaultFundingSource;
+  bool _savingFunding = false;
   List<LiftRecord> _linkedLifts = [];
   bool _loadingMeta = true;
   bool _savingLift = false;
@@ -11621,10 +11621,10 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     if (!mounted) return;
     setState(() {
       _jobType = jobType;
-      _eventSource = meta['source'] as String?;
-      _eventFundingSource = (meta['funding_source'] as String?)?.isNotEmpty == true
-          ? meta['funding_source'] as String
-          : 'Private';
+      // Normalized because historical rows carry casing variants
+      // ('Navicare' vs 'NaviCare') that would otherwise render as unset.
+      _eventFundingSource =
+          normalizeFundingSource(meta['funding_source'] as String?);
       _linkedLifts = lifts;
       _loadingMeta = false;
       _eventPhotoUrls = photos;
@@ -12352,31 +12352,58 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           ),
           const SizedBox(height: 8),
 
-          // Lead source row
+          // Who is paying. Replaces the old lead-source dropdown: funding
+          // source is what changes the work (CCALS ramps draw from a separate
+          // inventory pool), and until now the detail screen READ this value
+          // for the completion flow but never showed it, so a tech could not
+          // see or correct a wrong one.
           Row(
             children: [
-              Icon(Icons.source_outlined, size: 16, color: Colors.grey[500]),
+              Icon(Icons.account_balance_wallet_outlined,
+                  size: 16, color: Colors.grey[500]),
               const SizedBox(width: 6),
-              Text('Source:', style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+              Text('Paid by:',
+                  style: TextStyle(fontSize: 13, color: Colors.grey[600])),
               const SizedBox(width: 8),
               DropdownButton<String>(
-                value: const ['VA', 'Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other'].contains(_eventSource)
-                    ? _eventSource : null,
-                hint: Text('Set source', style: TextStyle(color: Colors.grey[500], fontSize: 13)),
+                value: _eventFundingSource,
                 underline: const SizedBox(),
                 isDense: true,
-                items: [
-                  const DropdownMenuItem(value: null, child: Text('— None —', style: TextStyle(color: Colors.grey))),
-                  ...['VA', 'Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other']
-                      .map((s) => DropdownMenuItem(value: s, child: Text(s, style: const TextStyle(fontSize: 13)))),
-                ],
-                onChanged: _savingSource ? null : (val) async {
-                  setState(() { _eventSource = val; _savingSource = true; });
-                  await sbSetEventSource(widget.event.id, val);
-                  if (mounted) setState(() => _savingSource = false);
-                },
+                items: kFundingSources
+                    .map((s) => DropdownMenuItem(
+                        value: s,
+                        child:
+                            Text(s, style: const TextStyle(fontSize: 13))))
+                    .toList(),
+                onChanged: _savingFunding
+                    ? null
+                    : (val) async {
+                        if (val == null) return;
+                        final previous = _eventFundingSource;
+                        // Captured before the await: using context afterwards
+                        // is unsafe if this screen is popped mid-write.
+                        final messenger = ScaffoldMessenger.of(context);
+                        setState(() {
+                          _eventFundingSource = val;
+                          _savingFunding = true;
+                        });
+                        try {
+                          await sbSetEventFundingSource(widget.event.id, val);
+                        } catch (e) {
+                          // Keep the UI honest: if the write failed, the stored
+                          // value is still the old one.
+                          if (mounted) {
+                            setState(() => _eventFundingSource = previous);
+                          }
+                          messenger.showSnackBar(
+                            SnackBar(
+                                content: Text('Could not save funding source: $e')),
+                          );
+                        }
+                        if (mounted) setState(() => _savingFunding = false);
+                      },
               ),
-              if (_savingSource)
+              if (_savingFunding)
                 const Padding(
                   padding: EdgeInsets.only(left: 8),
                   child: SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2)),

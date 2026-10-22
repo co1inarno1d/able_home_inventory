@@ -1416,6 +1416,7 @@ Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
   return {
     'job_type': map['event_job_type_$eventId'],
     'lift_ids': liftIds,
+    // '<table>:<id>' back-pointer to the job this event was scheduled from.
     'source': map['event_source_$eventId'],
     'funding_source': map['event_funding_$eventId'] ?? 'Private',
     'customer': customer,
@@ -1446,6 +1447,16 @@ Future<void> sbSetEventFundingSource(String eventId, String? fundingSource) asyn
   }
 }
 
+/// Records which queue/job row an event was scheduled FROM, as
+/// `<table>:<id>` (e.g. `service_jobs:abc-123`) — the back-pointer that lets
+/// the originating job be marked Scheduled.
+///
+/// This key previously had two writers: the form stored that back-pointer
+/// here, while the event detail screen stored a lead source ('VA', 'Web Lead',
+/// ...) in the same place, so picking a lead source silently destroyed the
+/// queue link. The detail screen now edits funding source instead
+/// (sbSetEventFundingSource), leaving this key with one unambiguous meaning.
+/// The key name is kept as-is so existing rows stay readable.
 Future<void> sbSetEventSource(String eventId, String? source) async {
   final key = 'event_source_$eventId';
   if (source == null || source.isEmpty) {
