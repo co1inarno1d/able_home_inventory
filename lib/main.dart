@@ -54,6 +54,20 @@ String formatDate(DateTime? date) {
   return '${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}/${date.year}';
 }
 
+const List<String> kDayNames = [
+  'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
+];
+const List<String> kMonthNames = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+/// Format a DateTime as "Wednesday, October 22, 2026".
+/// Shared by the schedule day headers, the desktop search cards and the event
+/// detail screen so all three read the same way.
+String formatFullDate(DateTime date) =>
+    '${kDayNames[date.weekday - 1]}, ${kMonthNames[date.month - 1]} ${date.day}, ${date.year}';
+
 /// Normalizes a bin number field to display as "Bin XX" regardless of how it was entered.
 /// Handles: "43", "bin43", "bin 43", "Bin43", "Bin 43", "bin#43", "Bin #43", etc.
 /// Returns the raw value unchanged if no numeric portion is found.
@@ -10864,10 +10878,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   String _formatDayHeader(String dayKey) {
     final parts = dayKey.split('-');
     final dt = DateTime(int.parse(parts[0]), int.parse(parts[1]), int.parse(parts[2]));
-    const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
-        'July', 'August', 'September', 'October', 'November', 'December'];
-    return '${dayNames[dt.weekday - 1]}, ${monthNames[dt.month - 1]} ${dt.day}, ${dt.year}';
+    return formatFullDate(dt);
   }
 
   bool _isToday(String dayKey) => dayKey == _dayKey(DateTime.now());
@@ -11092,24 +11103,24 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             backgroundColor: kBrandGreenDark,
             foregroundColor: Colors.white,
             title: _searchActive
-                ? Theme(
-                    data: ThemeData.dark(),
-                    child: TextField(
-                      controller: _searchController,
-                      autofocus: true,
-                      cursorColor: Colors.white,
-                      style:
-                          const TextStyle(color: Colors.white, fontSize: 16),
-                      decoration: const InputDecoration(
-                        hintText:
-                            'Search by name, date, address, assignee...',
-                        hintStyle: TextStyle(color: Colors.white60),
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                      ),
-                      onChanged: _onSearchChanged,
+                // White text on the dark green app bar. `filled: false` is
+                // required: the global inputDecorationTheme sets
+                // fillColor: Colors.white, which would otherwise paint a white
+                // box behind this white text and make it unreadable.
+                ? TextField(
+                    controller: _searchController,
+                    autofocus: true,
+                    cursorColor: Colors.white,
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                    decoration: const InputDecoration(
+                      filled: false,
+                      hintText: 'Search by name, date, address, assignee...',
+                      hintStyle: TextStyle(color: Colors.white60),
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
                     ),
+                    onChanged: _onSearchChanged,
                   )
                 : const Text('Schedule',
                     style: TextStyle(fontWeight: FontWeight.bold)),
@@ -12188,6 +12199,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
             ? widget.formatTime(startLocal)
             : '${widget.formatTime(startLocal)} – ${widget.formatTime(endLocal)}';
 
+    final dateLabel = formatFullDate(startLocal);
+
     final color = widget.color;
     final luminance = color.computeLuminance();
     final headerText = luminance > 0.35 ? Colors.black87 : Colors.white;
@@ -12546,6 +12559,17 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           ),
 
           const SizedBox(height: 20),
+
+          // Date — techs open an event from search results and need to know
+          // WHEN it was without backing out to the list's day header.
+          _DetailRow(
+            icon: Icons.calendar_today,
+            label: 'Date',
+            value: dateLabel,
+            color: color,
+          ),
+
+          const SizedBox(height: 16),
 
           // Time
           _DetailRow(
@@ -13759,6 +13783,37 @@ class _QueueCardState extends State<_QueueCard> {
 typedef _QbCustomerResult = ({String name, String qbCustomerId});
 
 class _CustomerSearchDelegate extends SearchDelegate<_QbCustomerResult?> {
+  // The app theme sets appBarTheme.titleTextStyle to white (for green app bars)
+  // AND inputDecorationTheme.fillColor to white. SearchDelegate renders its
+  // field in the app bar using both, which produced white-on-white: the typed
+  // text was invisible. Force a dark field on a white bar instead.
+  @override
+  TextStyle? get searchFieldStyle =>
+      GoogleFonts.nunito(color: Colors.black87, fontSize: 17);
+
+  @override
+  ThemeData appBarTheme(BuildContext context) {
+    final base = Theme.of(context);
+    return base.copyWith(
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black87,
+        elevation: 1,
+        iconTheme: IconThemeData(color: Colors.black87),
+        actionsIconTheme: IconThemeData(color: Colors.black87),
+      ),
+      // Transparent fill so the white page fill can't hide dark-on-white text.
+      inputDecorationTheme: const InputDecorationTheme(
+        filled: false,
+        border: InputBorder.none,
+        enabledBorder: InputBorder.none,
+        focusedBorder: InputBorder.none,
+        hintStyle: TextStyle(color: Colors.black45),
+      ),
+      textSelectionTheme: const TextSelectionThemeData(cursorColor: kBrandGreen),
+    );
+  }
+
   @override
   List<Widget> buildActions(BuildContext context) => [
     if (query.isNotEmpty)
