@@ -21,11 +21,26 @@
 --   * 1,753 distinct addresses; 681 visited more than once (one 9 times).
 --     Those repeat households are the ones with real service history.
 --
--- SO: address is the strongest grouping key, phone is the strongest IDENTITY
--- key (it survives a move; an address does not), and the customer's NAME is
--- the real-world identity but has to be extracted from notes or QuickBooks.
--- A customer can legitimately have several addresses -- they moved, and we
--- have or had equipment at both.
+-- SO: address is the strongest GROUPING key, a phone match is the strongest
+-- single piece of EVIDENCE, and the customer's NAME is the real-world identity
+-- but has to be extracted from notes or QuickBooks.
+--
+-- Two realities the schema has to accommodate, both confirmed in the data:
+--
+--   * One customer, several ADDRESSES -- they moved and we have or had
+--     equipment at both places. (customer_addresses)
+--   * One customer, several PHONE NUMBERS -- spouse's mobile, a daughter
+--     coordinating for a parent, landline plus cell. 12% of addresses with a
+--     phone already show two or more different numbers. (customer_phones)
+--
+-- MATCHING RULE, stated once here because getting it backwards silently
+-- corrupts the customer list:
+--
+--     a phone/address MATCH    is strong evidence to MERGE
+--     a phone/address MISMATCH is NOT evidence to SPLIT
+--
+-- Never conclude "different number, therefore different person". Fall back to
+-- the other signals and, failing those, send it to human review.
 --
 -- Nothing here deletes or rewrites existing data. The app_config blobs stay
 -- as they are; these tables are populated alongside them and become the
@@ -75,9 +90,12 @@ alter table customers
     on delete set null,
   add column if not exists qb_synced_at timestamptz;
 
--- Normalized phone as a STORED GENERATED column, not application logic.
--- normalize_e164 is IMMUTABLE precisely so matching can be structural and
--- cannot be forgotten at one call site.
+-- Normalized primary phone as a STORED GENERATED column, not application
+-- logic. normalize_e164 is IMMUTABLE precisely so matching can be structural
+-- and cannot be forgotten at one call site.
+--
+-- This is the customer's MAIN number only. Additional numbers live in
+-- customer_phones below -- see the note there, this distinction matters.
 alter table customers
   add column if not exists phone_e164 text
     generated always as (normalize_e164(phone)) stored;
@@ -90,6 +108,62 @@ create index if not exists customers_merged_into_idx
   on customers (merged_into) where merged_into is not null;
 create index if not exists customers_active_idx
   on customers (name) where merged_into is null;
+
+-- ---------------------------------------------------------------------------
+-- customer_phones: one customer, many numbers
+--
+-- WHY: the same household calls from several numbers -- a spouse's mobile, a
+-- daughter who coordinates for an elderly parent, a landline plus a cell.
+-- Measured in the live notes data: of 1,086 addresses with any phone
+-- recorded, 125 (12%) already show TWO OR MORE different numbers, several
+-- show three, and 9% of individual event notes list more than one number at
+-- once.
+--
+-- THE ASYMMETRY THAT MATTERS, and the reason this table exists:
+--
+--     same number        -> almost certainly the same household  (strong)
+--     different numbers  -> tells you NOTHING                    (no signal)
+--
+-- A phone number is strong EVIDENCE of identity, not an identifier. Treating
+-- "different number" as "different person" would have split roughly one in
+-- eight repeat-service households into duplicate customer records -- and
+-- those repeat households are exactly the ones with service history worth
+-- having.
+--
+-- So matching may MERGE on a phone match, but must never SPLIT on a phone
+-- mismatch. Where numbers differ, fall back to address and name.
+-- ---------------------------------------------------------------------------
+create table if not exists customer_phones (
+  phone_id    uuid primary key default gen_random_uuid(),
+  customer_id uuid not null references customers(customer_id) on delete cascade,
+  phone       text not null default '',          -- as written
+  phone_e164  text generated always as (normalize_e164(phone)) stored,
+  label       text not null default '',          -- 'mobile', 'daughter Jane', ...
+  is_primary  boolean not null default false,
+  first_seen  date,
+  last_seen   date,
+  created_at  timestamptz not null default now()
+);
+
+create index if not exists customer_phones_customer_idx
+  on customer_phones (customer_id);
+
+-- The lookup that actually matters: given an inbound number, whose is it?
+-- Used by call matching and by the deep search.
+create index if not exists customer_phones_e164_idx
+  on customer_phones (phone_e164) where phone_e164 is not null;
+
+-- A customer should not hold the same number twice. Partial, because
+-- unparseable numbers normalize to NULL and several of those can coexist.
+create unique index if not exists customer_phones_uniq
+  on customer_phones (customer_id, phone_e164) where phone_e164 is not null;
+
+-- NOTE: deliberately NOT globally unique on phone_e164. Two customers can
+-- share a number -- spouses with separate equipment, a group home, an adult
+-- child managing two parents' households. A global unique constraint would
+-- reject the second, real customer. Where a number maps to more than one
+-- customer the matcher must treat it as ambiguous and ask, rather than
+-- guessing; see the call-matching trigger in the Quo migration.
 
 -- ---------------------------------------------------------------------------
 -- customer_addresses: one customer, many addresses
@@ -290,10 +364,15 @@ on conflict (slug) do nothing;
 -- load-bearing. Dropping it is what broke customer inserts once before
 -- (see 20260724_customers_anon_rls.sql).
 -- ---------------------------------------------------------------------------
+alter table customer_phones      enable row level security;
 alter table customer_addresses    enable row level security;
 alter table event_customer_links  enable row level security;
 alter table customer_tags         enable row level security;
 alter table customer_tag_links    enable row level security;
+
+drop policy if exists "anon full access" on customer_phones;
+create policy "anon full access" on customer_phones
+  for all to anon using (true) with check (true);
 
 drop policy if exists "anon full access" on customer_addresses;
 create policy "anon full access" on customer_addresses
@@ -347,4 +426,9 @@ create trigger event_customer_links_updated_at
 --
 --   -- seeded tags
 --   select slug, label from customer_tags order by sort_order;
+--
+--   -- a customer can hold several numbers, and two customers may share one
+--   select c.name, p.phone, p.phone_e164, p.label
+--     from customer_phones p join customers c using (customer_id)
+--    order by c.name;
 -- ---------------------------------------------------------------------------
