@@ -62,18 +62,68 @@ String normalizeBinDisplay(String raw) {
 /// Extracts the city/town from an address string.
 /// Handles "123 Main St, Needham, MA 02492" → "Needham"
 /// Falls back to the full address if parsing fails.
+/// Best-effort town from a free-text address.
+///
+/// Returns '' when the town cannot be determined, NOT the whole address.
+/// The previous version fell back to returning `address` unchanged, so a
+/// one-line address like "116 West Alvord st Springfield" ended up stored as
+/// the city — which then polluted the city filter and the hub's
+/// group-by-town counts. A blank is a visible gap; a street address
+/// masquerading as a town is invisible bad data.
 String extractCity(String address) {
-  if (address.isEmpty) return '';
-  // Try comma-delimited: "Street, City, State ZIP"
-  final parts = address.split(',').map((p) => p.trim()).toList();
+  var s = address.trim();
+  if (s.isEmpty) return '';
+
+  // Drop country and any trailing ZIP so they are never mistaken for a town.
+  s = s.replaceAll(RegExp(r',?\s*(united states|usa)\.?\s*$',
+      caseSensitive: false), '');
+  s = s.replaceAll(RegExp(r'\s+\d{5}(-\d{4})?\s*$'), '').trim();
+
+  const states = {
+    'ma', 'ri', 'nh', 'ct', 'vt', 'me', 'ny',
+    'massachusetts', 'rhode island', 'connecticut', 'new hampshire',
+    'vermont', 'maine', 'new york',
+  };
+
+  final parts = s
+      .split(',')
+      .map((p) => p.trim())
+      .where((p) => p.isNotEmpty)
+      .toList();
+
   if (parts.length >= 2) {
-    // Second part is usually city
-    final candidate = parts[1].trim();
-    if (candidate.isNotEmpty && !RegExp(r'^\d').hasMatch(candidate)) {
-      return candidate;
+    // Walk back from the end, skipping a trailing state, and take the first
+    // part that looks like a place name rather than a street line.
+    for (var i = parts.length - 1; i >= 1; i--) {
+      final c = parts[i].replaceAll(RegExp(r'\s+\d.*$'), '').trim();
+      if (c.isEmpty) continue;
+      if (states.contains(c.toLowerCase())) continue;
+      if (RegExp(r'^\d').hasMatch(c)) continue;
+      return c;
     }
+    return '';
   }
-  return address;
+
+  // No commas. "116 West Alvord st Springfield" — the town is the trailing
+  // word(s) after a street suffix. Only trust it when a suffix is present,
+  // since otherwise the last word is just part of the street name.
+  final m = RegExp(
+    r'\b(st|street|rd|road|ave|avenue|dr|drive|ln|lane|ct|court|cir|circle|'
+    r'blvd|boulevard|ter|terrace|pl|place|way|hwy|highway|pkwy|parkway|'
+    r'sq|square|trl|trail)\.?\s+(.+)$',
+    caseSensitive: false,
+  ).firstMatch(s);
+  if (m != null) {
+    final tail = m
+        .group(2)!
+        .split(RegExp(r'\s+'))
+        .where((w) => !states.contains(w.toLowerCase()))
+        .join(' ')
+        .trim();
+    if (tail.isNotEmpty && !RegExp(r'^\d').hasMatch(tail)) return tail;
+  }
+
+  return '';
 }
 
 // ---------------------------------------------------------------------------
