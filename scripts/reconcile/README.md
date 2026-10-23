@@ -58,6 +58,28 @@ locked, and re-running never asks again.
 - `extract.py` — pulls names, phones and addresses out of one event
 - `cluster.py` — groups events into households and triages them
 
+## How many customers is this, really?
+
+The archive starts **September 2019** — nothing older survives in QuickBooks
+Time, so this is 7 years, not all time.
+
+| | |
+|---|---|
+| candidate households (Sept 2019 →) | 5,703 |
+| new households per year | ~700–890, steady |
+| visited once | 2,448 (42%) |
+| visited 2+ times | 3,255 (57%) |
+| visited 5+ times | 945 |
+| **seen in the last 2 years** | **2,662** |
+| not seen since before 2023 | 1,724 |
+
+Two caveats. The count is *candidates*: a customer who moved appears twice if
+no phone links the addresses, so review will settle it somewhat lower. And at
+~800 new households a year, the pre-2019 customer base is probably comparable
+in size — recoverable only from QuickBooks, if at all.
+
+The operationally useful figure is **2,662 seen in the last two years**.
+
 ## Clustering results
 
 25,129 events → **5,703 candidate households**, split by who can answer the
@@ -158,6 +180,27 @@ Three distinct shapes, all of which look identical if you only compare names:
 | one person, moved | `david boston` Gardner → Sterling, same phone | merge, keep both addresses |
 | different people, same name | `scott hill` × 4 addresses, no shared phone | keep separate |
 | business / property manager | `carabetta companies` × 10 addresses | one record, many sites |
+
+## Agency contacts are not customers
+
+VA, CCALS, Summit and NaviCare work arrives with a coordinator's name attached,
+and that person is not the customer. VA work orders pasted into notes name
+both, in a consistent shape (116 events):
+
+```
+VAMC Requestor: Bryant Cooper   <- VA coordinator, NOT our customer
+Vet | James McGrath             <- the veteran, whose home we visit
+```
+
+Taking the requestor would attach dozens of unrelated households to one
+coordinator — the same failure the shop address caused. So coordinator fields
+(`VAMC Requestor`, `requester`, `case manager`, `coordinator`, `social
+worker`, `contact is`) are extracted specifically in order to be **excluded**,
+and the `Vet` marker is read as the customer.
+
+Checked afterwards: no coordinator name now spans multiple addresses. The
+agency-funded events resolve to patients at a single address each, which is
+what they should be.
 
 ## Known extraction limits
 

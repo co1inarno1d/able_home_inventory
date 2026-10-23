@@ -286,6 +286,29 @@ _LABELED_NAME = re.compile(
     r"(?:\s+(?:first|last|full))?\s*name\s*:\s*([^\n|]+)",
     re.I,
 )
+
+# VA work orders pasted into notes name TWO people, and only one is the
+# customer:
+#
+#     VAMC Requestor: Bryant Cooper   <- the VA coordinator, NOT our customer
+#     Vet | James McGrath             <- the veteran, whose home we visit
+#
+# 116 events carry this shape. Taking the requestor would attach dozens of
+# unrelated households to one coordinator -- the same failure the shop address
+# caused, and the reason agency contacts need explicit handling rather than
+# relying on hub suppression to clean up afterwards.
+_VET_NAME = re.compile(
+    r"\bvet(?:eran)?\b\s*[:|]?\s*\|?\s*"
+    r"([A-Z][a-zA-Z'’\-]+(?:\s+[A-Z][a-zA-Z'’\-\.]+){1,2})",
+)
+
+# Coordinator / requester fields whose value must never become a customer.
+_AGENCY_CONTACT = re.compile(
+    r"(?:vamc\s+requestor|requestor|requester|case\s*(?:manager|worker)|"
+    r"coordinator|social\s*worker|contact\s+is|adjuster|rep)"
+    r"\s*:?\s*([^\n|]{2,40})",
+    re.I,
+)
 _FIRST_LAST = re.compile(
     r"end[-\s]?user\s+first\s+name\s*:\s*([^\n|]+?)\s*(?:\||\n)"
     r".*?end[-\s]?user\s+last\s+name\s*:\s*([^\n|]+)",
@@ -337,6 +360,11 @@ _LEADING_VERB = re.compile(
     r"talk\s+to|speak\s+(?:to|with)|lm\s+(?:for|to))\s+",
     re.I,
 )
+
+
+def norm_for_block(x: str) -> str:
+    """Loose comparison form, for matching a name against an agency contact."""
+    return re.sub(r"[^a-z ]", "", (x or "").lower()).strip()
 
 
 def _looks_like_person(name: str) -> bool:
@@ -393,13 +421,27 @@ def extract_names(notes: str) -> list[str]:
         if trimmed and trimmed != n and _looks_like_person(trimmed):
             n = trimmed
 
+        if norm_for_block(n) in agency_names:
+            return  # an agency coordinator, not the customer
         if _looks_like_person(n) and n not in out:
             out.append(n)
+
+    # Names that belong to an agency, not the customer. Collected first so
+    # they can be excluded even if they also appear in a name-shaped line.
+    agency_names = {
+        norm_for_block(m.group(1))
+        for m in _AGENCY_CONTACT.finditer(notes)
+    }
 
     # Strongest: an explicit First + Last pair from a form.
     fl = _FIRST_LAST.search(notes)
     if fl:
         add(f"{fl.group(1).strip()} {fl.group(2).strip()}")
+
+    # A VA work order: the veteran is the customer, the requestor is not.
+    vet = _VET_NAME.search(notes)
+    if vet:
+        add(vet.group(1))
 
     # Next: any single labeled name field.
     for m in _LABELED_NAME.finditer(notes):
