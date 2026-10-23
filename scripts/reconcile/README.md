@@ -56,6 +56,46 @@ locked, and re-running never asks again.
 ## Files
 
 - `extract.py` — pulls names, phones and addresses out of one event
+- `cluster.py` — groups events into households and triages them
+
+## Clustering results
+
+25,129 events → **5,703 candidate households**, split by who can answer the
+question:
+
+| tier | households | events | what it means |
+|---|---|---|---|
+| `accept` | 2,958 | 7,037 | one name, one address, usually one phone — linked automatically |
+| `confirm_family` | 314 | 1,492 | several names sharing a surname at one address, i.e. spouses. Obvious at a glance, still confirmed |
+| `decide` | 1,104 | 5,274 | genuinely ambiguous — **your queue** |
+| `await_qb` | 1,273 | 1,923 | coherent household, no name in the schedule. QuickBooks knows it; no point asking you to type it |
+| `thin` | 54 | 54 | one event, almost no signal. Parked |
+
+Of the 1,104 real decisions, **792 have 3+ events**, so working the queue in
+event-count order puts the valuable history first.
+
+Nothing in the `accept` tier has conflicting names or conflicting addresses —
+verified, not assumed.
+
+### Why the queue got smaller
+
+A first pass put 2,146 items in front of you, which is not a workable ask.
+Three changes cut it to 1,104 without lowering the bar:
+
+- **Hub suppression.** One cluster had grown to 120 events, 29 names and 10
+  addresses, because `67 W Boylston St` — our own shop — appears on 62 events
+  with 13 different customer names, and identity is transitive, so everything
+  touching the shop chained into one blob. Addresses carrying more than 4
+  distinct names, and phones spanning more than 3 distinct addresses, are no
+  longer treated as identity. 22 addresses and 5 phones are suppressed; the
+  largest cluster is now 28 events.
+- **`await_qb`.** 1,273 clusters are internally consistent but have no name in
+  the schedule. QuickBooks is the authoritative name source, so these resolve
+  on the QB cross-reference rather than by asking you to type names.
+- **`confirm_family`.** 314 clusters are plainly one family — `Marshall Mills`
+  / `Sue Mills`, `Frances Sadowski` / `Paul Sadowski`. Still confirmed, but in
+  a fast lane separate from cases that need thought, like `Darlyn Scott` /
+  `Donald Bevelander` / `Gretchen Sting` at one address.
 
 ## Still to come
 
