@@ -57,6 +57,22 @@ locked, and re-running never asks again.
 
 - `extract.py` — pulls names, phones and addresses out of one event
 
+## Still to come
+
+The schedule is one of three sources. Both of these are planned, not
+forgotten:
+
+- **QuickBooks** — the authoritative source for customer *names* and billing
+  addresses, and the only place with a clean customer list. Needs paged
+  retrieval: the existing `qb-proxy` search caps at 200 records with
+  client-side filtering, which cannot enumerate a full customer base.
+- **Quo call history** — inbound numbers matched to customers via
+  `customer_phones`. Live capture should start as early as possible since Quo
+  has no bulk history endpoint, so any call not captured is lost permanently.
+
+Each source is cross-referenced into the same crosswalk, so a customer ends up
+with one identity regardless of which system it was first seen in.
+
 ## The three note formats this handles
 
 Per Colin, these cover most customer-name entries, and all three are accepted:
@@ -76,6 +92,33 @@ Crew labelling is rejected: **"Ryan Job" means Ryan Clark's job**, not a
 customer named Ryan Job — and it previously outranked the real customer on the
 same note. Same for "Matt job".
 
+## Same name, different people
+
+This is real in the data, not hypothetical: `john burke`, `scott hill` and
+`kimm simpson` each appear at 3-4 genuinely unrelated addresses. **A name is
+never an identity on its own.**
+
+The discriminator that works is phone. Across 314 names appearing at more than
+one address:
+
+- **279 share a phone number across those addresses** — almost certainly one
+  person who moved. `david boston` shows up at Gardner and then Sterling on
+  the same number.
+- **94 share no phone** — likely different people with the same name, and they
+  must stay separate.
+
+So the rule is: a repeated name is evidence of *nothing* until an address or
+phone agrees. Two households keep separate records unless something besides
+the name links them.
+
+Three distinct shapes, all of which look identical if you only compare names:
+
+| shape | example | handling |
+|---|---|---|
+| one person, moved | `david boston` Gardner → Sterling, same phone | merge, keep both addresses |
+| different people, same name | `scott hill` × 4 addresses, no shared phone | keep separate |
+| business / property manager | `carabetta companies` × 10 addresses | one record, many sites |
+
 ## Known extraction limits
 
 Worth knowing before trusting the output:
@@ -87,5 +130,11 @@ Worth knowing before trusting the output:
   Robideaux` / `Mark Robideaux`). Not an error — one household, two contacts.
 - **Business customers** appear as names (`Carabetta Companies`, a property
   manager). Correct, but they behave differently from a household.
-- **951 addresses** currently resolve to more than one name. Most collapse via
+- **951 addresses** currently resolve to more than one name.
+- **Address spelling variants** at one house produce separate keys: `182
+  justice hill cut off` / `cut-off`, `48 victoria heights rd` / `victoria
+  hights road`. Fuzzy street matching in the scoring step handles these.
+- Addresses written in notes often **omit the town**, so `street_key`
+  (house + street, no town) exists as a join candidate. It is deliberately not
+  treated as an identity, since two towns can share a street name and number. Most collapse via
   the two cases above; the rest go to review.

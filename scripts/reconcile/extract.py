@@ -169,10 +169,16 @@ def parse_address(raw: str) -> Address:
         # "39 ingleside ave, winthrop"
         street_part, addr.city = parts[0], parts[-1]
     else:
-        # No commas: assume the last word is the town, which holds for
-        # "52 homefield avenue dracut".
+        # No commas. Addresses copied out of notes frequently omit the town
+        # entirely ("44 Valentine rd"), so the last word must NOT be assumed
+        # to be a city -- doing that produced keys like "44|valentine|rd",
+        # which split one household into two.
+        #
+        # Only treat the final word as a town when the word before it is a
+        # recognised street suffix, which is what "52 homefield avenue dracut"
+        # looks like.
         words = s.split()
-        if len(words) >= 3:
+        if len(words) >= 3 and words[-2] in _STREET_SUFFIX:
             street_part, addr.city = " ".join(words[:-1]), words[-1]
         else:
             street_part, addr.city = s, ""
@@ -203,6 +209,19 @@ def parse_address(raw: str) -> Address:
     return addr
 
 
+def street_key(addr: "Address") -> str:
+    """House + street without the town.
+
+    Addresses written in notes often omit the town, so the full key cannot
+    always be built. This narrower key lets "44 valentine rd" join
+    "44 valentine rd, northborough". It is not unique on its own -- two towns
+    can share a street name and number -- so it is used as a JOIN candidate
+    that still has to agree on something else (phone, or the same town seen
+    elsewhere), never as an identity on its own.
+    """
+    return f"{addr.house}|{addr.street}" if addr.is_usable else ""
+
+
 # ---------------------------------------------------------------------------
 # Person names
 # ---------------------------------------------------------------------------
@@ -230,6 +249,12 @@ _NOT_A_NAME = {
     "buyout", "rental", "delivery", "pickup", "prep", "warranty", "estimate",
     "call", "called", "lm", "left", "message", "voicemail", "scheduled",
     "set", "setup", "confirm", "confirmed", "cancel", "cancelled",
+    # billing / status shorthand that reads like a two-word name:
+    # "Power top", "All paid up", "Have check", "White house", "Ed lead"
+    "power", "top", "bottom", "paid", "unpaid", "owes", "owed", "balance",
+    "check", "cash", "deposit", "invoice", "billed", "billing", "refund",
+    "lead", "leads", "house", "white", "done", "complete", "pending",
+    "waiting", "hold", "ready", "approved", "denied", "sent", "received",
     # places / directions
     "street", "road", "ave", "avenue", "drive", "lane", "court", "circle",
     "first", "second", "third", "floor", "front", "back", "entrance",
