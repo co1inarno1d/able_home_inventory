@@ -50,11 +50,11 @@ The real one. Adds five tables, some columns, and three triggers.
 
 ```sql
 select table_name from information_schema.tables
- where table_name in ('app_config','customer_addresses',
+ where table_name in ('app_config','customer_phones','customer_addresses',
                       'event_customer_links','customer_tags',
                       'customer_tag_links')
  order by table_name;
--- expect 5 rows
+-- expect 6 rows
 ```
 
 ```sql
@@ -97,6 +97,27 @@ and we have equipment at both), and adds tags.
 **Doesn't:** match anything yet. After this runs, `linked` is 0. Filling it in
 is the reconciliation step, which runs outside the app and is the next piece
 of work.
+
+## Two things the schema deliberately allows
+
+**One customer, several addresses.** People move and you keep equipment at
+both places. Stored in `customer_addresses` rather than a single column, so a
+move doesn't either split one customer in two or attach the old house's
+history to the new one.
+
+**One customer, several phone numbers.** Spouse's mobile, a daughter
+coordinating for a parent, landline plus cell. In your notes data, 125 of
+1,086 addresses with a phone already show two or more different numbers — some
+three. Stored in `customer_phones`.
+
+The rule the matching follows, which is easy to get backwards:
+
+> A phone or address **match** is strong evidence two records are the same
+> household. A **mismatch** is not evidence they're different.
+
+Built the other way round, about one in eight of your repeat customers would
+have been split into duplicates. Where the signals disagree, it asks you
+rather than guessing.
 
 ## One thing worth knowing
 
