@@ -303,10 +303,13 @@ _VET_NAME = re.compile(
 )
 
 # Coordinator / requester fields whose value must never become a customer.
+# Requires a colon, and no bare "rep" -- that alternative matched inside
+# "repair", "replace" and "repped", producing coordinators named "air" and
+# "lacement". A labelled field is what we are after, so insist on the label.
 _AGENCY_CONTACT = re.compile(
-    r"(?:vamc\s+requestor|requestor|requester|case\s*(?:manager|worker)|"
-    r"coordinator|social\s*worker|contact\s+is|adjuster|rep)"
-    r"\s*:?\s*([^\n|]{2,40})",
+    r"\b(vamc\s+requestor|requestor|requester|case\s*(?:manager|worker)|"
+    r"coordinator|social\s*worker|agency\s+contact)"
+    r"\s*:\s*([^\n|]{2,40})",
     re.I,
 )
 _FIRST_LAST = re.compile(
@@ -390,6 +393,54 @@ def _looks_like_person(name: str) -> bool:
     return True
 
 
+def extract_agency_contacts(notes: str) -> list[tuple[str, str]]:
+    """Agency coordinators named in the notes, as (role, name).
+
+    These are deliberately NOT customers -- a VA requestor coordinating 30
+    installs is not 30 households. But who handled a job is genuinely useful
+    on the customer record: it tells the office who to call back at the VA or
+    CCALS about this person's equipment.
+    """
+    if not notes:
+        return []
+    out: list[tuple[str, str]] = []
+    for m in _AGENCY_CONTACT.finditer(notes):
+        role = m.group(1).strip().lower()
+        name = m.group(2).strip(" ,.|")
+        # Reject values that are plainly not a person -- these fields are
+        # sometimes filled with a phone number or a facility name.
+        if not name or any(ch.isdigit() for ch in name):
+            continue
+        if len(name.split()) > 4:
+            continue
+        if (role, name) not in out:
+            out.append((role, name))
+    return out
+
+
+def extract_agency(notes: str) -> str:
+    """Which agency is funding, if the notes say so."""
+    if not notes:
+        return ""
+    t = notes.lower()
+    for needle, label in (
+        ("vamc", "VA"),
+        ("ccals", "CCALS"),
+        ("navicare", "NaviCare"),
+        ("summit", "Summit"),
+        ("mass health", "Mass Health"),
+        ("masshealth", "Mass Health"),
+        ("fallon", "Fallon"),
+        ("stavros", "Stavros"),
+    ):
+        if needle in t:
+            return label
+    # Bare "va" needs word boundaries -- it appears inside other words.
+    if re.search(r"\bva\b", t):
+        return "VA"
+    return ""
+
+
 def extract_names(notes: str) -> list[str]:
     """Candidate customer names from a notes blob, best first.
 
@@ -429,7 +480,7 @@ def extract_names(notes: str) -> list[str]:
     # Names that belong to an agency, not the customer. Collected first so
     # they can be excluded even if they also appear in a name-shaped line.
     agency_names = {
-        norm_for_block(m.group(1))
+        norm_for_block(m.group(2))
         for m in _AGENCY_CONTACT.finditer(notes)
     }
 
@@ -535,6 +586,10 @@ class EventSignals:
     address: Address
     phones: list[str] = field(default_factory=list)
     names: list[str] = field(default_factory=list)
+    # Who at the agency handled this job, as (role, name). Not a customer --
+    # kept so the customer record can show who to call back at the VA/CCALS.
+    agency_contacts: list[tuple[str, str]] = field(default_factory=list)
+    agency: str = ""
     # True when this looks like customer work but has no usable address, so it
     # cannot be grouped and should be surfaced for an address to be added.
     needs_address: bool = False
@@ -571,6 +626,8 @@ def extract_event(row: dict) -> EventSignals:
         address=addr,
         phones=extract_phones(notes) or extract_phones(location),
         names=extract_names(notes),
+        agency_contacts=extract_agency_contacts(notes),
+        agency=extract_agency(notes),
     )
     sig.needs_address = (
         not sig.address.is_usable and looks_like_customer_work(title, notes)

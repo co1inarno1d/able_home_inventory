@@ -231,6 +231,10 @@ class Household:
     phones: Counter = field(default_factory=Counter)
     addresses: Counter = field(default_factory=Counter)
     cities: Counter = field(default_factory=Counter)
+    # Who handled this household's agency-funded work, and which agency.
+    # Not customers -- recorded so the office knows who to call back.
+    agency_contacts: Counter = field(default_factory=Counter)
+    agencies: Counter = field(default_factory=Counter)
     first_seen: str = ""
     last_seen: str = ""
     # Why this cluster was formed, for the review CSV.
@@ -252,6 +256,14 @@ class Household:
     @property
     def best_phone(self) -> str:
         return self.phones.most_common(1)[0][0] if self.phones else ""
+
+    @property
+    def best_agency(self) -> str:
+        return self.agencies.most_common(1)[0][0] if self.agencies else ""
+
+    @property
+    def agency_contact_list(self) -> str:
+        return ", ".join(n for n, _ in self.agency_contacts.most_common(3))
 
     @property
     def distinct_name_forms(self) -> list[str]:
@@ -510,6 +522,10 @@ def build_households(sigs: list[EventSignals]) -> list[Household]:
                 h.addresses[sk] += 1
             if s.address.city:
                 h.cities[s.address.city] += 1
+            for _role, cname in s.agency_contacts:
+                h.agency_contacts[cname] += 1
+            if s.agency:
+                h.agencies[s.agency] += 1
             if s.start_time:
                 if not h.first_seen or s.start_time < h.first_seen:
                     h.first_seen = s.start_time
