@@ -733,6 +733,44 @@ Future<String> sbSavePrepChecklist({
 ///
 /// Falls back to the original bytes if compression fails — an uncompressed
 /// photo is better than a lost one.
+/// Retries a storage upload through transient network failures.
+///
+/// Techs work in basements and stairwells where LTE drops for seconds at a
+/// time. Without this, a single blip surfaced as "Upload failed" and the
+/// picked image was discarded — unrecoverable work, and the most common
+/// complaint from the field. Three attempts with backoff turns most of those
+/// into a slightly slow success.
+///
+/// Deliberately does NOT retry forever: a genuine failure (bad auth, bucket
+/// gone, file too large) must still surface rather than hanging the UI. A
+/// durable cross-restart queue needs IndexedDB on web and is tracked
+/// separately; this covers the common transient case without a new dependency.
+Future<T> _retryUpload<T>(
+  Future<T> Function() attempt, {
+  int maxAttempts = 3,
+}) async {
+  Object? lastError;
+  for (var i = 0; i < maxAttempts; i++) {
+    try {
+      return await attempt();
+    } catch (e) {
+      lastError = e;
+      final msg = e.toString().toLowerCase();
+      // Don't burn retries on errors that cannot succeed on a second try.
+      final permanent = msg.contains('duplicate') ||
+          msg.contains('already exists') ||
+          msg.contains('unauthorized') ||
+          msg.contains('forbidden') ||
+          msg.contains('payload too large') ||
+          msg.contains('exceeded the maximum');
+      if (permanent || i == maxAttempts - 1) break;
+      await Future<void>.delayed(Duration(milliseconds: 600 * (1 << i)));
+      debugPrint('[photo] upload attempt ${i + 1} failed, retrying: $e');
+    }
+  }
+  throw Exception('Upload failed after $maxAttempts attempts: $lastError');
+}
+
 Future<Uint8List> _compressForUpload(XFile imageFile) async {
   const minWidth = 1200;
   const minHeight = 1200;
@@ -759,10 +797,21 @@ Future<Uint8List> _compressForUpload(XFile imageFile) async {
       keepExif: false,
     );
     if (compressed != null) return compressed;
-  } catch (_) {
+  } catch (e) {
     // Fall through to the uncompressed bytes below.
+    debugPrint('[photo] compression failed, sending full size: $e');
   }
-  return imageFile.readAsBytes();
+  // Compression failed. The raw bytes can be 3-8 MB straight off a phone
+  // camera, which on basement LTE is the difference between a few seconds and
+  // a stalled upload the tech abandons. Nothing here can fix that, but it must
+  // not be silent — the caller logs it so a systematic failure is visible
+  // rather than looking like a flaky network.
+  final raw = await imageFile.readAsBytes();
+  if (raw.lengthInBytes > 2 * 1024 * 1024) {
+    debugPrint('[photo] uncompressed upload of '
+        '${(raw.lengthInBytes / 1048576).toStringAsFixed(1)} MB');
+  }
+  return raw;
 }
 
 Future<String> sbUploadLiftPhoto({
@@ -774,11 +823,11 @@ Future<String> sbUploadLiftPhoto({
   final fileName =
       'lifts/$liftId/${DateTime.now().millisecondsSinceEpoch}.jpg';
 
-  await _sb.storage.from(_photosBucket).uploadBinary(
+  await _retryUpload(() => _sb.storage.from(_photosBucket).uploadBinary(
         fileName,
         imageBytes,
         fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: false),
-      );
+      ));
 
   final url = _sb.storage.from(_photosBucket).getPublicUrl(fileName);
 
@@ -879,16 +928,23 @@ Future<String> sbUploadEventPhoto({
   final locationLabel = sanitize(eventLocation.isNotEmpty ? eventLocation : 'photo');
   final folderPath = 'events/${folderTitle}_$dateStr';
 
-  // Fetch existing photos once — used for index and for saving the updated list
+  // Fetch existing photos once — used for saving the updated list below.
   final existing = await sbFetchEventPhotos(eventId);
-  final index = existing.length + 1;
 
-  final fileName = '$folderPath/${locationLabel}_$index.jpg';
-  await _sb.storage.from(_photosBucket).uploadBinary(
+  // The filename carries a timestamp and a short random suffix rather than
+  // `existing.length + 1`. That counter collided in two real situations: two
+  // techs uploading to the same event at once, and any upload after a photo
+  // had been deleted. With upsert:false a collision throws, so the tech lost
+  // the photo to an error that looked random.
+  final stamp = DateTime.now().millisecondsSinceEpoch;
+  final salt = (stamp % 1000).toString().padLeft(3, '0') +
+      identityHashCode(imageBytes).toRadixString(36);
+  final fileName = '$folderPath/${locationLabel}_${stamp}_$salt.jpg';
+  await _retryUpload(() => _sb.storage.from(_photosBucket).uploadBinary(
         fileName,
         imageBytes,
         fileOptions: const FileOptions(contentType: 'image/jpeg', upsert: false),
-      );
+      ));
   final url = _sb.storage.from(_photosBucket).getPublicUrl(fileName);
 
   // Save URL to app_config
@@ -1013,16 +1069,6 @@ Future<void> sbDeletePickupItem({required String id}) async {
 // ANNUALS
 // ---------------------------------------------------------------------------
 
-Future<List<AnnualRecord>> sbFetchAnnuals() async {
-  final raw = await _sb
-      .from('annuals')
-      .select()
-      .order('date_requested', ascending: false);
-
-  return (raw as List)
-      .map((r) => AnnualRecord.fromJson(r as Map<String, dynamic>))
-      .toList();
-}
 
 Future<void> sbUpsertAnnual({
   required String userEmail,
@@ -1075,26 +1121,6 @@ Future<void> sbUpsertAnnual({
   });
 }
 
-Future<void> sbMarkAnnualScheduled({
-  required String annualId,
-  required String userEmail,
-  required String userName,
-  String note = '',
-}) async {
-  await _sb
-      .from('annuals')
-      .update({'scheduled': true, 'updated_at': DateTime.now().toIso8601String()})
-      .eq('annual_id', annualId);
-
-  await _sb.from('annuals_history').insert({
-    'timestamp': DateTime.now().toIso8601String(),
-    'annual_id': annualId,
-    'event_type': 'Scheduled',
-    'changed_by_email': userEmail,
-    'changed_by_name': userName,
-    'note': note,
-  });
-}
 
 Future<void> sbDeleteAnnual({
   required String annualId,
@@ -1113,32 +1139,11 @@ Future<void> sbDeleteAnnual({
   });
 }
 
-Future<List<Map<String, dynamic>>> sbFetchAnnualHistory({
-  required String annualId,
-}) async {
-  final raw = await _sb
-      .from('annuals_history')
-      .select()
-      .eq('annual_id', annualId)
-      .order('timestamp', ascending: true);
-
-  return (raw as List).map((r) => r as Map<String, dynamic>).toList();
-}
 
 // ---------------------------------------------------------------------------
 // SERVICE JOBS
 // ---------------------------------------------------------------------------
 
-Future<List<ServiceJobRecord>> sbFetchServiceJobs() async {
-  final raw = await _sb
-      .from('service_jobs')
-      .select()
-      .order('created_at', ascending: false);
-
-  return (raw as List)
-      .map((r) => ServiceJobRecord.fromJson(r as Map<String, dynamic>))
-      .toList();
-}
 
 Future<void> sbUpsertServiceJob({
   required String userEmail,
@@ -1209,16 +1214,6 @@ Future<void> sbDeleteServiceJob({required String jobId}) async {
 // REMOVAL JOBS
 // ---------------------------------------------------------------------------
 
-Future<List<RemovalJobRecord>> sbFetchRemovalJobs() async {
-  final raw = await _sb
-      .from('removal_jobs')
-      .select()
-      .order('created_at', ascending: false);
-
-  return (raw as List)
-      .map((r) => RemovalJobRecord.fromJson(r as Map<String, dynamic>))
-      .toList();
-}
 
 Future<void> sbUpsertRemovalJob({
   required String userEmail,
@@ -1416,6 +1411,7 @@ Future<Map<String, dynamic>> sbGetEventMeta(String eventId) async {
   return {
     'job_type': map['event_job_type_$eventId'],
     'lift_ids': liftIds,
+    // '<table>:<id>' back-pointer to the job this event was scheduled from.
     'source': map['event_source_$eventId'],
     'funding_source': map['event_funding_$eventId'] ?? 'Private',
     'customer': customer,
@@ -1446,6 +1442,16 @@ Future<void> sbSetEventFundingSource(String eventId, String? fundingSource) asyn
   }
 }
 
+/// Records which queue/job row an event was scheduled FROM, as
+/// `<table>:<id>` (e.g. `service_jobs:abc-123`) — the back-pointer that lets
+/// the originating job be marked Scheduled.
+///
+/// This key previously had two writers: the form stored that back-pointer
+/// here, while the event detail screen stored a lead source ('VA', 'Web Lead',
+/// ...) in the same place, so picking a lead source silently destroyed the
+/// queue link. The detail screen now edits funding source instead
+/// (sbSetEventFundingSource), leaving this key with one unambiguous meaning.
+/// The key name is kept as-is so existing rows stay readable.
 Future<void> sbSetEventSource(String eventId, String? source) async {
   final key = 'event_source_$eventId';
   if (source == null || source.isEmpty) {
@@ -1497,7 +1503,7 @@ Future<Map<String, Map<String, dynamic>>> sbGetAllEventMeta() async {
   final rows = await _sb
       .from('app_config')
       .select('key, value')
-      .or('key.like.event_job_type_%,key.like.event_lift_%,key.like.event_source_%,key.like.event_funding_%');
+      .or('key.like.event_job_type_%,key.like.event_lift_%,key.like.event_source_%,key.like.event_funding_%,key.like.event_customer_%');
   final result = <String, Map<String, dynamic>>{};
   for (final r in rows as List) {
     final key = r['key'] as String;
@@ -1516,15 +1522,39 @@ Future<Map<String, Map<String, dynamic>>> sbGetAllEventMeta() async {
     } else if (key.startsWith('event_funding_')) {
       eventId = key.substring('event_funding_'.length);
       field = 'funding_source';
+    } else if (key.startsWith('event_customer_')) {
+      // Previously omitted here, so bulk views could not see customer links
+      // even though the per-event read returned them.
+      eventId = key.substring('event_customer_'.length);
+      field = 'customer';
     }
     if (eventId == null || field == null) continue;
-    result.putIfAbsent(eventId, () => {'job_type': null, 'lift_ids': <String>[], 'source': null, 'funding_source': 'Private'});
+    result.putIfAbsent(
+        eventId,
+        () => {
+              'job_type': null,
+              'lift_ids': <String>[],
+              'source': null,
+              'funding_source': 'Private',
+              'customer': null,
+            });
     if (field == 'job_type') {
       result[eventId]!['job_type'] = value;
     } else if (field == 'source') {
       result[eventId]!['source'] = value;
     } else if (field == 'funding_source') {
       result[eventId]!['funding_source'] = value ?? 'Private';
+    } else if (field == 'customer' && value != null && value.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(value) as Map<String, dynamic>;
+        result[eventId]!['customer'] = {
+          'name': decoded['name']?.toString() ?? '',
+          'qb_id': decoded['qb_id']?.toString() ?? '',
+          'customer_id': decoded['customer_id']?.toString() ?? '',
+        };
+      } catch (_) {
+        // Malformed JSON — leave unlinked rather than failing the whole read.
+      }
     } else if (field == 'lift_ids' && value != null && value.isNotEmpty) {
       try {
         final decoded = jsonDecode(value);
@@ -1748,6 +1778,27 @@ Future<List<QbtScheduleEvent>> sbFetchScheduleHistory({
   return (raw as List).map(_mapHistoryRow).toList();
 }
 
+/// All archived events within a date range, with no text filter.
+/// Backs date-only searches, where the entire query was consumed by the date
+/// parser and there is no text left to match on.
+Future<List<QbtScheduleEvent>> sbFetchScheduleHistoryRange({
+  DateTime? startDate,
+  DateTime? endDate,
+  bool newestFirst = true,
+  int limit = 1000,
+}) async {
+  var q = _sb.from('schedule_history').select();
+  if (startDate != null) {
+    q = q.gte('start_time', startDate.toUtc().toIso8601String());
+  }
+  if (endDate != null) {
+    q = q.lte('start_time', endDate.toUtc().toIso8601String());
+  }
+  final raw =
+      await q.order('start_time', ascending: !newestFirst).limit(limit);
+  return (raw as List).map(_mapHistoryRow).toList();
+}
+
 /// Full-text search across all historical events.
 /// [query] is the remaining text after date tokens are stripped.
 /// [startDate]/[endDate] are optional date bounds parsed from the query.
@@ -1764,7 +1815,21 @@ Future<List<QbtScheduleEvent>> sbSearchScheduleHistory({
   int limit = 1000,
 }) async {
   final text = query.trim();
-  if (text.isEmpty) return [];
+
+  // A date-only query ("april 2025", "4/21/25", "2024") is legitimate: the
+  // caller strips the date tokens out of the text before calling, so `text`
+  // ends up empty while startDate/endDate carry the real query. Returning
+  // early here meant date searches only ever matched the in-memory live
+  // window and never the archive.
+  if (text.isEmpty) {
+    if (startDate == null && endDate == null) return [];
+    return sbFetchScheduleHistoryRange(
+      startDate: startDate,
+      endDate: endDate,
+      newestFirst: newestFirst,
+      limit: limit,
+    );
+  }
 
   final byId = <String, QbtScheduleEvent>{};
 
@@ -1839,16 +1904,6 @@ Future<DateTime?> sbFetchLatestArchivedAt() async {
 // REVIEW REQUESTS
 // ---------------------------------------------------------------------------
 
-Future<Set<String>> sbFetchReviewDismissed() async {
-  final rows = await _sb
-      .from('app_config')
-      .select('key')
-      .like('key', 'review_dismissed_%');
-  return {
-    for (final r in rows as List)
-      (r['key'] as String).substring('review_dismissed_'.length)
-  };
-}
 
 Future<void> sbDismissReview(String liftId) async {
   await _sb.from('app_config').upsert(
@@ -2096,175 +2151,6 @@ Future<void> sbDeleteActivity(String activityId) async {
 // OPERATIONS HUB
 // ---------------------------------------------------------------------------
 
-Future<List<OpsJob>> sbFetchOpsJobs({bool includeCompleted = false}) async {
-  var q = _sb.from('ops_jobs').select();
-  if (!includeCompleted) {
-    q = q.neq('status', 'completed');
-  }
-  final raw = await q.order('date_requested', ascending: true);
-  return (raw as List)
-      .map((r) => OpsJob.fromJson(r as Map<String, dynamic>))
-      .toList();
-}
-
-/// Fetches all pending work from ops_jobs + legacy service_jobs, removal_jobs,
-/// and annuals tables, merged into a unified OpsJob list.
-Future<List<OpsJob>> sbFetchAllOpsJobs({bool includeCompleted = false}) async {
-  final results = await Future.wait([
-    sbFetchOpsJobs(includeCompleted: includeCompleted),
-    sbFetchServiceJobs(),
-    sbFetchRemovalJobs(),
-    sbFetchAnnuals(),
-  ]);
-
-  final ops = List<OpsJob>.from(results[0] as List<OpsJob>);
-  final serviceJobs = results[1] as List<ServiceJobRecord>;
-  final removalJobs = results[2] as List<RemovalJobRecord>;
-  final annuals = results[3] as List<AnnualRecord>;
-
-  // Convert legacy service jobs → OpsJob (skip ones already tracked in ops_jobs)
-  final existingSourceIds = ops.map((j) => j.sourceId).toSet();
-
-  for (final j in serviceJobs) {
-    if (existingSourceIds.contains(j.jobId)) continue;
-    if (!includeCompleted && j.status == 'Completed') continue;
-    ops.add(OpsJob(
-      jobId: 'svc_${j.jobId}',
-      jobType: j.jobType.toLowerCase().contains('annual')
-          ? OpsJobType.annualService
-          : OpsJobType.stairliftService,
-      status: _legacyStatusToOps(j.status),
-      customerName: j.customerName,
-      address: j.address,
-      city: extractCity(j.address),
-      phone: j.phone,
-      liftType: j.liftType,
-      liftId: j.liftId,
-      serialNumber: j.serialNumber,
-      fundingSource: j.fundingSource,
-      notes: j.notes,
-      dateRequested: j.dateRequested.isNotEmpty ? DateTime.tryParse(j.dateRequested) : null,
-      sourceTable: 'service_jobs',
-      sourceId: j.jobId,
-    ));
-  }
-
-  for (final j in removalJobs) {
-    if (existingSourceIds.contains(j.jobId)) continue;
-    if (!includeCompleted && j.status == 'Completed') continue;
-    ops.add(OpsJob(
-      jobId: 'rem_${j.jobId}',
-      jobType: OpsJobType.stairliftRemoval,
-      status: _legacyStatusToOps(j.status),
-      customerName: j.customerName,
-      address: j.address,
-      city: extractCity(j.address),
-      phone: j.phone,
-      liftType: j.liftType,
-      liftId: j.liftId,
-      serialNumber: j.serialNumber,
-      fundingSource: j.fundingSource,
-      notes: j.notes,
-      sourceTable: 'removal_jobs',
-      sourceId: j.jobId,
-    ));
-  }
-
-  for (final a in annuals) {
-    if (existingSourceIds.contains(a.annualId)) continue;
-    if (!includeCompleted && a.scheduled) continue;
-    ops.add(OpsJob(
-      jobId: 'ann_${a.annualId}',
-      jobType: OpsJobType.annualService,
-      status: a.scheduled ? OpsJobStatus.scheduled : OpsJobStatus.readyToSchedule,
-      customerName: a.customerName,
-      address: a.address,
-      city: extractCity(a.address),
-      phone: a.phone,
-      liftType: a.liftType,
-      liftId: a.liftId,
-      serialNumber: a.serialNumber,
-      fundingSource: 'Private',
-      notes: a.notes,
-      dateRequested: a.dateRequested.isNotEmpty ? DateTime.tryParse(a.dateRequested) : null,
-      sourceTable: 'annuals',
-      sourceId: a.annualId,
-    ));
-  }
-
-  ops.sort((a, b) {
-    final aDate = a.dateRequested ?? DateTime.now();
-    final bDate = b.dateRequested ?? DateTime.now();
-    return aDate.compareTo(bDate);
-  });
-  return ops;
-}
-
-OpsJobStatus _legacyStatusToOps(String status) {
-  switch (status.toLowerCase()) {
-    case 'scheduled': return OpsJobStatus.scheduled;
-    case 'completed': return OpsJobStatus.completed;
-    default: return OpsJobStatus.readyToSchedule;
-  }
-}
-
-Future<OpsJob> sbCreateOpsJob(OpsJob job) async {
-  final data = job.toJson()..remove('job_id');
-  // customer_id is a uuid column — an empty string is invalid, send null.
-  if ((data['customer_id'] as String?)?.isEmpty ?? true) data['customer_id'] = null;
-  final raw = await _sb.from('ops_jobs').insert(data).select().single();
-  return OpsJob.fromJson(raw);
-}
-
-Future<void> sbUpdateOpsJobStatus(String jobId, OpsJobStatus status) async {
-  await _sb.from('ops_jobs').update({
-    'status': _opsStatusToString(status),
-  }).eq('job_id', jobId);
-}
-
-/// Advances status for any job — native ops_jobs rows update in-place,
-/// legacy rows (service_jobs, removal_jobs, annuals) get promoted to a
-/// real ops_jobs row so status changes persist correctly.
-Future<void> sbAdvanceOpsJobStatus(OpsJob job, OpsJobStatus newStatus) async {
-  if (job.sourceTable == 'ops_jobs' || job.sourceTable.isEmpty) {
-    // Native ops_jobs row — simple update
-    await sbUpdateOpsJobStatus(job.jobId, newStatus);
-    return;
-  }
-  // Legacy row — promote to ops_jobs with the new status
-  final promoted = OpsJob(
-    jobId: '',
-    jobType: job.jobType,
-    status: newStatus,
-    customerName: job.customerName,
-    address: job.address,
-    city: job.city,
-    phone: job.phone,
-    liftType: job.liftType,
-    liftId: job.liftId,
-    serialNumber: job.serialNumber,
-    fundingSource: job.fundingSource,
-    notes: job.notes,
-    dateRequested: job.dateRequested,
-    buybackOfferPrice: job.buybackOfferPrice,
-    sourceTable: job.sourceTable,
-    sourceId: job.sourceId,
-  );
-  await sbCreateOpsJob(promoted);
-}
-
-Future<void> sbUpdateOpsJob(OpsJob job) async {
-  final data = job.toJson();
-  if ((data['customer_id'] as String?)?.isEmpty ?? true) data['customer_id'] = null;
-  await _sb.from('ops_jobs').update(data).eq('job_id', job.jobId);
-}
-
-/// Links (or updates) a job's customer FK in place. Native ops_jobs only.
-Future<void> sbSetOpsJobCustomer(String jobId, String? customerId) async {
-  await _sb.from('ops_jobs').update({
-    'customer_id': (customerId == null || customerId.isEmpty) ? null : customerId,
-  }).eq('job_id', jobId);
-}
 
 /// All ops_jobs linked to a customer (for the customer profile Jobs card).
 Future<List<OpsJob>> sbFetchJobsForCustomer(String customerId) async {
@@ -2283,23 +2169,6 @@ Future<void> sbDeleteOpsJob(String jobId) async {
   await _sb.from('ops_jobs').delete().eq('job_id', jobId);
 }
 
-/// Deletes an ops job regardless of whether it came from ops_jobs or a legacy table.
-Future<void> sbDeleteOpsJobAny(OpsJob job) async {
-  switch (job.sourceTable) {
-    case 'service_jobs':
-      await _sb.from('service_jobs').delete().eq('job_id', job.sourceId);
-      break;
-    case 'removal_jobs':
-      await _sb.from('removal_jobs').delete().eq('job_id', job.sourceId);
-      break;
-    case 'annuals':
-      await _sb.from('annuals').delete().eq('annual_id', job.sourceId);
-      break;
-    default:
-      // Native ops_jobs row — job_id is the real PK
-      await _sb.from('ops_jobs').delete().eq('job_id', job.jobId);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // LIFT CUSTOMER HISTORY

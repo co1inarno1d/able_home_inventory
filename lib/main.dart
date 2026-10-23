@@ -18,7 +18,6 @@ import 'schedule_desktop.dart';
 import 'screens/bin_whiteboard_screen.dart';
 import 'screens/customers_screen.dart';
 import 'screens/inventory_screen.dart';
-import 'screens/dashboard_screen.dart';
 import 'screens/operations_hub_screen.dart';
 import 'screens/schedule_event_form_screen.dart';
 import 'screens/audit_log_screen.dart';
@@ -26,7 +25,14 @@ import 'screens/documents_screen.dart';
 import 'screens/user_management_screen.dart';
 import 'integrations/quickbooks_service.dart';
 import 'supabase_api.dart';
-import 'utils/utils.dart' show extractCity;
+import 'utils/utils.dart'
+    show
+        extractCity,
+        inferJobTypeFromTitle,
+        kDefaultFundingSource,
+        kFundingSources,
+        normalizeFundingSource;
+import 'utils/schedule_search.dart';
 
 /// =======================
 /// CONFIG
@@ -54,6 +60,20 @@ String formatDate(DateTime? date) {
   return '${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}/${date.year}';
 }
 
+const List<String> kDayNames = [
+  'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday',
+];
+const List<String> kMonthNames = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+/// Format a DateTime as "Wednesday, October 22, 2026".
+/// Shared by the schedule day headers, the desktop search cards and the event
+/// detail screen so all three read the same way.
+String formatFullDate(DateTime date) =>
+    '${kDayNames[date.weekday - 1]}, ${kMonthNames[date.month - 1]} ${date.day}, ${date.year}';
+
 /// Normalizes a bin number field to display as "Bin XX" regardless of how it was entered.
 /// Handles: "43", "bin43", "bin 43", "Bin43", "Bin 43", "bin#43", "Bin #43", etc.
 /// Returns the raw value unchanged if no numeric portion is found.
@@ -76,47 +96,6 @@ String normalizeBinDisplay(String raw) {
 bool eventIsRampJob(QbtScheduleEvent event) {
   final combined = '${event.title} ${event.notes}'.toLowerCase();
   return combined.contains('ramp');
-}
-
-/// Infer job type from a schedule event title.
-/// Returns one of: 'Stairlift Install', 'Stairlift Removal', 'Stairlift Service',
-/// 'Stairlift Annual Service', 'Ramp Install', 'Ramp Removal',
-/// 'Schedule Service', 'Schedule Removal', 'Eval', or null (unknown/untracked).
-String? inferJobTypeFromTitle(String title) {
-  final t = title.toLowerCase();
-
-  // Evals / measures / assessments → not a trackable job
-  if (t.contains('eval') || t.contains('measure') || t.contains('assessment')) {
-    return 'Eval';
-  }
-
-  // Scheduling notes: "set up …" or "schedule …" at the start
-  final isSetupNote = t.startsWith('set up') ||
-      t.startsWith('set-up') ||
-      t.startsWith('schedule ');
-  if (isSetupNote) {
-    if (t.contains('service') || t.contains('annual')) return 'Schedule Service';
-    if (t.contains('removal') || t.contains('remove')) return 'Schedule Removal';
-    return null; // other setup notes (ramp rental setup, etc.) — ignore
-  }
-
-  final hasRamp = t.contains('ramp') && !t.contains('adjustment') && !t.contains('meeting');
-
-  // Explicit installs
-  if (t.contains('install')) return hasRamp ? 'Ramp Install' : 'Stairlift Install';
-
-  // Explicit removals and buybacks/buyouts (treated as removals)
-  if (t.contains('buyback') || t.contains('buyout')) return 'Stairlift Removal';
-  if (t.contains('removal') || t.contains('remove')) return hasRamp ? 'Ramp Removal' : 'Stairlift Removal';
-
-  // Ramp jobs with no explicit install/removal keyword
-  if (hasRamp) return 'Ramp Install';
-
-  // Service calls
-  if (t.contains('annual')) return 'Stairlift Annual Service';
-  if (t.contains('service')) return 'Stairlift Service';
-
-  return null;
 }
 
 /// Convert any Drive URL format to the thumbnail format that Flutter can load.
@@ -164,6 +143,414 @@ Future<void> main() async {
 
 /// Shared user menu — shows current user name/role and a sign-out button.
 /// Call from any screen's app bar person icon.
+/// Marker that prefixes a generated service summary in an event's notes, so
+/// repeated check-offs replace the previous summary instead of stacking.
+const String kServiceSummaryMarker = '--- Service summary ---';
+
+/// Builds a short service summary from data the app already holds.
+///
+/// Deliberately composed from structured fields — job type, lift, serial,
+/// date, who was assigned, who pays — rather than asking the tech to type
+/// anything. The point is to lose no information at check-off without adding
+/// friction. Returns null when there is nothing worth recording.
+String? buildServiceSummary({
+  required QbtScheduleEvent event,
+  required String? jobType,
+  required String fundingSource,
+  required List<LiftRecord> lifts,
+  String assignedNames = '',
+  String completedBy = '',
+}) {
+  final jt = jobType ?? '';
+  final isService =
+      jt == 'Stairlift Service' || jt == 'Stairlift Annual Service';
+  if (!isService) return null;
+
+  final parts = <String>[];
+  parts.add(jt == 'Stairlift Annual Service' ? 'Annual service' : 'Service call');
+  parts.add('on ${formatDate(event.start)}');
+
+  if (lifts.isNotEmpty) {
+    final described = lifts.map((l) {
+      final model = '${l.brand} ${l.series}'.trim();
+      final sn = l.serialNumber.trim();
+      if (model.isNotEmpty && sn.isNotEmpty) return '$model (SN $sn)';
+      if (model.isNotEmpty) return model;
+      if (sn.isNotEmpty) return 'SN $sn';
+      return 'lift ${l.liftId}';
+    }).join(', ');
+    parts.add('— $described');
+  }
+
+  final who = completedBy.trim().isNotEmpty
+      ? completedBy.trim()
+      : assignedNames.trim();
+  if (who.isNotEmpty) parts.add('by $who');
+  if (fundingSource.isNotEmpty && fundingSource != kDefaultFundingSource) {
+    parts.add('($fundingSource)');
+  }
+
+  return '${parts.join(' ')}.';
+}
+
+/// Strips any previously generated summary, leaving the tech's own notes.
+String stripServiceSummary(String notes) {
+  final idx = notes.indexOf(kServiceSummaryMarker);
+  if (idx < 0) return notes.trimRight();
+  return notes.substring(0, idx).trimRight();
+}
+
+/// Appends [summary] to [notes], replacing an earlier generated summary.
+/// The tech's own notes are never modified — the summary lives below a marker.
+String mergeServiceSummary(String notes, String summary) {
+  final base = stripServiceSummary(notes);
+  final block = '$kServiceSummaryMarker\n$summary';
+  return base.isEmpty ? block : '$base\n\n$block';
+}
+
+// ---------------------------------------------------------------------------
+// Job completion — the single downstream handler
+// ---------------------------------------------------------------------------
+
+/// Everything that must happen when a schedule event is checked off:
+/// inventory movements, lift status changes, and service records.
+///
+/// WHY THIS IS SHARED: this logic existed as three divergent copies — the
+/// schedule list toggle, the event detail switch, and a third in the
+/// now-deleted JobsScreen. The same action produced different results
+/// depending on where it was performed. They disagreed about whether the ramp
+/// form appears when a lift is linked, whether a customer is offered after an
+/// install, whether buyback/buyout was handled at all, and whether the event
+/// date was recorded on the lift. Inventory accuracy depends on this running
+/// identically every time, so there is now exactly one implementation.
+///
+/// [liftIds] and [lifts] are alternatives: pass whichever the caller already
+/// has, to avoid refetching.
+///
+/// Returns true if every required follow-up completed. False means the tech
+/// backed out of a mandatory step, and the caller should treat the event as
+/// NOT completed.
+Future<bool> handleJobCompletion({
+  required BuildContext context,
+  required QbtScheduleEvent event,
+  required String? jobType,
+  required String fundingSource,
+  List<String> liftIds = const [],
+  List<LiftRecord>? lifts,
+}) async {
+  final prefs = await SharedPreferences.getInstance();
+  final userName =
+      prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
+  final userEmail = AuthService.instance.profile?.email ?? '';
+  final isCcals = fundingSource == 'CCALS';
+
+  // --- Ramp jobs -----------------------------------------------------------
+  // Ramp quantities are REQUIRED, not optional. Previously this dialog had a
+  // "Skip" button, and skipping left ramp inventory silently wrong with no
+  // record that anything was missed — the single largest source of inventory
+  // drift. A tech who genuinely cannot complete the form now leaves the job
+  // un-checked-off, which is visible, rather than checked off with bad counts.
+  if (jobType == 'Ramp Install' || jobType == 'Ramp Removal') {
+    final isInstall = jobType == 'Ramp Install';
+    final pool = isCcals ? 'CCALS' : 'Able Home';
+    if (!context.mounted) return false;
+    final proceed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: Text(isInstall ? 'Record ramp install' : 'Record ramp removal'),
+        content: Text(
+          isInstall
+              ? 'Enter the ramps and quantities used so they come out of $pool inventory.'
+              : 'Enter the ramps and quantities recovered so they go back into $pool inventory.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Can't right now"),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+            child: const Text('Enter Quantities'),
+          ),
+        ],
+      ),
+    );
+    if (proceed != true) return false;
+    if (!context.mounted) return false;
+
+    // JobAdjustmentScreen pops true only after a successful submit, so this
+    // distinguishes "recorded" from "opened the form and backed out".
+    final submitted = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => JobAdjustmentScreen(
+          initialJobRef: event.title,
+          initialTabIndex: isInstall ? 0 : 1,
+          isCcals: isCcals,
+        ),
+      ),
+    );
+    return submitted == true;
+  }
+
+  // --- Stairlift jobs ------------------------------------------------------
+  var records = lifts;
+  if (records == null) {
+    records = [];
+    for (final id in liftIds) {
+      final l = await sbFetchLiftById(id);
+      if (l != null) records.add(l);
+    }
+  }
+
+  for (final lift in List<LiftRecord>.from(records)) {
+    if (!context.mounted) return true;
+    switch (jobType) {
+      case 'Stairlift Install':
+        final confirm = await _confirmLiftStatus(
+          context: context,
+          title: 'Mark lift as Installed?',
+          body:
+              'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?',
+          confirmLabel: 'Mark Installed',
+        );
+        if (confirm && context.mounted) {
+          await sbMarkLiftStatus(
+            liftId: lift.liftId,
+            newStatus: 'Installed',
+            userEmail: userEmail,
+            userName: userName,
+            note: 'Marked installed via schedule event: ${event.title}',
+            eventDate: event.start,
+          );
+          // Offered from both entry points now; previously only the list did
+          // this, so completing from the detail screen left the lift with no
+          // customer and no prompt.
+          if (lift.customerId.isEmpty && context.mounted) {
+            await _offerCreateCustomerForLift(context, lift, event);
+          }
+        }
+        break;
+
+      case 'Stairlift Removal':
+      case 'Stairlift Buyback':
+      case 'Stairlift Buyout':
+      case 'Stairlift Buyback / Buyout':
+        final isBuyback = jobType != 'Stairlift Removal';
+        final confirm = await _confirmLiftStatus(
+          context: context,
+          title: isBuyback
+              ? 'Mark lift as Removed (Buyback)?'
+              : 'Mark lift as Removed?',
+          body:
+              'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?',
+          confirmLabel: 'Mark Removed',
+        );
+        if (confirm && context.mounted) {
+          await sbMarkLiftStatus(
+            liftId: lift.liftId,
+            newStatus: 'Removed',
+            userEmail: userEmail,
+            userName: userName,
+            note: 'Marked removed via schedule event: ${event.title}',
+            // Recorded on removals too. The list path passed null here while
+            // the detail path omitted it, so when a removal happened was lost.
+            eventDate: event.start,
+          );
+        }
+        break;
+
+      case 'Stairlift Service':
+      case 'Stairlift Annual Service':
+        final serviceType = jobType == 'Stairlift Annual Service'
+            ? 'Annual Service'
+            : 'Service Call';
+        if (!context.mounted) return true;
+        final confirm = await _confirmLiftStatus(
+          context: context,
+          title: 'Log service record?',
+          body: 'Create a $serviceType record for ${lift.brand} ${lift.series}?',
+          confirmLabel: 'Log Service',
+        );
+        if (confirm && context.mounted) {
+          await Navigator.of(context).push(
+            MaterialPageRoute(
+              builder: (_) => LiftServiceFormScreen(
+                lift: lift,
+                prefillServiceType: serviceType,
+                prefillCustomerName: event.title,
+                prefillDate: formatDate(DateTime.now()),
+                // Required, not merely offered: the office builds the service
+                // entry from this photo, so without it there is no record of
+                // what was actually done.
+                requireInvoicePhoto: true,
+              ),
+            ),
+          );
+        }
+        break;
+    }
+  }
+  return true;
+}
+
+/// CRM lifecycle automation, triggered when a schedule event tied to a
+/// customer is marked complete. Uses the event's start date as the
+/// completion date (per the technician check-off). Suggestions are one-tap
+/// prompts; only the review/annual queuing on install is automatic.
+Future<void> _handleCustomerLifecycleOnComplete(
+  BuildContext context,
+  QbtScheduleEvent event,
+  String? jobType,
+  String customerId, {
+  String? customerName,
+}) async {
+  final completionDate = event.start;
+  final jt = jobType ?? '';
+  final isInstall = jt == 'Stairlift Install' || jt == 'Ramp Install';
+  final isAnnual = jt == 'Stairlift Annual Service';
+  final isBuybackOrRemoval = jt == 'Stairlift Removal' ||
+      jt == 'Stairlift Buyback' ||
+      jt == 'Stairlift Buyout' ||
+      jt == 'Stairlift Buyback / Buyout' ||
+      jt == 'Ramp Removal';
+
+  try {
+    if (isInstall) {
+      // Automatic: queue a review request + arm the annual clock (+1yr).
+      final annualDue = DateTime(
+          completionDate.year + 1, completionDate.month, completionDate.day);
+      await sbEnsurePendingActivity(
+        customerId: customerId,
+        type: CustomerActivityType.review,
+        sourceEventId: event.id,
+      );
+      await sbEnsurePendingActivity(
+        customerId: customerId,
+        type: CustomerActivityType.annual,
+        dueDate: annualDue,
+        sourceEventId: event.id,
+      );
+      await sbSetCustomerAnnualDue(customerId, annualDue);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Review request queued and annual reminder set for next year.'),
+          duration: Duration(seconds: 4),
+        ));
+      }
+      // Suggest moving the customer to Active.
+      if (!context.mounted) return;
+      await _suggestCustomerStatus(
+          context, customerId, CustomerLifecycleStatus.active, 'Active',
+          customerName: customerName);
+    } else if (isAnnual) {
+      // Close the pending annual activity and roll the next one forward +1yr.
+      final activities = await sbFetchActivitiesForCustomer(customerId);
+      final pendingAnnual = activities
+          .where((a) =>
+              a.type == CustomerActivityType.annual &&
+              a.status == CustomerActivityStatus.pending)
+          .cast<CustomerActivity?>()
+          .firstWhere((_) => true, orElse: () => null);
+      if (pendingAnnual != null) {
+        await sbUpdateActivityStatus(
+            pendingAnnual.activityId, CustomerActivityStatus.done);
+      }
+      final nextDue = DateTime(
+          completionDate.year + 1, completionDate.month, completionDate.day);
+      await sbEnsurePendingActivity(
+        customerId: customerId,
+        type: CustomerActivityType.annual,
+        dueDate: nextDue,
+        sourceEventId: event.id,
+      );
+      await sbSetCustomerAnnualDue(customerId, nextDue);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Annual logged — next annual reminder set for next year.'),
+          duration: Duration(seconds: 4),
+        ));
+      }
+    } else if (isBuybackOrRemoval) {
+      // Mark any pending buyback-candidate flag done, and suggest Past.
+      final activities = await sbFetchActivitiesForCustomer(customerId);
+      for (final a in activities) {
+        if (a.type == CustomerActivityType.buybackCandidate &&
+            a.status == CustomerActivityStatus.pending) {
+          await sbUpdateActivityStatus(a.activityId, CustomerActivityStatus.done);
+        }
+      }
+      if (!context.mounted) return;
+      await _suggestCustomerStatus(
+          context, customerId, CustomerLifecycleStatus.past, 'Past customer',
+          customerName: customerName);
+    }
+  } catch (e) {
+    debugPrint('[CRM lifecycle] ERROR: $e');
+  }
+}
+
+
+/// One-tap prompt to move a linked customer to [target]. Never auto-applied.
+Future<void> _suggestCustomerStatus(
+  BuildContext context,
+  String customerId,
+  CustomerLifecycleStatus target,
+  String label, {
+  String? customerName,
+}) async {
+  if (!context.mounted) return;
+  final name = customerName ?? 'this customer';
+  final confirm = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text('Mark $name as $label?'),
+      content: Text('Update the customer’s lifecycle status to $label.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Not now')),
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context, true),
+          style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+          child: Text('Mark $label'),
+        ),
+      ],
+    ),
+  );
+  if (confirm == true) {
+    await sbUpdateCustomerLifecycle(customerId, target);
+  }
+}
+
+/// Shared confirm dialog for the lift status / service prompts above.
+Future<bool> _confirmLiftStatus({
+  required BuildContext context,
+  required String title,
+  required String body,
+  required String confirmLabel,
+}) async {
+  final result = await showDialog<bool>(
+    context: context,
+    builder: (_) => AlertDialog(
+      title: Text(title),
+      content: Text(body),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Skip')),
+        ElevatedButton(
+          onPressed: () => Navigator.pop(context, true),
+          style: ElevatedButton.styleFrom(
+              backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+          child: Text(confirmLabel),
+        ),
+      ],
+    ),
+  );
+  return result == true;
+}
+
 /// After marking a lift as Installed, offer to create or link a customer record.
 /// Shows a bottom sheet; skippable with no side-effects.
 Future<void> _offerCreateCustomerForLift(
@@ -766,7 +1153,6 @@ class _PasswordGateState extends State<PasswordGate> {
     );
   }
 }
-
 
 
 /// =======================
@@ -1536,644 +1922,6 @@ class PrepChecklistDetailScreen extends StatelessWidget {
 // ANNUALS SCREEN
 // =======================
 
-class AnnualsScreen extends StatefulWidget {
-  const AnnualsScreen({super.key});
-
-  @override
-  State<AnnualsScreen> createState() => _AnnualsScreenState();
-}
-
-class _AnnualsScreenState extends State<AnnualsScreen> {
-  late Future<List<AnnualRecord>> _future;
-  String _search = '';
-  String? _scheduledFilter; // null=all, 'pending'=not scheduled, 'scheduled'=scheduled
-
-  @override
-  void initState() {
-    super.initState();
-    _future = sbFetchAnnuals();
-  }
-
-  void _refresh() => setState(() => _future = sbFetchAnnuals());
-
-  Future<Map<String, String>> _loadUser() async {
-    final prefs = await SharedPreferences.getInstance();
-    return {
-      'name': prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
-      'email': AuthService.instance.profile?.email ?? '',
-    };
-  }
-
-  Future<void> _openForm({AnnualRecord? existing}) async {
-    final result = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(builder: (_) => AnnualFormScreen(existing: existing)),
-    );
-    if (result == true) _refresh();
-  }
-
-  Future<void> _markScheduled(AnnualRecord record) async {
-    final user = await _loadUser();
-    if (user['name']!.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please set your name in the main screen.')),
-      );
-      return;
-    }
-    try {
-      await sbMarkAnnualScheduled(
-        annualId: record.annualId,
-        userName: user['name']!,
-        userEmail: user['email'] ?? '',
-      );
-      _refresh();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e')),
-      );
-    }
-  }
-
-  Future<void> _delete(AnnualRecord record) async {
-    final confirmed = await showConfirmDialog(
-      context,
-      title: 'Delete record?',
-      content: 'Remove ${record.customerName} from annuals?',
-    );
-    if (!confirmed) return;
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await sbDeleteAnnual(
-        annualId: record.annualId,
-        userEmail: AuthService.instance.profile?.email ?? '',
-        userName: prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
-      );
-      _refresh();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-    }
-  }
-
-  void _openDetail(AnnualRecord record) {
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => AnnualDetailScreen(record: record, onChanged: _refresh)),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Annuals'),
-        backgroundColor: kBrandGreenDark,
-        foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _refresh,
-          ),
-        ],
-      ),
-      body: FutureBuilder<List<AnnualRecord>>(
-        future: _future,
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
-          }
-
-          final all = snapshot.data ?? [];
-
-          // Filter
-          var filtered = all.where((r) {
-            if (_search.isNotEmpty) {
-              final q = _search.toLowerCase();
-              if (!r.customerName.toLowerCase().contains(q) &&
-                  !r.address.toLowerCase().contains(q) &&
-                  !r.phone.toLowerCase().contains(q) &&
-                  !r.liftType.toLowerCase().contains(q)) {
-                return false;
-              }
-            }
-            if (_scheduledFilter == 'pending' && r.scheduled) return false;
-            if (_scheduledFilter == 'scheduled' && !r.scheduled) return false;
-            return true;
-          }).toList();
-
-          // Sort: unscheduled first, then by date requested oldest first
-          filtered.sort((a, b) {
-            if (a.scheduled != b.scheduled) return a.scheduled ? 1 : -1;
-            if (a.dateRequested.isNotEmpty && b.dateRequested.isNotEmpty) {
-              return a.dateRequested.compareTo(b.dateRequested);
-            }
-            return a.customerName.compareTo(b.customerName);
-          });
-
-          return Column(
-            children: [
-              // Search bar
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-                child: TextField(
-                  decoration: InputDecoration(
-                    hintText: 'Search customers...',
-                    prefixIcon: const Icon(Icons.search),
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                    isDense: true,
-                    suffixIcon: _search.isNotEmpty
-                        ? IconButton(
-                            icon: const Icon(Icons.clear),
-                            onPressed: () => setState(() => _search = ''),
-                          )
-                        : null,
-                  ),
-                  onChanged: (v) => setState(() => _search = v.trim()),
-                ),
-              ),
-              // Filter chips
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                child: Row(
-                  children: [
-                    _filterChip('All', null),
-                    const SizedBox(width: 8),
-                    _filterChip('Needs scheduling', 'pending'),
-                    const SizedBox(width: 8),
-                    _filterChip('Scheduled', 'scheduled'),
-                  ],
-                ),
-              ),
-              const Divider(height: 1),
-              // Count
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-                child: Row(
-                  children: [
-                    Text('${filtered.length} record${filtered.length == 1 ? '' : 's'}',
-                        style: const TextStyle(color: Colors.black54, fontSize: 13)),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: filtered.isEmpty
-                    ? const Center(child: Text('No records found.'))
-                    : RefreshIndicator(
-                        onRefresh: () async => _refresh(),
-                        child: ListView.builder(
-                          padding: const EdgeInsets.fromLTRB(8, 0, 8, 80),
-                          itemCount: filtered.length,
-                          itemBuilder: (context, index) =>
-                              _buildCard(filtered[index]),
-                        ),
-                      ),
-              ),
-            ],
-          );
-        },
-      ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _openForm(),
-        backgroundColor: kBrandGreen,
-        foregroundColor: Colors.white,
-        icon: const Icon(Icons.add),
-        label: const Text('Add Annual'),
-      ),
-    );
-  }
-
-  Widget _filterChip(String label, String? value) {
-    final selected = _scheduledFilter == value;
-    return ChoiceChip(
-      label: Text(label),
-      selected: selected,
-      selectedColor: kBrandGreen.withOpacity(0.2),
-      onSelected: (_) => setState(() => _scheduledFilter = value),
-    );
-  }
-
-  Widget _buildCard(AnnualRecord r) {
-    final Color statusColor = r.scheduled
-        ? Colors.green.shade700
-        : Colors.orange.shade700;
-    final String statusLabel = r.scheduled ? 'Scheduled' : 'Needs scheduling';
-
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: InkWell(
-        onTap: () => _openDetail(r),
-        borderRadius: BorderRadius.circular(12),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      r.customerName,
-                      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 16),
-                    ),
-                  ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: statusColor.withOpacity(0.12),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: statusColor.withOpacity(0.4)),
-                    ),
-                    child: Text(statusLabel,
-                        style: TextStyle(
-                            color: statusColor,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600)),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              if (r.address.isNotEmpty)
-                Row(children: [
-                  const Icon(Icons.location_on_outlined, size: 14, color: Colors.black45),
-                  const SizedBox(width: 4),
-                  Expanded(child: Text(r.address, style: const TextStyle(fontSize: 13))),
-                ]),
-              if (r.phone.isNotEmpty)
-                Row(children: [
-                  const Icon(Icons.phone_outlined, size: 14, color: Colors.black45),
-                  const SizedBox(width: 4),
-                  Text(r.phone, style: const TextStyle(fontSize: 13)),
-                ]),
-              if (r.liftType.isNotEmpty)
-                Row(children: [
-                  const Icon(Icons.stairs, size: 14, color: Colors.black45),
-                  const SizedBox(width: 4),
-                  Expanded(child: Text(r.liftType, style: const TextStyle(fontSize: 13))),
-                  if (r.liftId.isNotEmpty)
-                    const Tooltip(
-                      message: 'Linked to lift in system',
-                      child: Icon(Icons.link, size: 14, color: kBrandGreen),
-                    ),
-                ]),
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  if (r.lastServiceDate.isNotEmpty)
-                    Text('Last service: ${normalizeDateDisplay(r.lastServiceDate)}',
-                        style: const TextStyle(fontSize: 12, color: Colors.black54)),
-                  if (r.lastServiceDate.isNotEmpty && r.dateRequested.isNotEmpty)
-                    const Text('  ·  ', style: TextStyle(color: Colors.black38)),
-                  if (r.dateRequested.isNotEmpty)
-                    Text('Requested: ${normalizeDateDisplay(r.dateRequested)}',
-                        style: const TextStyle(fontSize: 12, color: Colors.black54)),
-                ],
-              ),
-              if (r.notes.isNotEmpty) ...[
-                const SizedBox(height: 4),
-                Text(r.notes,
-                    style: const TextStyle(fontSize: 12, color: Colors.black45),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis),
-              ],
-              // Action buttons
-              if (!r.scheduled) ...[
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton.icon(
-                      onPressed: () => _markScheduled(r),
-                      icon: const Icon(Icons.check_circle_outline, size: 16),
-                      label: const Text('Mark Scheduled'),
-                      style: TextButton.styleFrom(foregroundColor: kBrandGreen),
-                    ),
-                    const SizedBox(width: 4),
-                    TextButton.icon(
-                      onPressed: () => _openForm(existing: r),
-                      icon: const Icon(Icons.edit_outlined, size: 16),
-                      label: const Text('Edit'),
-                      style: TextButton.styleFrom(foregroundColor: Colors.black54),
-                    ),
-                    TextButton.icon(
-                      onPressed: () => _delete(r),
-                      icon: const Icon(Icons.delete_outline, size: 16),
-                      label: const Text('Delete'),
-                      style: TextButton.styleFrom(foregroundColor: Colors.red),
-                    ),
-                  ],
-                ),
-              ] else ...[
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton.icon(
-                      onPressed: () => _openForm(existing: r),
-                      icon: const Icon(Icons.edit_outlined, size: 16),
-                      label: const Text('Edit'),
-                      style: TextButton.styleFrom(foregroundColor: Colors.black54),
-                    ),
-                    TextButton.icon(
-                      onPressed: () => _delete(r),
-                      icon: const Icon(Icons.delete_outline, size: 16),
-                      label: const Text('Delete'),
-                      style: TextButton.styleFrom(foregroundColor: Colors.red),
-                    ),
-                  ],
-                ),
-              ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// =======================
-// ANNUAL DETAIL SCREEN
-// =======================
-
-class AnnualDetailScreen extends StatefulWidget {
-  final AnnualRecord record;
-  final VoidCallback onChanged;
-  const AnnualDetailScreen({super.key, required this.record, required this.onChanged});
-
-  @override
-  State<AnnualDetailScreen> createState() => _AnnualDetailScreenState();
-}
-
-class _AnnualDetailScreenState extends State<AnnualDetailScreen> {
-  late Future<List<Map<String, dynamic>>> _historyFuture;
-
-  @override
-  void initState() {
-    super.initState();
-    _historyFuture = sbFetchAnnualHistory(annualId: widget.record.annualId);
-  }
-
-  Future<Map<String, String>> _loadUser() async {
-    final prefs = await SharedPreferences.getInstance();
-    return {
-      'name': prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
-      'email': AuthService.instance.profile?.email ?? '',
-    };
-  }
-
-  Future<void> _markScheduled() async {
-    final user = await _loadUser();
-    if (user['name']!.isEmpty) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please set your name in the main screen.')),
-      );
-      return;
-    }
-    try {
-      await sbMarkAnnualScheduled(
-        annualId: widget.record.annualId,
-        userName: user['name']!,
-        userEmail: user['email'] ?? '',
-      );
-      widget.onChanged();
-      if (!mounted) return;
-
-      // If a lift is linked, offer to log a service record
-      final r = widget.record;
-      if (r.liftId.isNotEmpty) {
-        final logService = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: const Text('Log service record?'),
-            content: Text(
-                'Would you like to log an annual service record for ${r.liftType.isNotEmpty ? r.liftType : "SN: ${r.serialNumber}"}?'),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('Skip'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                child: const Text('Log Service'),
-              ),
-            ],
-          ),
-        );
-        if (logService == true && mounted) {
-          // Find the linked lift record
-          LiftRecord? linkedLift;
-          try {
-            final lifts = await sbFetchLifts();
-            linkedLift = lifts.where((l) => l.liftId == r.liftId).firstOrNull;
-          } catch (_) {}
-          if (linkedLift != null && mounted) {
-            await Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => LiftServiceFormScreen(
-                  lift: linkedLift!,
-                  prefillServiceType: 'Annual Service',
-                  prefillCustomerName: r.customerName,
-                  prefillDate: formatDate(DateTime.now()),
-                ),
-              ),
-            );
-          }
-        }
-      }
-
-      if (!mounted) return;
-      Navigator.of(context).pop();
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final r = widget.record;
-    final statusColor = r.scheduled ? Colors.green.shade700 : Colors.orange.shade700;
-
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(r.customerName),
-        backgroundColor: kBrandGreenDark,
-        foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.edit),
-            onPressed: () async {
-              final result = await Navigator.of(context).push<bool>(
-                MaterialPageRoute(builder: (_) => AnnualFormScreen(existing: r)),
-              );
-              if (result == true) {
-                widget.onChanged();
-                if (mounted) Navigator.of(context).pop();
-              }
-            },
-          ),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Status badge
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: statusColor.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: statusColor.withOpacity(0.4)),
-              ),
-              child: Text(
-                r.scheduled ? 'Scheduled' : 'Needs scheduling',
-                style: TextStyle(color: statusColor, fontWeight: FontWeight.w600),
-              ),
-            ),
-            const SizedBox(height: 16),
-            _detailRow(Icons.person_outline, 'Customer', r.customerName),
-            if (r.address.isNotEmpty) _detailRow(Icons.location_on_outlined, 'Address', r.address),
-            if (r.phone.isNotEmpty) _detailRow(Icons.phone_outlined, 'Phone', r.phone),
-            if (r.liftType.isNotEmpty) _detailRow(Icons.stairs, 'Lift type', r.liftType),
-            if (r.liftId.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 12),
-                child: InkWell(
-                  onTap: () async {
-                    final nav = Navigator.of(context);
-                    try {
-                      final lifts = await sbFetchLifts();
-                      final linked = lifts.where((l) => l.liftId == r.liftId).firstOrNull;
-                      if (linked != null) {
-                        nav.push(MaterialPageRoute(
-                          builder: (_) => LiftDetailScreen(lift: linked),
-                        ));
-                      }
-                    } catch (_) {}
-                  },
-                  child: Row(
-                    children: [
-                      const Icon(Icons.link, size: 18, color: kBrandGreen),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('Linked lift',
-                                style: TextStyle(fontSize: 11, color: Colors.black45)),
-                            Text('Tap to view lift details',
-                                style: TextStyle(fontSize: 15, color: kBrandGreen)),
-                          ],
-                        ),
-                      ),
-                      const Icon(Icons.chevron_right, color: kBrandGreen),
-                    ],
-                  ),
-                ),
-              ),
-            if (r.lastServiceDate.isNotEmpty)
-              _detailRow(Icons.history, 'Last service', normalizeDateDisplay(r.lastServiceDate)),
-            if (r.dateRequested.isNotEmpty)
-              _detailRow(Icons.calendar_today_outlined, 'Date requested', normalizeDateDisplay(r.dateRequested)),
-            if (r.notes.isNotEmpty) _detailRow(Icons.notes_outlined, 'Notes', r.notes),
-            const SizedBox(height: 24),
-            // Mark scheduled button
-            if (!r.scheduled)
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  onPressed: _markScheduled,
-                  icon: const Icon(Icons.check_circle_outline),
-                  label: const Text('Mark Scheduled'),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: kBrandGreen,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                ),
-              ),
-            const SizedBox(height: 24),
-            // History
-            const Text('History',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 8),
-            FutureBuilder<List<Map<String, dynamic>>>(
-              future: _historyFuture,
-              builder: (context, snap) {
-                if (snap.connectionState == ConnectionState.waiting) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                final history = snap.data ?? [];
-                if (history.isEmpty) {
-                  return const Text('No history yet.',
-                      style: TextStyle(color: Colors.black45));
-                }
-                return Column(
-                  children: history.map((h) {
-                    final ts = normalizeDateDisplay(h['timestamp']?.toString() ?? '');
-                    final event = h['event']?.toString() ?? '';
-                    final user = h['user_name']?.toString() ?? '';
-                    final note = h['note']?.toString() ?? '';
-                    return Card(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      child: ListTile(
-                        leading: const Icon(Icons.check_circle, color: kBrandGreen),
-                        title: Text(event, style: const TextStyle(fontWeight: FontWeight.w600)),
-                        subtitle: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(ts),
-                            if (user.isNotEmpty) Text('By: $user'),
-                            if (note.isNotEmpty) Text(note),
-                          ],
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _detailRow(IconData icon, String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 18, color: Colors.black45),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label,
-                    style: const TextStyle(fontSize: 11, color: Colors.black45)),
-                Text(value, style: const TextStyle(fontSize: 15)),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// =======================
-// LIFT PICKER DIALOG
-// =======================
-
 class _LiftPickerDialog extends StatefulWidget {
   const _LiftPickerDialog();
 
@@ -2349,2558 +2097,6 @@ class _AddNewLiftSentinel {
 // ANNUAL FORM SCREEN
 // =======================
 
-class AnnualFormScreen extends StatefulWidget {
-  final AnnualRecord? existing;
-  const AnnualFormScreen({super.key, this.existing});
-
-  @override
-  State<AnnualFormScreen> createState() => _AnnualFormScreenState();
-}
-
-class _AnnualFormScreenState extends State<AnnualFormScreen> {
-  final _formKey = GlobalKey<FormState>();
-  bool _saving = false;
-
-  late final TextEditingController _nameController;
-  late final TextEditingController _addressController;
-  late final TextEditingController _phoneController;
-  late final TextEditingController _liftTypeController;
-  late final TextEditingController _lastServiceController;
-  late final TextEditingController _dateRequestedController;
-  late final TextEditingController _notesController;
-
-  // Linked lift state
-  String? _linkedLiftId;
-  String? _linkedSerialNumber;
-  String? _linkedLiftLabel; // display string, e.g. "Bruno Elan 3000 LH — SN: 12345"
-
-  @override
-  void initState() {
-    super.initState();
-    final e = widget.existing;
-    _nameController = TextEditingController(text: e?.customerName ?? '');
-    _addressController = TextEditingController(text: e?.address ?? '');
-    _phoneController = TextEditingController(text: e?.phone ?? '');
-    _liftTypeController = TextEditingController(text: e?.liftType ?? '');
-    _lastServiceController = TextEditingController(
-        text: e != null ? normalizeDateDisplay(e.lastServiceDate) : '');
-    _dateRequestedController = TextEditingController(
-        text: e != null ? normalizeDateDisplay(e.dateRequested) : '');
-    _notesController = TextEditingController(text: e?.notes ?? '');
-    // Restore linked lift if editing
-    if (e != null && e.liftId.isNotEmpty) {
-      _linkedLiftId = e.liftId;
-      _linkedSerialNumber = e.serialNumber;
-      _linkedLiftLabel = e.liftType.isNotEmpty ? e.liftType : 'SN: ${e.serialNumber}';
-    }
-  }
-
-  @override
-  void dispose() {
-    _nameController.dispose();
-    _addressController.dispose();
-    _phoneController.dispose();
-    _liftTypeController.dispose();
-    _lastServiceController.dispose();
-    _dateRequestedController.dispose();
-    _notesController.dispose();
-    super.dispose();
-  }
-
-  void _linkLift(LiftRecord lift) {
-    final label = [
-      lift.brand,
-      lift.series,
-      if (lift.orientation.isNotEmpty && lift.orientation != 'N/A') lift.orientation,
-    ].where((s) => s.isNotEmpty).join(' ') + (lift.serialNumber.isNotEmpty ? ' — SN: ${lift.serialNumber}' : '');
-    setState(() {
-      _linkedLiftId = lift.liftId;
-      _linkedSerialNumber = lift.serialNumber;
-      _linkedLiftLabel = label;
-      _liftTypeController.text = label;
-    });
-  }
-
-  void _unlinkLift() {
-    setState(() {
-      _linkedLiftId = null;
-      _linkedSerialNumber = null;
-      _linkedLiftLabel = null;
-      _liftTypeController.clear();
-    });
-  }
-
-  Future<void> _openLiftPicker() async {
-    final result = await showDialog(
-      context: context,
-      builder: (_) => const _LiftPickerDialog(),
-    );
-    if (result is LiftRecord) {
-      _linkLift(result);
-    } else if (result is _AddNewLiftSentinel) {
-      if (!mounted) return;
-      // Open add-lift form; on success, reload and try to auto-link by serial
-      final saved = await Navigator.of(context).push<bool>(
-        MaterialPageRoute(builder: (_) => const LiftFormScreen()),
-      );
-      if (saved == true) {
-        // Fetch lifts again and pick the most recently added one
-        try {
-          final lifts = await sbFetchLifts();
-          if (lifts.isNotEmpty) _linkLift(lifts.last);
-        } catch (_) {}
-      }
-    }
-  }
-
-  Future<void> _pickDate(TextEditingController controller) async {
-    final now = DateTime.now();
-    DateTime initial = now;
-    // Try to parse existing value
-    if (controller.text.isNotEmpty) {
-      try {
-        final parts = controller.text.split('/');
-        if (parts.length == 3) {
-          initial = DateTime(int.parse(parts[2]), int.parse(parts[0]), int.parse(parts[1]));
-        }
-      } catch (_) {}
-    }
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: initial,
-      firstDate: DateTime(2000),
-      lastDate: DateTime(2100),
-    );
-    if (picked != null) {
-      controller.text = formatDate(picked);
-    }
-  }
-
-  Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) return;
-    setState(() => _saving = true);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
-      final userEmail = AuthService.instance.profile?.email ?? '';
-
-      await sbUpsertAnnual(
-        userEmail: userEmail,
-        userName: userName,
-        annualId: widget.existing?.annualId,
-        customerName: _nameController.text.trim(),
-        address: _addressController.text.trim(),
-        phone: _phoneController.text.trim(),
-        liftType: _liftTypeController.text.trim(),
-        lastServiceDate: _lastServiceController.text.trim(),
-        dateRequested: _dateRequestedController.text.trim(),
-        notes: _notesController.text.trim(),
-        liftId: _linkedLiftId ?? '',
-        serialNumber: _linkedSerialNumber ?? '',
-      );
-
-      if (mounted) Navigator.of(context).pop(true);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  Widget _dateField(String label, TextEditingController controller) {
-    return TextFormField(
-      controller: controller,
-      readOnly: true,
-      decoration: InputDecoration(
-        labelText: label,
-        border: const OutlineInputBorder(),
-        suffixIcon: const Icon(Icons.calendar_today_outlined),
-      ),
-      onTap: () => _pickDate(controller),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isEditing = widget.existing != null;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(isEditing ? 'Edit Annual' : 'Add Annual'),
-        backgroundColor: kBrandGreenDark,
-        foregroundColor: Colors.white,
-      ),
-      body: Form(
-        key: _formKey,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              TextFormField(
-                controller: _nameController,
-                decoration: const InputDecoration(
-                    labelText: 'Customer name *', border: OutlineInputBorder()),
-                validator: (v) =>
-                    v == null || v.trim().isEmpty ? 'Required' : null,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _addressController,
-                decoration: const InputDecoration(
-                    labelText: 'Address', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _phoneController,
-                decoration: const InputDecoration(
-                    labelText: 'Phone', border: OutlineInputBorder()),
-                keyboardType: TextInputType.phone,
-              ),
-              const SizedBox(height: 12),
-              // Lift picker / manual entry
-              if (_linkedLiftLabel != null) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: kBrandGreen),
-                    borderRadius: BorderRadius.circular(8),
-                    color: kBrandGreen.withOpacity(0.05),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.stairs, color: kBrandGreen, size: 20),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(_linkedLiftLabel!,
-                            style: const TextStyle(fontWeight: FontWeight.w500)),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 18),
-                        tooltip: 'Unlink lift',
-                        onPressed: _unlinkLift,
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    ],
-                  ),
-                ),
-              ] else ...[
-                OutlinedButton.icon(
-                  onPressed: _openLiftPicker,
-                  icon: const Icon(Icons.link),
-                  label: const Text('Link a lift from system'),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(double.infinity, 48),
-                    foregroundColor: kBrandGreen,
-                    side: const BorderSide(color: kBrandGreen),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _liftTypeController,
-                  decoration: const InputDecoration(
-                      labelText: 'Or type lift description manually',
-                      border: OutlineInputBorder()),
-                ),
-              ],
-              const SizedBox(height: 12),
-              _dateField('Last service date', _lastServiceController),
-              const SizedBox(height: 12),
-              _dateField('Date requested', _dateRequestedController),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _notesController,
-                decoration: const InputDecoration(
-                    labelText: 'Notes', border: OutlineInputBorder()),
-                maxLines: 3,
-              ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _saving ? null : _save,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: kBrandGreen,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  child: _saving
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : Text(isEditing ? 'Save changes' : 'Add annual'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Minimal PickupListScreen placeholder. If you already have a full
-/// implementation elsewhere, remove this small placeholder and point
-/// _pages to your existing PickupListScreen instead.
-class PickupListScreen extends StatefulWidget {
-  const PickupListScreen({super.key});
-
-  @override
-  State<PickupListScreen> createState() => _PickupListScreenState();
-}
-
-class _PickupListScreenState extends State<PickupListScreen> {
-  final TextEditingController _controller = TextEditingController();
-  late Future<void> _initialLoad;
-  List<Map<String, dynamic>> _items = []; // each item: {id, item, added_by, added_at, completed, completed_by, completed_at}
-  bool _loading = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _initialLoad = _fetchItems();
-  }
-
-  Future<void> _fetchItems() async {
-    setState(() => _loading = true);
-    try {
-      final list = await sbGetPickupList();
-      if (mounted) setState(() => _items = list);
-    } catch (e) {
-      debugPrint('Failed to load pickup list: $e');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  Future<void> _addItem() async {
-    final text = _controller.text.trim();
-    if (text.isEmpty) return;
-
-    final prefs = await SharedPreferences.getInstance();
-    final addedBy = prefs.getString('user_name') ?? 'Unknown';
-
-    // Optimistic UI: add locally first
-    final tempId = 'item_${DateTime.now().millisecondsSinceEpoch}';
-    final newItem = {
-      'id': tempId,
-      'item': text,
-      'added_by': addedBy,
-      'added_at': DateTime.now().toIso8601String(),
-      'completed': false,
-      'completed_by': '',
-      'completed_at': ''
-    };
-
-    setState(() {
-      _items.insert(0, newItem);
-      _controller.clear();
-    });
-
-    try {
-      await sbAddPickupItem(item: text, addedBy: addedBy);
-      // Refresh to get the server-assigned id
-      final list = await sbGetPickupList();
-      if (mounted) setState(() => _items = list);
-    } catch (e) {
-      debugPrint('Failed to add pickup item: $e');
-      // keep optimistic item; user can retry via refresh
-    }
-  }
-
-  Future<void> _toggleComplete(Map<String, dynamic> item, bool value) async {
-    final prefs = await SharedPreferences.getInstance();
-    final user = prefs.getString('user_name') ?? 'Unknown';
-
-    final id = item['id']?.toString() ?? '';
-    if (id.isEmpty) return;
-
-    // Optimistic update
-    setState(() {
-      item['completed'] = value;
-      item['completed_by'] = value ? user : '';
-      item['completed_at'] = value ? DateTime.now().toIso8601String() : '';
-    });
-
-    try {
-      await sbUpdatePickupItem(id: id, completed: value, completedBy: user);
-    } catch (e) {
-      debugPrint('Failed to update pickup item: $e');
-      // Revert optimistic update on failure
-      setState(() {
-        item['completed'] = !value;
-        item['completed_by'] = !value ? user : '';
-        item['completed_at'] = !value ? DateTime.now().toIso8601String() : '';
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to update item: $e')),
-        );
-      }
-    }
-  }
-
-  Future<void> _deleteItem(Map<String, dynamic> item) async {
-    final itemId = item['id']?.toString() ?? '';
-    if (itemId.isEmpty) return;
-
-    // Show confirmation dialog
-    final confirmed = await showConfirmDialog(
-      context,
-      title: 'Delete Item',
-      content: 'Are you sure you want to delete "${item['item']}"?',
-    );
-    if (!confirmed) return;
-
-    // Optimistic update: remove from list immediately
-    final itemIndex = _items.indexWhere((it) => it['id'] == itemId);
-    final removedItem = item;
-    setState(() {
-      _items.removeAt(itemIndex);
-    });
-
-    try {
-      await sbDeletePickupItem(id: itemId);
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Item deleted')),
-        );
-      }
-    } catch (e) {
-      debugPrint('Failed to delete pickup item: $e');
-      // Revert optimistic update on failure
-      setState(() {
-        _items.insert(itemIndex, removedItem);
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to delete item: $e')),
-        );
-      }
-    }
-  }
-
-  Future<void> _refresh() async => _fetchItems();
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Pickup List'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh),
-            onPressed: _refresh,
-          ),
-        ],
-      ),
-      body: FutureBuilder<void>(
-        future: _initialLoad,
-        builder: (context, snap) {
-          if (_loading && _items.isEmpty) {
-            return const Center(child: CircularProgressIndicator());
-          }
-
-          return Column(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(12.0),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: _controller,
-                        decoration: const InputDecoration(
-                          prefixIcon: Icon(Icons.add),
-                          hintText: 'Add pickup item (e.g., 2x 2x4, screws)',
-                          border: OutlineInputBorder(),
-                        ),
-                        onSubmitted: (_) => _addItem(),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    ElevatedButton(
-                      onPressed: _addItem,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: kBrandGreen,
-                        foregroundColor: Colors.white,
-                      ),
-                      child: const Text('Add'),
-                    ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: _items.isEmpty
-                    ? const Center(child: Text('No pickup items.'))
-                    : RefreshIndicator(
-                        onRefresh: _refresh,
-                        child: ListView.builder(
-                          itemCount: _items.length,
-                          itemBuilder: (context, index) {
-                            final it = _items[index];
-                            final completed = it['completed'] == true || it['completed'] == 'TRUE';
-                            return ListTile(
-                              leading: completed
-                                  ? const Icon(Icons.check_circle)
-                                  : const Icon(Icons.inventory_2),
-                              title: Text(it['item']?.toString() ?? ''),
-                              subtitle: Text("Added by: ${it['added_by'] ?? ''}"),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Checkbox(
-                                    value: completed,
-                                    onChanged: (v) => _toggleComplete(it, v ?? false),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.delete_outline, color: Colors.red),
-                                    onPressed: () => _deleteItem(it),
-                                  ),
-                                ],
-                              ),
-                            );
-                          },
-                        ),
-                      ),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
-// =======================
-// JOBS SCREEN (CRM)
-// =======================
-
-class JobsScreen extends StatefulWidget {
-  const JobsScreen({super.key});
-
-  @override
-  State<JobsScreen> createState() => _JobsScreenState();
-}
-
-class _JobsScreenState extends State<JobsScreen>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-
-  List<QbtScheduleEvent> _events = [];
-  Map<String, QbtUser> _users = {};
-  Map<String, Map<String, dynamic>> _allMeta = {};
-  Set<String> _completedIds = {};
-  Map<String, List<LiftRecord>> _liftsByEvent = {};
-  bool _loading = true;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 3, vsync: this);
-    _load();
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final now = DateTime.now();
-      final start = now.subtract(const Duration(days: 90));
-      final end = now.add(const Duration(days: 90));
-      final results = await Future.wait([
-        qbtFetchScheduleEvents(start: start, end: end),
-        qbtFetchUsers(),
-        sbGetAllEventMeta(),
-        sbFetchCompletedEventIds(),
-      ]);
-      if (!mounted) return;
-      final events = results[0] as List<QbtScheduleEvent>;
-      final allMeta = results[2] as Map<String, Map<String, dynamic>>;
-
-      // Fetch lifts for all events that have linked lift IDs
-      final liftsByEvent = <String, List<LiftRecord>>{};
-      final liftFutures = <Future<void>>[];
-      for (final event in events) {
-        final meta = allMeta[event.id];
-        if (meta == null) continue;
-        final liftIds = (meta['lift_ids'] as List?)?.cast<String>() ?? [];
-        if (liftIds.isEmpty) continue;
-        liftFutures.add(() async {
-          final lifts = <LiftRecord>[];
-          for (final id in liftIds) {
-            final l = await sbFetchLiftById(id);
-            if (l != null) lifts.add(l);
-          }
-          liftsByEvent[event.id] = lifts;
-        }());
-      }
-      await Future.wait(liftFutures);
-
-      if (!mounted) return;
-      setState(() {
-        _events = events;
-        _users = results[1] as Map<String, QbtUser>;
-        _allMeta = allMeta;
-        _completedIds = results[3] as Set<String>;
-        _liftsByEvent = liftsByEvent;
-        _loading = false;
-      });
-    } catch (e) {
-      if (mounted) setState(() { _loading = false; _error = e.toString(); });
-    }
-  }
-
-  // Schedule-note types don't have a meaningful date window — show all unconverted ones.
-  static const _scheduleNoteTypes = {'Schedule Service', 'Schedule Removal'};
-
-  List<QbtScheduleEvent> _eventsForType(List<String> types) {
-    final now = DateTime.now();
-    final windowStart = DateTime(now.year, now.month, now.day).subtract(const Duration(days: 7));
-    final windowEnd = DateTime(now.year, now.month, now.day, 23, 59, 59).add(const Duration(days: 7));
-    return _events.where((e) {
-      String? jobType = _allMeta[e.id]?['job_type'] as String?;
-      if (jobType == null || jobType.isEmpty) {
-        jobType = inferJobTypeFromTitle(e.title);
-      }
-      if (jobType == null || !types.contains(jobType)) return false;
-      // Schedule notes: skip date window — show until converted
-      if (_scheduleNoteTypes.contains(jobType)) return true;
-      final eventDate = e.start.toLocal();
-      return !eventDate.isBefore(windowStart) && !eventDate.isAfter(windowEnd);
-    }).toList();
-  }
-
-  String _assignedNames(QbtScheduleEvent event) {
-    if (event.assignedUserIds.isEmpty) return '';
-    return event.assignedUserIds
-        .map((id) => _users[id]?.displayName ?? 'Unknown')
-        .join(', ');
-  }
-
-  String _formatTime(DateTime dt) {
-    final local = dt.toLocal();
-    final h = local.hour % 12 == 0 ? 12 : local.hour % 12;
-    final m = local.minute.toString().padLeft(2, '0');
-    final ampm = local.hour < 12 ? 'AM' : 'PM';
-    return '$h:$m $ampm';
-  }
-
-  Color _parseEventColor(QbtScheduleEvent event) {
-    try {
-      final h = event.color.replaceAll('#', '');
-      return Color(int.parse('FF$h', radix: 16));
-    } catch (_) {
-      return kBrandGreen;
-    }
-  }
-
-  Future<void> _onToggleComplete(QbtScheduleEvent event, bool next) async {
-    setState(() {
-      if (next) {
-        _completedIds.add(event.id);
-      } else {
-        _completedIds.remove(event.id);
-      }
-    });
-    await sbSetEventCompleted(eventId: event.id, completed: next);
-    if (next && mounted) {
-      final meta = _allMeta[event.id];
-      final jobType = meta?['job_type'] as String?;
-      final liftIds = (meta?['lift_ids'] as List?)?.cast<String>() ?? [];
-
-      // Ramp job: explicit Ramp Install or Ramp Removal type
-      if ((jobType == 'Ramp Install' || jobType == 'Ramp Removal') && liftIds.isEmpty && mounted) {
-        final isInstall = jobType == 'Ramp Install';
-        final fundingSource = (meta?['funding_source'] as String?) ?? 'Private';
-        final isCcals = fundingSource == 'CCALS';
-        final confirm = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
-            content: Text(
-              isInstall
-                  ? 'Select the ramps and quantities used on this job to deduct them from ${isCcals ? 'CCALS' : 'Able Home'} inventory.'
-                  : 'Select the ramps and quantities recovered on this job to add them back to ${isCcals ? 'CCALS' : 'Able Home'} inventory.',
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                child: const Text('Open Form'),
-              ),
-            ],
-          ),
-        );
-        if (confirm == true && mounted) {
-          await Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => JobAdjustmentScreen(
-                initialJobRef: event.title,
-                initialTabIndex: isInstall ? 0 : 1,
-                isCcals: isCcals,
-              ),
-            ),
-          );
-        }
-      }
-
-      if (jobType != null && liftIds.isNotEmpty && mounted) {
-        final prefs = await SharedPreferences.getInstance();
-        final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
-        final userEmail = AuthService.instance.profile?.email ?? '';
-        for (final liftId in liftIds) {
-          final lift = await sbFetchLiftById(liftId);
-          if (lift == null || !mounted) continue;
-          String? newStatus;
-          String dialogTitle = '';
-          String dialogBody = '';
-          String confirmLabel = '';
-          if (jobType == 'Stairlift Install') {
-            newStatus = 'Installed';
-            dialogTitle = 'Mark lift as Installed?';
-            dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?';
-            confirmLabel = 'Mark Installed';
-          } else if (jobType == 'Stairlift Removal') {
-            newStatus = 'Removed';
-            dialogTitle = 'Mark lift as Removed?';
-            dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?';
-            confirmLabel = 'Mark Removed';
-          }
-          if (newStatus != null && mounted) {
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: Text(dialogTitle),
-                content: Text(dialogBody),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: Text(confirmLabel),
-                  ),
-                ],
-              ),
-            );
-            if (confirm == true && mounted) {
-              await sbMarkLiftStatus(
-                liftId: lift.liftId,
-                newStatus: newStatus,
-                userEmail: userEmail,
-                userName: userName,
-                note: 'Marked $newStatus via schedule event: ${event.title}',
-                eventDate: newStatus == 'Installed' ? event.start : null,
-              );
-              if (newStatus == 'Installed' && lift.customerId.isEmpty && mounted) {
-                await _offerCreateCustomerForLift(context, lift, event);
-              }
-            }
-          } else if ((jobType == 'Stairlift Service' || jobType == 'Stairlift Annual Service') && mounted) {
-            final serviceType = jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: const Text('Log service record?'),
-                content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: const Text('Log Service'),
-                  ),
-                ],
-              ),
-            );
-            if (confirm == true && mounted) {
-              await Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => LiftServiceFormScreen(
-                    lift: lift,
-                    prefillServiceType: serviceType,
-                    prefillCustomerName: event.title,
-                    prefillDate: formatDate(DateTime.now()),
-                    offerInvoicePhoto: true,
-                  ),
-                ),
-              );
-            }
-          }
-        }
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Jobs'),
-        backgroundColor: kBrandGreenDark,
-        foregroundColor: Colors.white,
-        actions: [
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
-        ],
-        bottom: TabBar(
-          controller: _tabController,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white70,
-          indicatorColor: Colors.white,
-          tabs: const [
-            Tab(text: 'Installs'),
-            Tab(text: 'Removals'),
-            Tab(text: 'Service'),
-          ],
-        ),
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(child: Text('Error: $_error'))
-              : TabBarView(
-                  controller: _tabController,
-                  children: [
-                    _InstallsTab(
-                      events: _eventsForType(['Stairlift Install', 'Ramp Install']),
-                      allMeta: _allMeta,
-                      completedIds: _completedIds,
-                      liftsByEvent: _liftsByEvent,
-                      users: _users,
-                      onRefresh: _load,
-                      onToggleComplete: _onToggleComplete,
-                      formatTime: _formatTime,
-                      parseEventColor: _parseEventColor,
-                      assignedNames: _assignedNames,
-                    ),
-                    _RemovalsTab(
-                      events: _eventsForType(['Stairlift Removal', 'Ramp Removal', 'Schedule Removal']),
-                      allMeta: _allMeta,
-                      completedIds: _completedIds,
-                      liftsByEvent: _liftsByEvent,
-                      users: _users,
-                      onRefresh: _load,
-                      onToggleComplete: _onToggleComplete,
-                      formatTime: _formatTime,
-                      parseEventColor: _parseEventColor,
-                      assignedNames: _assignedNames,
-                    ),
-                    _ServiceTab(
-                      events: _eventsForType(['Stairlift Service', 'Stairlift Annual Service', 'Schedule Service']),
-                      allMeta: _allMeta,
-                      completedIds: _completedIds,
-                      liftsByEvent: _liftsByEvent,
-                      users: _users,
-                      onRefresh: _load,
-                      onToggleComplete: _onToggleComplete,
-                      formatTime: _formatTime,
-                      parseEventColor: _parseEventColor,
-                      assignedNames: _assignedNames,
-                    ),
-                  ],
-                ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () async {
-          final created = await Navigator.of(context).push<bool>(
-            MaterialPageRoute(
-              builder: (_) => ScheduleEventFormScreen(
-                users: _users,
-                initialDate: DateTime.now(),
-              ),
-            ),
-          );
-          if (created == true) _load();
-        },
-        backgroundColor: kBrandGreen,
-        foregroundColor: Colors.white,
-        icon: const Icon(Icons.add),
-        label: const Text('Add to Schedule'),
-      ),
-    );
-  }
-}
-
-// -----------------------
-// SHARED JOBS TAB HELPERS
-// -----------------------
-
-/// Shared card widget used by all three jobs tabs.
-class _JobEventCard extends StatelessWidget {
-  final QbtScheduleEvent event;
-  final bool completed;
-  final List<LiftRecord> lifts;
-  final String assignedNames;
-  final Color color;
-  final String Function(DateTime) formatTime;
-  final Future<void> Function(QbtScheduleEvent, bool) onToggleComplete;
-  /// Label shown on the badge when the event is completed (e.g. 'Installed', 'Removed', 'Serviced')
-  final String completedLabel;
-
-  const _JobEventCard({
-    required this.event,
-    required this.completed,
-    required this.lifts,
-    required this.assignedNames,
-    required this.color,
-    required this.formatTime,
-    required this.onToggleComplete,
-    required this.completedLabel,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final local = event.start.toLocal();
-    final dateStr =
-        '${local.month}/${local.day}/${local.year}  ${formatTime(event.start)}';
-
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () async {
-          final changed = await Navigator.of(context).push<bool>(
-            MaterialPageRoute(
-              builder: (_) => ScheduleEventDetailScreen(
-                event: event,
-                users: const {},
-                assignedNames: assignedNames,
-                color: color,
-                formatTime: formatTime,
-              ),
-            ),
-          );
-          if (changed == true && context.mounted) {
-            // Refresh is handled by the parent via onToggleComplete indirectly;
-            // for full refresh the parent passes onRefresh to the tab.
-          }
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Title row + status badge
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: Text(
-                      event.title.isNotEmpty ? event.title : 'Untitled event',
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w700, fontSize: 15),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  if (completed)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: Colors.green.shade700.withOpacity(0.12),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(
-                            color: Colors.green.shade700.withOpacity(0.4)),
-                      ),
-                      child: Text(
-                        completedLabel,
-                        style: TextStyle(
-                            color: Colors.green.shade700,
-                            fontSize: 12,
-                            fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              // Date/time
-              Row(children: [
-                Icon(Icons.schedule, size: 13, color: Colors.grey[500]),
-                const SizedBox(width: 4),
-                Text(dateStr,
-                    style:
-                        TextStyle(fontSize: 12, color: Colors.grey[600])),
-              ]),
-              // Assigned names — shown as initials avatars
-              if (assignedNames.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 6,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: assignedNames
-                      .split(', ')
-                      .map((name) => Tooltip(
-                            message: name,
-                            child: InitialsAvatar(name: name, size: 30),
-                          ))
-                      .toList(),
-                ),
-              ],
-              // Location
-              if (event.location.isNotEmpty) ...[
-                const SizedBox(height: 2),
-                Row(children: [
-                  Icon(Icons.location_on_outlined,
-                      size: 13, color: Colors.grey[500]),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(event.location,
-                        style: TextStyle(
-                            fontSize: 12, color: Colors.grey[600])),
-                  ),
-                ]),
-              ],
-              const SizedBox(height: 8),
-              // Lift section
-              if (lifts.isEmpty)
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    border: Border.all(
-                        color: Colors.grey.shade400,
-                        style: BorderStyle.solid),
-                    borderRadius: BorderRadius.circular(8),
-                    color: Colors.grey.shade50,
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.link_off,
-                          size: 14, color: Colors.grey.shade500),
-                      const SizedBox(width: 6),
-                      Text('No lift assigned',
-                          style: TextStyle(
-                              fontSize: 12,
-                              color: Colors.grey.shade500)),
-                    ],
-                  ),
-                )
-              else
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 4,
-                  children: lifts.map((lift) {
-                    final label =
-                        '${lift.brand} ${lift.series} — SN: ${lift.serialNumber}';
-                    return Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Colors.orange.shade50,
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                            color: Colors.orange.shade200),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(label,
-                              style: const TextStyle(fontSize: 12)),
-                          const SizedBox(width: 6),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: completed
-                                  ? Colors.green.shade700
-                                      .withOpacity(0.15)
-                                  : Colors.orange.shade700
-                                      .withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            child: Text(
-                              completed ? completedLabel : 'Assigned',
-                              style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w600,
-                                color: completed
-                                    ? Colors.green.shade700
-                                    : Colors.orange.shade700,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    );
-                  }).toList(),
-                ),
-              // Complete toggle row
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton.icon(
-                    onPressed: () =>
-                        onToggleComplete(event, !completed),
-                    icon: Icon(
-                      completed
-                          ? Icons.check_circle
-                          : Icons.radio_button_unchecked,
-                      size: 16,
-                      color: completed ? Colors.green : Colors.black54,
-                    ),
-                    label: Text(
-                      completed ? 'Completed' : 'Mark Complete',
-                      style: TextStyle(
-                        color:
-                            completed ? Colors.green : Colors.black54,
-                        fontSize: 13,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-Widget _jobSectionHeader(String title) {
-  return Padding(
-    padding: const EdgeInsets.fromLTRB(4, 8, 4, 4),
-    child: Text(title,
-        style: const TextStyle(
-            fontWeight: FontWeight.w700,
-            fontSize: 14,
-            color: Colors.black54)),
-  );
-}
-
-// -----------------------
-// SCHEDULE NOTE CARD
-// A compact card for "To Be Scheduled" entries with a Convert button.
-// -----------------------
-
-class _ScheduleNoteCard extends StatelessWidget {
-  final QbtScheduleEvent event;
-  final Color color;
-  final String Function(DateTime) formatTime;
-  final String assignedNames;
-  final String convertLabel;
-  final VoidCallback onConvert;
-
-  const _ScheduleNoteCard({
-    required this.event,
-    required this.color,
-    required this.formatTime,
-    required this.assignedNames,
-    required this.convertLabel,
-    required this.onConvert,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final local = event.start.toLocal();
-    final dateStr = '${local.month}/${local.day}/${local.year}';
-    final timeStr = event.allDay ? 'All day' : formatTime(event.start);
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: Colors.amber.shade300, width: 1.5),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-        child: Row(
-          children: [
-            Container(
-              width: 4,
-              height: 48,
-              decoration: BoxDecoration(
-                color: Colors.amber.shade600,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    event.title,
-                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    '$dateStr · $timeStr'
-                    '${assignedNames.isNotEmpty ? ' · $assignedNames' : ''}',
-                    style: const TextStyle(color: Colors.black54, fontSize: 12),
-                  ),
-                  if (event.notes.isNotEmpty)
-                    Text(
-                      event.notes,
-                      style: const TextStyle(color: Colors.black45, fontSize: 12),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            TextButton(
-              onPressed: onConvert,
-              style: TextButton.styleFrom(
-                foregroundColor: kBrandGreen,
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              child: Text(convertLabel, style: const TextStyle(fontSize: 12)),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// -----------------------
-// INSTALLS TAB
-// -----------------------
-
-class _InstallsTab extends StatelessWidget {
-  final List<QbtScheduleEvent> events;
-  final Map<String, Map<String, dynamic>> allMeta;
-  final Set<String> completedIds;
-  final Map<String, List<LiftRecord>> liftsByEvent;
-  final Map<String, QbtUser> users;
-  final Future<void> Function() onRefresh;
-  final Future<void> Function(QbtScheduleEvent, bool) onToggleComplete;
-  final String Function(DateTime) formatTime;
-  final Color Function(QbtScheduleEvent) parseEventColor;
-  final String Function(QbtScheduleEvent) assignedNames;
-
-  const _InstallsTab({
-    required this.events,
-    required this.allMeta,
-    required this.completedIds,
-    required this.liftsByEvent,
-    required this.users,
-    required this.onRefresh,
-    required this.onToggleComplete,
-    required this.formatTime,
-    required this.parseEventColor,
-    required this.assignedNames,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final oneWeekAgo = now.subtract(const Duration(days: 7));
-    final oneWeekAhead = now.add(const Duration(days: 7));
-    final pending = events
-        .where((e) => !completedIds.contains(e.id) && !e.start.isAfter(oneWeekAhead))
-        .toList()
-      ..sort((a, b) => a.start.compareTo(b.start));
-    final completed = events
-        .where((e) => completedIds.contains(e.id) && e.start.isAfter(oneWeekAgo))
-        .toList()
-      ..sort((a, b) => b.start.compareTo(a.start));
-
-    return RefreshIndicator(
-      onRefresh: onRefresh,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(8, 8, 8, 80),
-        children: [
-          _jobSectionHeader('Pending Installs (${pending.length})'),
-          if (pending.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('No pending installs.',
-                  style: TextStyle(color: Colors.black45)),
-            )
-          else
-            ...pending.map((e) => _JobEventCard(
-                  event: e,
-                  completed: false,
-                  lifts: liftsByEvent[e.id] ?? [],
-                  assignedNames: assignedNames(e),
-                  color: parseEventColor(e),
-                  formatTime: formatTime,
-                  onToggleComplete: onToggleComplete,
-                  completedLabel: 'Installed',
-                )),
-          const SizedBox(height: 8),
-          _jobSectionHeader('Completed Installs (${completed.length})'),
-          if (completed.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('No completed installs.',
-                  style: TextStyle(color: Colors.black45)),
-            )
-          else
-            ...completed.map((e) => _JobEventCard(
-                  event: e,
-                  completed: true,
-                  lifts: liftsByEvent[e.id] ?? [],
-                  assignedNames: assignedNames(e),
-                  color: parseEventColor(e),
-                  formatTime: formatTime,
-                  onToggleComplete: onToggleComplete,
-                  completedLabel: 'Installed',
-                )),
-        ],
-      ),
-    );
-  }
-}
-
-// -----------------------
-// REMOVALS TAB
-// -----------------------
-
-class _RemovalsTab extends StatefulWidget {
-  final List<QbtScheduleEvent> events;
-  final Map<String, Map<String, dynamic>> allMeta;
-  final Set<String> completedIds;
-  final Map<String, List<LiftRecord>> liftsByEvent;
-  final Map<String, QbtUser> users;
-  final Future<void> Function() onRefresh;
-  final Future<void> Function(QbtScheduleEvent, bool) onToggleComplete;
-  final String Function(DateTime) formatTime;
-  final Color Function(QbtScheduleEvent) parseEventColor;
-  final String Function(QbtScheduleEvent) assignedNames;
-
-  const _RemovalsTab({
-    required this.events,
-    required this.allMeta,
-    required this.completedIds,
-    required this.liftsByEvent,
-    required this.users,
-    required this.onRefresh,
-    required this.onToggleComplete,
-    required this.formatTime,
-    required this.parseEventColor,
-    required this.assignedNames,
-  });
-
-  @override
-  State<_RemovalsTab> createState() => _RemovalsTabState();
-}
-
-class _RemovalsTabState extends State<_RemovalsTab> {
-  String _resolvedJobType(QbtScheduleEvent e) {
-    final jt = widget.allMeta[e.id]?['job_type'] as String?;
-    if (jt != null && jt.isNotEmpty) return jt;
-    return inferJobTypeFromTitle(e.title) ?? '';
-  }
-
-  Future<void> _convertToRemoval(BuildContext context, QbtScheduleEvent event) async {
-    final prefs = await SharedPreferences.getInstance();
-    final userEmail = AuthService.instance.profile?.email ?? '';
-    final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
-
-    final nameCtrl = TextEditingController(text: event.title);
-    final addrCtrl = TextEditingController(text: event.location);
-    final phoneCtrl = TextEditingController();
-    final notesCtrl = TextEditingController(text: event.notes);
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Convert to Removal'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Customer name')),
-              const SizedBox(height: 8),
-              TextField(controller: addrCtrl, decoration: const InputDecoration(labelText: 'Address')),
-              const SizedBox(height: 8),
-              TextField(controller: phoneCtrl, decoration: const InputDecoration(labelText: 'Phone')),
-              const SizedBox(height: 8),
-              TextField(controller: notesCtrl, decoration: const InputDecoration(labelText: 'Notes'), maxLines: 3),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-            child: const Text('Create Removal'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !context.mounted) return;
-
-    await sbUpsertRemovalJob(
-      userEmail: userEmail,
-      userName: userName,
-      customerName: nameCtrl.text.trim(),
-      address: addrCtrl.text.trim(),
-      phone: phoneCtrl.text.trim(),
-      liftType: '',
-      notes: notesCtrl.text.trim(),
-    );
-    // Upgrade the event's job type so it shows as an actual removal
-    await sbSetEventJobType(event.id, 'Removal');
-    await widget.onRefresh();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final oneWeekAgo = now.subtract(const Duration(days: 7));
-    final oneWeekAhead = now.add(const Duration(days: 7));
-
-    final toSchedule = widget.events
-        .where((e) => !widget.completedIds.contains(e.id) && _resolvedJobType(e) == 'Schedule Removal')
-        .toList()
-      ..sort((a, b) => a.start.compareTo(b.start));
-    final pending = widget.events
-        .where((e) => !widget.completedIds.contains(e.id) &&
-            !e.start.isAfter(oneWeekAhead) &&
-            _resolvedJobType(e) != 'Schedule Removal')
-        .toList()
-      ..sort((a, b) => a.start.compareTo(b.start));
-    final completed = widget.events
-        .where((e) => widget.completedIds.contains(e.id) &&
-            e.start.isAfter(oneWeekAgo) &&
-            _resolvedJobType(e) != 'Schedule Removal')
-        .toList()
-      ..sort((a, b) => b.start.compareTo(a.start));
-
-    return RefreshIndicator(
-      onRefresh: widget.onRefresh,
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(8, 8, 8, 80),
-        children: [
-          if (toSchedule.isNotEmpty) ...[
-            _jobSectionHeader('To Be Scheduled (${toSchedule.length})'),
-            ...toSchedule.map((e) => _ScheduleNoteCard(
-                  event: e,
-                  color: widget.parseEventColor(e),
-                  formatTime: widget.formatTime,
-                  assignedNames: widget.assignedNames(e),
-                  convertLabel: 'Convert to Removal',
-                  onConvert: () => _convertToRemoval(context, e),
-                )),
-            const SizedBox(height: 8),
-          ],
-          _jobSectionHeader('Pending Removals (${pending.length})'),
-          if (pending.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('No pending removals.',
-                  style: TextStyle(color: Colors.black45)),
-            )
-          else
-            ...pending.map((e) => _JobEventCard(
-                  event: e,
-                  completed: false,
-                  lifts: widget.liftsByEvent[e.id] ?? [],
-                  assignedNames: widget.assignedNames(e),
-                  color: widget.parseEventColor(e),
-                  formatTime: widget.formatTime,
-                  onToggleComplete: widget.onToggleComplete,
-                  completedLabel: 'Removed',
-                )),
-          const SizedBox(height: 8),
-          _jobSectionHeader('Completed Removals (${completed.length})'),
-          if (completed.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('No completed removals.',
-                  style: TextStyle(color: Colors.black45)),
-            )
-          else
-            ...completed.map((e) => _JobEventCard(
-                  event: e,
-                  completed: true,
-                  lifts: widget.liftsByEvent[e.id] ?? [],
-                  assignedNames: widget.assignedNames(e),
-                  color: widget.parseEventColor(e),
-                  formatTime: widget.formatTime,
-                  onToggleComplete: widget.onToggleComplete,
-                  completedLabel: 'Removed',
-                )),
-        ],
-      ),
-    );
-  }
-}
-
-// -----------------------
-// SERVICE TAB
-// -----------------------
-
-class _ServiceTab extends StatefulWidget {
-  final List<QbtScheduleEvent> events;
-  final Map<String, Map<String, dynamic>> allMeta;
-  final Set<String> completedIds;
-  final Map<String, List<LiftRecord>> liftsByEvent;
-  final Map<String, QbtUser> users;
-  final Future<void> Function() onRefresh;
-  final Future<void> Function(QbtScheduleEvent, bool) onToggleComplete;
-  final String Function(DateTime) formatTime;
-  final Color Function(QbtScheduleEvent) parseEventColor;
-  final String Function(QbtScheduleEvent) assignedNames;
-
-  const _ServiceTab({
-    required this.events,
-    required this.allMeta,
-    required this.completedIds,
-    required this.liftsByEvent,
-    required this.users,
-    required this.onRefresh,
-    required this.onToggleComplete,
-    required this.formatTime,
-    required this.parseEventColor,
-    required this.assignedNames,
-  });
-
-  @override
-  State<_ServiceTab> createState() => _ServiceTabState();
-}
-
-class _ServiceTabState extends State<_ServiceTab> {
-  String _search = '';
-
-  String _resolvedJobType(QbtScheduleEvent e) {
-    final jt = widget.allMeta[e.id]?['job_type'] as String?;
-    if (jt != null && jt.isNotEmpty) return jt;
-    return inferJobTypeFromTitle(e.title) ?? '';
-  }
-
-  Future<void> _convertToServiceCall(BuildContext context, QbtScheduleEvent event) async {
-    final prefs = await SharedPreferences.getInstance();
-    final userEmail = AuthService.instance.profile?.email ?? '';
-    final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
-
-    final nameCtrl = TextEditingController(text: event.title);
-    final addrCtrl = TextEditingController(text: event.location);
-    final phoneCtrl = TextEditingController();
-    final notesCtrl = TextEditingController(text: event.notes);
-
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Convert to Service Call'),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Customer name')),
-              const SizedBox(height: 8),
-              TextField(controller: addrCtrl, decoration: const InputDecoration(labelText: 'Address')),
-              const SizedBox(height: 8),
-              TextField(controller: phoneCtrl, decoration: const InputDecoration(labelText: 'Phone')),
-              const SizedBox(height: 8),
-              TextField(controller: notesCtrl, decoration: const InputDecoration(labelText: 'Notes'), maxLines: 3),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-            child: const Text('Create Service Call'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !context.mounted) return;
-
-    await sbUpsertServiceJob(
-      userEmail: userEmail,
-      userName: userName,
-      jobType: 'Service Call',
-      customerName: nameCtrl.text.trim(),
-      address: addrCtrl.text.trim(),
-      phone: phoneCtrl.text.trim(),
-      liftType: '',
-      dateRequested: formatDate(DateTime.now()),
-      notes: notesCtrl.text.trim(),
-    );
-    // Upgrade the event's job type so it shows as an actual service call
-    await sbSetEventJobType(event.id, 'Service');
-    await widget.onRefresh();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final allEvents = widget.events;
-    final filtered = allEvents.where((e) {
-      if (_search.isEmpty) return true;
-      return e.title.toLowerCase().contains(_search.toLowerCase()) ||
-          e.location.toLowerCase().contains(_search.toLowerCase());
-    }).toList();
-
-    final now = DateTime.now();
-    final oneWeekAgo = now.subtract(const Duration(days: 7));
-    final oneWeekAhead = now.add(const Duration(days: 7));
-
-    // Split: scheduling notes vs actual service calls
-    final toSchedule = filtered
-        .where((e) => !widget.completedIds.contains(e.id) && _resolvedJobType(e) == 'Schedule Service')
-        .toList()
-      ..sort((a, b) => a.start.compareTo(b.start));
-    final pending = filtered
-        .where((e) => !widget.completedIds.contains(e.id) &&
-            !e.start.isAfter(oneWeekAhead) &&
-            _resolvedJobType(e) != 'Schedule Service')
-        .toList()
-      ..sort((a, b) => a.start.compareTo(b.start));
-    final completed = filtered
-        .where((e) => widget.completedIds.contains(e.id) &&
-            e.start.isAfter(oneWeekAgo) &&
-            _resolvedJobType(e) != 'Schedule Service')
-        .toList()
-      ..sort((a, b) => b.start.compareTo(a.start));
-
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-          child: TextField(
-            style: const TextStyle(color: Colors.black),
-            decoration: InputDecoration(
-              hintText: 'Search...',
-              prefixIcon: const Icon(Icons.search),
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-              contentPadding: const EdgeInsets.symmetric(vertical: 8),
-              isDense: true,
-              suffixIcon: _search.isNotEmpty
-                  ? IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: () => setState(() => _search = ''),
-                    )
-                  : null,
-            ),
-            onChanged: (v) => setState(() => _search = v.trim()),
-          ),
-        ),
-        Expanded(
-          child: RefreshIndicator(
-            onRefresh: widget.onRefresh,
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(8, 4, 8, 80),
-              children: [
-                if (toSchedule.isNotEmpty) ...[
-                  _jobSectionHeader('To Be Scheduled (${toSchedule.length})'),
-                  ...toSchedule.map((e) => _ScheduleNoteCard(
-                        event: e,
-                        color: widget.parseEventColor(e),
-                        formatTime: widget.formatTime,
-                        assignedNames: widget.assignedNames(e),
-                        convertLabel: 'Convert to Service Call',
-                        onConvert: () => _convertToServiceCall(context, e),
-                      )),
-                  const SizedBox(height: 8),
-                ],
-                _jobSectionHeader('Pending Service (${pending.length})'),
-                if (pending.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text('No pending service jobs.',
-                        style: TextStyle(color: Colors.black45)),
-                  )
-                else
-                  ...pending.map((e) => _JobEventCard(
-                        event: e,
-                        completed: false,
-                        lifts: widget.liftsByEvent[e.id] ?? [],
-                        assignedNames: widget.assignedNames(e),
-                        color: widget.parseEventColor(e),
-                        formatTime: widget.formatTime,
-                        onToggleComplete: widget.onToggleComplete,
-                        completedLabel: 'Serviced',
-                      )),
-                const SizedBox(height: 8),
-                _jobSectionHeader('Completed Service (${completed.length})'),
-                if (completed.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text('No completed service jobs.',
-                        style: TextStyle(color: Colors.black45)),
-                  )
-                else
-                  ...completed.map((e) => _JobEventCard(
-                        event: e,
-                        completed: true,
-                        lifts: widget.liftsByEvent[e.id] ?? [],
-                        assignedNames: widget.assignedNames(e),
-                        color: widget.parseEventColor(e),
-                        formatTime: widget.formatTime,
-                        onToggleComplete: widget.onToggleComplete,
-                        completedLabel: 'Serviced',
-                      )),
-              ],
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-
-// =======================
-// REMOVAL JOB FORM SCREEN
-// =======================
-
-class RemovalJobFormScreen extends StatefulWidget {
-  final RemovalJobRecord? existing;
-  const RemovalJobFormScreen({super.key, this.existing});
-
-  @override
-  State<RemovalJobFormScreen> createState() => _RemovalJobFormScreenState();
-}
-
-class _RemovalJobFormScreenState extends State<RemovalJobFormScreen> {
-  final _formKey = GlobalKey<FormState>();
-  bool _saving = false;
-  String _fundingSource = 'Private';
-
-  late final TextEditingController _titleController;
-  late final TextEditingController _nameController;
-  late final TextEditingController _addressController;
-  late final TextEditingController _phoneController;
-  late final TextEditingController _liftTypeController;
-  late final TextEditingController _scheduledDateController;
-  late final TextEditingController _notesController;
-
-  String? _linkedLiftId;
-  String? _linkedSerialNumber;
-  String? _linkedLiftLabel;
-
-  static const _fundingSources = ['Private', 'VA', 'CCALS', 'NaviCare', 'Summit', 'Fallon', 'Mass Health', 'Other'];
-
-  @override
-  void initState() {
-    super.initState();
-    final e = widget.existing;
-    _fundingSource = e?.fundingSource ?? 'Private';
-    _titleController = TextEditingController(text: e?.title ?? '');
-    _nameController = TextEditingController(text: e?.customerName ?? '');
-    _addressController = TextEditingController(text: e?.address ?? '');
-    _phoneController = TextEditingController(text: e?.phone ?? '');
-    _liftTypeController = TextEditingController(text: e?.liftType ?? '');
-    _scheduledDateController = TextEditingController(
-        text: e != null ? normalizeDateDisplay(e.scheduledDate) : '');
-    _notesController = TextEditingController(text: e?.notes ?? '');
-    if (e != null && e.liftId.isNotEmpty) {
-      _linkedLiftId = e.liftId;
-      _linkedSerialNumber = e.serialNumber;
-      _linkedLiftLabel = e.liftType.isNotEmpty ? e.liftType : 'SN: ${e.serialNumber}';
-    }
-  }
-
-  @override
-  void dispose() {
-    _titleController.dispose();
-    _nameController.dispose();
-    _addressController.dispose();
-    _phoneController.dispose();
-    _liftTypeController.dispose();
-    _scheduledDateController.dispose();
-    _notesController.dispose();
-    super.dispose();
-  }
-
-  void _linkLift(LiftRecord lift) {
-    final label = [lift.brand, lift.series,
-      if (lift.orientation.isNotEmpty && lift.orientation != 'N/A') lift.orientation,
-    ].where((s) => s.isNotEmpty).join(' ') +
-        (lift.serialNumber.isNotEmpty ? ' — SN: ${lift.serialNumber}' : '');
-    setState(() {
-      _linkedLiftId = lift.liftId;
-      _linkedSerialNumber = lift.serialNumber;
-      _linkedLiftLabel = label;
-      _liftTypeController.text = label;
-    });
-  }
-
-  void _unlinkLift() {
-    setState(() {
-      _linkedLiftId = null;
-      _linkedSerialNumber = null;
-      _linkedLiftLabel = null;
-      _liftTypeController.clear();
-    });
-  }
-
-  Future<void> _openLiftPicker() async {
-    final result = await showDialog(
-      context: context,
-      builder: (_) => const _LiftPickerDialog(),
-    );
-    if (result is LiftRecord) {
-      _linkLift(result);
-    } else if (result is _AddNewLiftSentinel) {
-      if (!mounted) return;
-      final saved = await Navigator.of(context).push<bool>(
-        MaterialPageRoute(builder: (_) => const LiftFormScreen()),
-      );
-      if (saved == true) {
-        try {
-          final lifts = await sbFetchLifts();
-          if (lifts.isNotEmpty) _linkLift(lifts.last);
-        } catch (_) {}
-      }
-    }
-  }
-
-  Future<void> _pickDate(TextEditingController controller) async {
-    final now = DateTime.now();
-    DateTime initial = now;
-    if (controller.text.isNotEmpty) {
-      try {
-        final parts = controller.text.split('/');
-        if (parts.length == 3) {
-          initial = DateTime(int.parse(parts[2]), int.parse(parts[0]), int.parse(parts[1]));
-        }
-      } catch (_) {}
-    }
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: initial,
-      firstDate: DateTime(2000),
-      lastDate: DateTime(2100),
-    );
-    if (picked != null) controller.text = formatDate(picked);
-  }
-
-  Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) return;
-    setState(() => _saving = true);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await sbUpsertRemovalJob(
-        userEmail: AuthService.instance.profile?.email ?? '',
-        userName: prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
-        jobId: widget.existing?.jobId,
-        title: _titleController.text.trim(),
-        customerName: _nameController.text.trim(),
-        address: _addressController.text.trim(),
-        phone: _phoneController.text.trim(),
-        liftType: _liftTypeController.text.trim(),
-        scheduledDate: _scheduledDateController.text.trim(),
-        notes: _notesController.text.trim(),
-        liftId: _linkedLiftId ?? '',
-        serialNumber: _linkedSerialNumber ?? '',
-        fundingSource: _fundingSource,
-      );
-      if (mounted) Navigator.of(context).pop(true);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isEditing = widget.existing != null;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(isEditing ? 'Edit Removal Job' : 'Add Removal Job'),
-        backgroundColor: kBrandGreenDark,
-        foregroundColor: Colors.white,
-      ),
-      body: Form(
-        key: _formKey,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              DropdownButtonFormField<String>(
-                value: _fundingSource,
-                decoration: const InputDecoration(labelText: 'Funding source', border: OutlineInputBorder()),
-                items: _fundingSources.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
-                onChanged: (v) => setState(() => _fundingSource = v ?? 'Private'),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _titleController,
-                decoration: const InputDecoration(
-                    labelText: 'Title *', border: OutlineInputBorder()),
-                textCapitalization: TextCapitalization.sentences,
-                validator: (v) =>
-                    v == null || v.trim().isEmpty ? 'Required' : null,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _nameController,
-                decoration: const InputDecoration(
-                    labelText: 'Customer name', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _addressController,
-                decoration: const InputDecoration(
-                    labelText: 'Address', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _phoneController,
-                decoration: const InputDecoration(
-                    labelText: 'Phone', border: OutlineInputBorder()),
-                keyboardType: TextInputType.phone,
-              ),
-              const SizedBox(height: 12),
-              if (_linkedLiftLabel != null) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: kBrandGreen),
-                    borderRadius: BorderRadius.circular(8),
-                    color: kBrandGreen.withOpacity(0.05),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.stairs, color: kBrandGreen, size: 20),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(_linkedLiftLabel!,
-                            style: const TextStyle(fontWeight: FontWeight.w500)),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 18),
-                        tooltip: 'Unlink lift',
-                        onPressed: _unlinkLift,
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    ],
-                  ),
-                ),
-              ] else ...[
-                OutlinedButton.icon(
-                  onPressed: _openLiftPicker,
-                  icon: const Icon(Icons.link),
-                  label: const Text('Link a lift from system'),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(double.infinity, 48),
-                    foregroundColor: kBrandGreen,
-                    side: const BorderSide(color: kBrandGreen),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _liftTypeController,
-                  decoration: const InputDecoration(
-                      labelText: 'Or type lift description manually',
-                      border: OutlineInputBorder()),
-                ),
-              ],
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _scheduledDateController,
-                readOnly: true,
-                decoration: const InputDecoration(
-                  labelText: 'Scheduled date (optional)',
-                  border: OutlineInputBorder(),
-                  suffixIcon: Icon(Icons.calendar_today_outlined),
-                ),
-                onTap: () => _pickDate(_scheduledDateController),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _notesController,
-                decoration: const InputDecoration(
-                    labelText: 'Notes', border: OutlineInputBorder()),
-                maxLines: 3,
-              ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _saving ? null : _save,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: kBrandGreen,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  child: _saving
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : Text(isEditing ? 'Save changes' : 'Add removal job'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// =======================
-// SERVICE JOB FORM SCREEN
-// =======================
-
-// =======================
-// WEB LEADS SCREEN + WIDGETS
-// =======================
-
-class WebLeadsScreen extends StatefulWidget {
-  const WebLeadsScreen({super.key});
-
-  @override
-  State<WebLeadsScreen> createState() => _WebLeadsScreenState();
-}
-
-class _WebLeadsScreenState extends State<WebLeadsScreen> {
-  List<WebLeadRecord> _leads = [];
-  bool _loading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    setState(() => _loading = true);
-    try {
-      final leads = await sbFetchWebLeads();
-      if (mounted) setState(() { _leads = leads; _loading = false; });
-    } catch (_) {
-      if (mounted) setState(() => _loading = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Row(
-          children: [
-            const Text('Web Leads'),
-            if (_leads.any((l) => l.status == 'New')) ...[
-              const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                decoration: BoxDecoration(color: kBrandGreen, borderRadius: BorderRadius.circular(10)),
-                child: Text(
-                  '${_leads.where((l) => l.status == 'New').length} new',
-                  style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w700),
-                ),
-              ),
-            ],
-          ],
-        ),
-        actions: [
-          IconButton(icon: const Icon(Icons.refresh), onPressed: _load),
-        ],
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _WebLeadsTab(leads: _leads, onRefresh: _load),
-    );
-  }
-}
-
-class _WebLeadsTab extends StatelessWidget {
-  final List<WebLeadRecord> leads;
-  final Future<void> Function() onRefresh;
-
-  const _WebLeadsTab({required this.leads, required this.onRefresh});
-
-  @override
-  Widget build(BuildContext context) {
-    if (leads.isEmpty) {
-      return const Center(child: Text('No web leads yet.', style: TextStyle(color: Colors.grey)));
-    }
-    return RefreshIndicator(
-      onRefresh: onRefresh,
-      child: ListView.builder(
-        padding: const EdgeInsets.all(12),
-        itemCount: leads.length,
-        itemBuilder: (context, i) => _WebLeadCard(lead: leads[i], onRefresh: onRefresh),
-      ),
-    );
-  }
-}
-
-class _WebLeadCard extends StatelessWidget {
-  final WebLeadRecord lead;
-  final Future<void> Function() onRefresh;
-
-  const _WebLeadCard({required this.lead, required this.onRefresh});
-
-  Color get _statusColor {
-    switch (lead.status) {
-      case 'Contacted': return Colors.blue;
-      case 'Closed': return Colors.grey;
-      default: return kBrandGreen;
-    }
-  }
-
-  Future<void> _delete(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Delete lead?'),
-        content: Text('Remove the lead from ${lead.name}? This cannot be undone.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade600, foregroundColor: Colors.white),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    try {
-      await sbDeleteWebLead(id: lead.id);
-      await onRefresh();
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
-      }
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final dt = lead.createdAt.toLocal();
-    final dateStr = '${dt.month}/${dt.day}/${dt.year}';
-
-    return Dismissible(
-      key: ValueKey(lead.id),
-      direction: DismissDirection.endToStart,
-      background: Container(
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 20),
-        decoration: BoxDecoration(color: Colors.red.shade600, borderRadius: BorderRadius.circular(14)),
-        child: const Icon(Icons.delete_outline, color: Colors.white, size: 26),
-      ),
-      confirmDismiss: (_) async {
-        await _delete(context);
-        return false;
-      },
-      child: Card(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Expanded(
-                    child: Text(lead.name,
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-                        overflow: TextOverflow.ellipsis),
-                  ),
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: _statusColor.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: _statusColor.withValues(alpha: 0.4)),
-                    ),
-                    child: Text(lead.status,
-                        style: TextStyle(color: _statusColor, fontSize: 12, fontWeight: FontWeight.w600)),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Text(lead.email, style: const TextStyle(color: Colors.blue, fontSize: 13)),
-              if (lead.phone.isNotEmpty) Text(lead.phone, style: const TextStyle(fontSize: 13)),
-              const SizedBox(height: 6),
-              Text(lead.message, maxLines: 3, overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13)),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    '$dateStr · ${lead.source == 'hero_form' ? 'Hero Form' : 'Contact Form'}',
-                    style: const TextStyle(color: Colors.grey, fontSize: 11),
-                  ),
-                  Row(
-                    children: [
-                      PopupMenuButton<String>(
-                        onSelected: (status) async {
-                          await sbUpdateWebLeadStatus(id: lead.id, status: status);
-                          await onRefresh();
-                        },
-                        itemBuilder: (_) => ['New', 'Contacted', 'Closed']
-                            .map((s) => PopupMenuItem(value: s, child: Text(s)))
-                            .toList(),
-                        child: const Text('Update Status',
-                            style: TextStyle(color: Colors.blue, fontSize: 12)),
-                      ),
-                      const SizedBox(width: 12),
-                      GestureDetector(
-                        onTap: () => _delete(context),
-                        child: Icon(Icons.delete_outline, size: 18, color: Colors.red.shade400),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// =======================
-// SERVICE JOB FORM SCREEN
-// =======================
-
-class ServiceJobFormScreen extends StatefulWidget {
-  final ServiceJobRecord? existing;
-  const ServiceJobFormScreen({super.key, this.existing});
-
-  @override
-  State<ServiceJobFormScreen> createState() => _ServiceJobFormScreenState();
-}
-
-class _ServiceJobFormScreenState extends State<ServiceJobFormScreen> {
-  final _formKey = GlobalKey<FormState>();
-  bool _saving = false;
-  String _jobType = 'Service';
-  String _fundingSource = 'Private';
-
-  late final TextEditingController _titleController;
-  late final TextEditingController _nameController;
-  late final TextEditingController _addressController;
-  late final TextEditingController _phoneController;
-  late final TextEditingController _liftTypeController;
-  late final TextEditingController _dateRequestedController;
-  late final TextEditingController _scheduledDateController;
-  late final TextEditingController _notesController;
-
-  String? _linkedLiftId;
-  String? _linkedSerialNumber;
-  String? _linkedLiftLabel;
-
-  static const _fundingSources = ['Private', 'VA', 'CCALS', 'NaviCare', 'Summit', 'Fallon', 'Mass Health', 'Other'];
-
-  @override
-  void initState() {
-    super.initState();
-    final e = widget.existing;
-    _jobType = e?.jobType ?? 'Service';
-    _fundingSource = e?.fundingSource ?? 'Private';
-    _titleController = TextEditingController(text: e?.title ?? '');
-    _nameController = TextEditingController(text: e?.customerName ?? '');
-    _addressController = TextEditingController(text: e?.address ?? '');
-    _phoneController = TextEditingController(text: e?.phone ?? '');
-    _liftTypeController = TextEditingController(text: e?.liftType ?? '');
-    _dateRequestedController = TextEditingController(
-        text: e != null ? normalizeDateDisplay(e.dateRequested) : '');
-    _scheduledDateController = TextEditingController(
-        text: e != null ? normalizeDateDisplay(e.scheduledDate) : '');
-    _notesController = TextEditingController(text: e?.notes ?? '');
-    if (e != null && e.liftId.isNotEmpty) {
-      _linkedLiftId = e.liftId;
-      _linkedSerialNumber = e.serialNumber;
-      _linkedLiftLabel = e.liftType.isNotEmpty ? e.liftType : 'SN: ${e.serialNumber}';
-    }
-  }
-
-  @override
-  void dispose() {
-    _titleController.dispose();
-    _nameController.dispose();
-    _addressController.dispose();
-    _phoneController.dispose();
-    _liftTypeController.dispose();
-    _dateRequestedController.dispose();
-    _scheduledDateController.dispose();
-    _notesController.dispose();
-    super.dispose();
-  }
-
-  void _linkLift(LiftRecord lift) {
-    final label = [lift.brand, lift.series,
-      if (lift.orientation.isNotEmpty && lift.orientation != 'N/A') lift.orientation,
-    ].where((s) => s.isNotEmpty).join(' ') +
-        (lift.serialNumber.isNotEmpty ? ' — SN: ${lift.serialNumber}' : '');
-    setState(() {
-      _linkedLiftId = lift.liftId;
-      _linkedSerialNumber = lift.serialNumber;
-      _linkedLiftLabel = label;
-      _liftTypeController.text = label;
-    });
-  }
-
-  void _unlinkLift() {
-    setState(() {
-      _linkedLiftId = null;
-      _linkedSerialNumber = null;
-      _linkedLiftLabel = null;
-      _liftTypeController.clear();
-    });
-  }
-
-  Future<void> _openLiftPicker() async {
-    final result = await showDialog(
-      context: context,
-      builder: (_) => const _LiftPickerDialog(),
-    );
-    if (result is LiftRecord) {
-      _linkLift(result);
-    } else if (result is _AddNewLiftSentinel) {
-      if (!mounted) return;
-      final saved = await Navigator.of(context).push<bool>(
-        MaterialPageRoute(builder: (_) => const LiftFormScreen()),
-      );
-      if (saved == true) {
-        try {
-          final lifts = await sbFetchLifts();
-          if (lifts.isNotEmpty) _linkLift(lifts.last);
-        } catch (_) {}
-      }
-    }
-  }
-
-  Future<void> _pickDate(TextEditingController controller) async {
-    final now = DateTime.now();
-    DateTime initial = now;
-    if (controller.text.isNotEmpty) {
-      try {
-        final parts = controller.text.split('/');
-        if (parts.length == 3) {
-          initial = DateTime(int.parse(parts[2]), int.parse(parts[0]), int.parse(parts[1]));
-        }
-      } catch (_) {}
-    }
-    final picked = await showDatePicker(
-      context: context,
-      initialDate: initial,
-      firstDate: DateTime(2000),
-      lastDate: DateTime(2100),
-    );
-    if (picked != null) controller.text = formatDate(picked);
-  }
-
-  Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) return;
-    setState(() => _saving = true);
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      await sbUpsertServiceJob(
-        userEmail: AuthService.instance.profile?.email ?? '',
-        userName: prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '',
-        jobId: widget.existing?.jobId,
-        jobType: _jobType,
-        title: _titleController.text.trim(),
-        customerName: _nameController.text.trim(),
-        address: _addressController.text.trim(),
-        phone: _phoneController.text.trim(),
-        liftType: _liftTypeController.text.trim(),
-        dateRequested: _dateRequestedController.text.trim(),
-        scheduledDate: _scheduledDateController.text.trim(),
-        notes: _notesController.text.trim(),
-        liftId: _linkedLiftId ?? '',
-        serialNumber: _linkedSerialNumber ?? '',
-        fundingSource: _fundingSource,
-      );
-      if (mounted) Navigator.of(context).pop(true);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final isEditing = widget.existing != null;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(isEditing ? 'Edit Service Job' : 'Add Service Job'),
-        backgroundColor: kBrandGreenDark,
-        foregroundColor: Colors.white,
-      ),
-      body: Form(
-        key: _formKey,
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              DropdownButtonFormField<String>(
-                value: _jobType,
-                decoration: const InputDecoration(
-                    labelText: 'Service type', border: OutlineInputBorder()),
-                items: const [
-                  DropdownMenuItem(value: 'Service', child: Text('Service')),
-                  DropdownMenuItem(
-                      value: 'Annual Service', child: Text('Annual Service')),
-                ],
-                onChanged: (v) => setState(() => _jobType = v ?? 'Service'),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<String>(
-                value: _fundingSource,
-                decoration: const InputDecoration(labelText: 'Funding source', border: OutlineInputBorder()),
-                items: _fundingSources.map((s) => DropdownMenuItem(value: s, child: Text(s))).toList(),
-                onChanged: (v) => setState(() => _fundingSource = v ?? 'Private'),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _titleController,
-                decoration: const InputDecoration(
-                    labelText: 'Title *', border: OutlineInputBorder()),
-                textCapitalization: TextCapitalization.sentences,
-                validator: (v) =>
-                    v == null || v.trim().isEmpty ? 'Required' : null,
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _nameController,
-                decoration: const InputDecoration(
-                    labelText: 'Customer name', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _addressController,
-                decoration: const InputDecoration(
-                    labelText: 'Address', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _phoneController,
-                decoration: const InputDecoration(
-                    labelText: 'Phone', border: OutlineInputBorder()),
-                keyboardType: TextInputType.phone,
-              ),
-              const SizedBox(height: 12),
-              if (_linkedLiftLabel != null) ...[
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: kBrandGreen),
-                    borderRadius: BorderRadius.circular(8),
-                    color: kBrandGreen.withOpacity(0.05),
-                  ),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.stairs, color: kBrandGreen, size: 20),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(_linkedLiftLabel!,
-                            style: const TextStyle(fontWeight: FontWeight.w500)),
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close, size: 18),
-                        tooltip: 'Unlink lift',
-                        onPressed: _unlinkLift,
-                        padding: EdgeInsets.zero,
-                        constraints: const BoxConstraints(),
-                      ),
-                    ],
-                  ),
-                ),
-              ] else ...[
-                OutlinedButton.icon(
-                  onPressed: _openLiftPicker,
-                  icon: const Icon(Icons.link),
-                  label: const Text('Link a lift from system'),
-                  style: OutlinedButton.styleFrom(
-                    minimumSize: const Size(double.infinity, 48),
-                    foregroundColor: kBrandGreen,
-                    side: const BorderSide(color: kBrandGreen),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: _liftTypeController,
-                  decoration: const InputDecoration(
-                      labelText: 'Or type lift description manually',
-                      border: OutlineInputBorder()),
-                ),
-              ],
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _dateRequestedController,
-                readOnly: true,
-                decoration: const InputDecoration(
-                  labelText: 'Date requested',
-                  border: OutlineInputBorder(),
-                  suffixIcon: Icon(Icons.calendar_today_outlined),
-                ),
-                onTap: () => _pickDate(_dateRequestedController),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _scheduledDateController,
-                readOnly: true,
-                decoration: const InputDecoration(
-                  labelText: 'Scheduled date (optional)',
-                  border: OutlineInputBorder(),
-                  suffixIcon: Icon(Icons.calendar_today_outlined),
-                ),
-                onTap: () => _pickDate(_scheduledDateController),
-              ),
-              const SizedBox(height: 12),
-              TextFormField(
-                controller: _notesController,
-                decoration: const InputDecoration(
-                    labelText: 'Notes', border: OutlineInputBorder()),
-                maxLines: 3,
-              ),
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _saving ? null : _save,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: kBrandGreen,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  child: _saving
-                      ? const SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : Text(isEditing ? 'Save changes' : 'Add service job'),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _HomeShellState extends State<HomeShell> {
   int _selectedIndex = 0;
 
@@ -4913,11 +2109,10 @@ class _HomeShellState extends State<HomeShell> {
   List<({IconData icon, String label, Widget page})> get _desktopItems {
     final p = widget.profile;
     return [
-      if (p.canSeeDashboard)
-        (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
+      // The Hub is reached from inside the Schedule rather than being its own
+      // tab: it is the same events in a tabular view, so a separate top-level
+      // destination implied two systems.
       (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
-      if (p.canSeeOpsHub)
-        (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
       if (p.canSeeLifts)
         (icon: Icons.list_alt_rounded, label: 'Lifts', page: const LiftsScreen()),
       if (p.canSeeRamps)
@@ -4936,8 +2131,6 @@ class _HomeShellState extends State<HomeShell> {
     final p = widget.profile;
     if (p.isAdmin) {
       return [
-        (icon: Icons.dashboard_rounded, label: 'Dashboard', page: const DashboardScreen()),
-        (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
         (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
         (icon: Icons.inventory_2_outlined, label: 'Inventory', page: InventoryScreen(
           onLifts: () => Navigator.of(context).push(
@@ -4949,9 +2142,9 @@ class _HomeShellState extends State<HomeShell> {
           (icon: Icons.people_outline_rounded, label: 'Customers', page: const CustomersScreen()),
       ];
     } else {
-      // Installer — Hub, Schedule, Inventory, Customers, Prep
+      // Installer — Schedule, Inventory, Customers, Prep. The Hub lives
+      // inside the Schedule.
       return [
-        (icon: Icons.pending_actions_rounded, label: 'Hub', page: const OperationsHubScreen()),
         (icon: Icons.calendar_month_rounded, label: 'Schedule', page: const ScheduleScreen()),
         (icon: Icons.inventory_2_outlined, label: 'Inventory', page: InventoryScreen(
           onLifts: () => Navigator.of(context).push(
@@ -9072,6 +6265,14 @@ class LiftServiceFormScreen extends StatefulWidget {
   final String? prefillDate;
   final bool offerInvoicePhoto;
 
+  /// When true the record cannot be saved without an invoice photo.
+  ///
+  /// Set for service jobs completed from the schedule: the office creates the
+  /// service entry from the photo afterwards, so the photo IS the record. An
+  /// optional prompt after saving was too easy to dismiss, which left service
+  /// history with entries nobody could reconstruct.
+  final bool requireInvoicePhoto;
+
   const LiftServiceFormScreen({
     super.key,
     required this.lift,
@@ -9079,6 +6280,7 @@ class LiftServiceFormScreen extends StatefulWidget {
     this.prefillCustomerName,
     this.prefillDate,
     this.offerInvoicePhoto = false,
+    this.requireInvoicePhoto = false,
   });
 
   @override
@@ -9182,6 +6384,18 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
 
+    // The invoice photo is the record the office works from, so block the
+    // save rather than asking afterwards.
+    if (widget.requireInvoicePhoto && _invoicePhoto == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('A photo of the invoice is required to save this service record.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
+      return;
+    }
+
     final user = await _loadUser();
     final userEmail = user['email'] ?? '';
     final userName = user['name'] ?? '';
@@ -9223,8 +6437,28 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
             liftId: widget.lift.liftId,
             imageFile: _invoicePhoto!,
           );
-        } catch (_) {
-          // Non-fatal — record was already saved
+        } catch (e) {
+          // The service record itself is already saved, so this is not fatal.
+          // But when the photo was REQUIRED it is the thing the office works
+          // from, and silently swallowing the failure would defeat the point
+          // of requiring it — say so, and keep the screen open so the tech can
+          // retry rather than walking away from a lost photo.
+          if (mounted) {
+            setState(() => _uploadingPhoto = false);
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(widget.requireInvoicePhoto
+                    ? 'Service record saved, but the invoice photo failed to upload: $e — please retry.'
+                    : 'Photo upload failed: $e'),
+                backgroundColor: Colors.orange[900],
+                duration: const Duration(seconds: 6),
+              ),
+            );
+            if (widget.requireInvoicePhoto) {
+              setState(() => _saving = false);
+              return; // stay on the form so the photo can be re-attached
+            }
+          }
         } finally {
           if (mounted) setState(() => _uploadingPhoto = false);
         }
@@ -9390,18 +6624,33 @@ class _LiftServiceFormScreenState extends State<LiftServiceFormScreen> {
             ],
             const SizedBox(height: 12),
             // Invoice photo picker
-            if (widget.offerInvoicePhoto || _invoicePhoto != null) ...[
+            if (widget.offerInvoicePhoto ||
+                widget.requireInvoicePhoto ||
+                _invoicePhoto != null) ...[
               OutlinedButton.icon(
                 onPressed: () async {
-                  final picked = await ImagePicker().pickImage(source: ImageSource.camera);
+                  final picked = await ImagePicker()
+                      .pickImage(source: ImageSource.camera);
                   if (picked != null) setState(() => _invoicePhoto = picked);
                 },
                 icon: const Icon(Icons.camera_alt_outlined),
-                label: Text(_invoicePhoto != null ? 'Invoice photo selected ✓' : 'Attach invoice photo'),
+                label: Text(_invoicePhoto != null
+                    ? 'Invoice photo selected ✓'
+                    : widget.requireInvoicePhoto
+                        ? 'Photo of invoice (required)'
+                        : 'Attach invoice photo'),
                 style: OutlinedButton.styleFrom(
                   minimumSize: const Size.fromHeight(44),
-                  foregroundColor: _invoicePhoto != null ? kBrandGreen : null,
-                  side: _invoicePhoto != null ? const BorderSide(color: kBrandGreen) : null,
+                  foregroundColor: _invoicePhoto != null
+                      ? kBrandGreen
+                      : widget.requireInvoicePhoto
+                          ? Colors.orange[900]
+                          : null,
+                  side: _invoicePhoto != null
+                      ? const BorderSide(color: kBrandGreen)
+                      : widget.requireInvoicePhoto
+                          ? BorderSide(color: Colors.orange.shade700)
+                          : null,
                 ),
               ),
               const SizedBox(height: 12),
@@ -10525,15 +7774,29 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   final ScrollController _scrollController = ScrollController();
   final Map<String, GlobalKey> _dayKeys = {};
 
+  // Bounds the scroll-to-today settle loop (see _settleScrollToToday) so a
+  // list that never contains today can't spin post-frame callbacks forever.
+  static const int _kMaxScrollAttempts = 12;
+  int _scrollAttempt = 0;
+
   // Archive health: warn if the nightly archive cron appears to have stalled,
   // so a silent failure surfaces in days rather than months.
   static const int _staleArchiveDays = 3;
   DateTime? _latestArchivedAt;
   bool _archiveWarningDismissed = false;
 
+  /// True when schedule history looks unreliable, so older jobs may be
+  /// missing from search.
+  ///
+  /// A null _latestArchivedAt means schedule_history is EMPTY — the worst
+  /// case, not a benign one. The previous version returned false for null and
+  /// so stayed silent in exactly the situation most worth warning about.
   bool get _archiveStale {
-    if (_archiveWarningDismissed || _latestArchivedAt == null) return false;
-    return DateTime.now().difference(_latestArchivedAt!).inDays > _staleArchiveDays;
+    if (_archiveWarningDismissed) return false;
+    if (_loading || _error != null) return false; // nothing loaded yet
+    final last = _latestArchivedAt;
+    if (last == null) return true;
+    return DateTime.now().difference(last).inDays > _staleArchiveDays;
   }
 
   // Live TSheets window: last 7 days through 60 days ahead
@@ -10559,21 +7822,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return DateTime(now.year, now.month, now.day).subtract(const Duration(days: _activeHistoryDays));
   }
 
-  // Month name → number map used for date parsing
-  static const Map<String, int> _monthMap = {
-    'jan': 1, 'january': 1,
-    'feb': 2, 'february': 2,
-    'mar': 3, 'march': 3,
-    'apr': 4, 'april': 4,
-    'may': 5,
-    'jun': 6, 'june': 6,
-    'jul': 7, 'july': 7,
-    'aug': 8, 'august': 8,
-    'sep': 9, 'sept': 9, 'september': 9,
-    'oct': 10, 'october': 10,
-    'nov': 11, 'november': 11,
-    'dec': 12, 'december': 12,
-  };
 
   @override
   void initState() {
@@ -10629,48 +7877,111 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     return '${local.year}-${local.month.toString().padLeft(2, '0')}-${local.day.toString().padLeft(2, '0')}';
   }
 
-  /// Scroll to today. Uses a two-pass approach:
-  /// 1. Estimate offset from item counts to get roughly the right position.
-  /// 2. After the frame renders, use the GlobalKey to fine-tune with ensureVisible.
+  /// Scroll the mobile list so today's header sits at the top.
+  ///
+  /// The previous implementation estimated the offset from hardcoded item
+  /// heights (46px header / 70px card) and then tried a single ensureVisible
+  /// to correct itself. It consistently landed days-to-a-week BEFORE today,
+  /// because:
+  ///   * real heights vary (cards wrap to two lines, some have a location row),
+  ///     so the estimate always undershot;
+  ///   * the correction pass almost never ran — _dayKeys is populated lazily in
+  ///     itemBuilder, so after an undershooting jump today's header had not been
+  ///     built and its GlobalKey had no context yet;
+  ///   * on a slow first frame hasClients was still false and the whole thing
+  ///     returned silently, leaving the list at offset 0, i.e. 30 days back.
+  ///
+  /// Now it re-estimates and re-corrects across consecutive frames until
+  /// today's header is actually attached and aligned, then stops. Each pass
+  /// renders new items, which attaches more keys, so this converges in a few
+  /// frames instead of giving up after one.
   void _scrollToToday({bool animate = true}) {
-    if (!_scrollController.hasClients) return;
-    final items = _listItems;
-    final todayKey = _dayKey(DateTime.now());
+    _scrollAttempt = 0;
+    _settleScrollToToday(animate: animate);
+  }
 
-    // Count items before today for the initial estimate
+  /// The day header to land on: today if it has events, otherwise the next day
+  /// that does. Days only appear in the list when they contain events, so on a
+  /// quiet day (weekend, light schedule) there is no "today" header to target —
+  /// landing on the next upcoming day is what a tech wants anyway. Falls back to
+  /// the last day in the list when today is past everything loaded.
+  String? _scrollTargetDayKey(List<dynamic> items) {
+    final todayKey = _dayKey(DateTime.now());
+    String? lastDay;
+    for (final item in items) {
+      if (item is! String) continue;
+      // dayKeys are zero-padded YYYY-MM-DD, so lexical order is chronological.
+      if (item.compareTo(todayKey) >= 0) return item;
+      lastDay = item;
+    }
+    return lastDay;
+  }
+
+  /// Estimated offset of the given day header, in pixels from the top of the
+  /// list. Only used to get close enough that the real header gets built; final
+  /// positioning is always done by ensureVisible against the actual widget.
+  double _estimatedTodayOffset(List<dynamic> items, String targetDay) {
+    const headerHeight = 50.0;
+    const cardHeight = 80.0;
     double offset = 0;
     for (final item in items) {
       if (item is String) {
-        if (item == todayKey) break;
-        offset += 46.0;
+        if (item == targetDay) break;
+        offset += headerHeight;
       } else {
-        offset += 70.0;
+        offset += cardHeight;
       }
     }
+    return offset;
+  }
 
-    final maxExtent = _scrollController.position.maxScrollExtent;
-    final target = offset.clamp(0.0, maxExtent);
+  void _settleScrollToToday({bool animate = true}) {
+    if (!mounted) return;
 
-    if (animate) {
-      _scrollController.animateTo(target,
-          duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
-    } else {
+    // The ListView may not have been laid out yet (the body shows a spinner
+    // while loading). Wait for a frame rather than silently giving up.
+    if (!_scrollController.hasClients) {
+      if (_scrollAttempt++ >= _kMaxScrollAttempts) return;
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _settleScrollToToday(animate: animate));
+      return;
+    }
+
+    final items = _listItems;
+    final targetDay = _scrollTargetDayKey(items);
+    if (targetDay == null) return; // empty list — nothing to scroll to
+    final ctx = _dayKeys[targetDay]?.currentContext;
+
+    if (ctx != null) {
+      // The target header exists — position against the real widget.
+      final before = _scrollController.offset;
+      Scrollable.ensureVisible(
+        ctx,
+        alignment: 0.0,
+        duration: animate ? const Duration(milliseconds: 200) : Duration.zero,
+      );
+      // ensureVisible can change what is laid out above us, which moves our
+      // own offset, so re-check next frame. Stop as soon as the offset stops
+      // moving (or an animation is in flight, which settles on its own).
+      final settled = animate || (_scrollController.offset - before).abs() < 1.0;
+      if (!settled && _scrollAttempt++ < _kMaxScrollAttempts) {
+        WidgetsBinding.instance.addPostFrameCallback(
+            (_) => _settleScrollToToday(animate: false));
+      }
+      return;
+    }
+
+    // Not built yet — jump to the estimate so the surrounding range renders,
+    // which attaches today's key, then try again next frame.
+    if (_scrollAttempt++ >= _kMaxScrollAttempts) return;
+
+    final target = _estimatedTodayOffset(items, targetDay)
+        .clamp(0.0, _scrollController.position.maxScrollExtent);
+    if ((target - _scrollController.offset).abs() > 1.0) {
       _scrollController.jumpTo(target);
     }
-
-    // Second pass: once the target area is rendered, ensureVisible fine-tunes it
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final gk = _dayKeys[todayKey];
-      if (gk?.currentContext != null) {
-        Scrollable.ensureVisible(
-          gk!.currentContext!,
-          alignment: 0.0,
-          duration: animate
-              ? const Duration(milliseconds: 200)
-              : Duration.zero,
-        );
-      }
-    });
+    WidgetsBinding.instance
+        .addPostFrameCallback((_) => _settleScrollToToday(animate: false));
   }
 
   // ---------------------------------------------------------------------------
@@ -10696,7 +8007,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     final query = _searchQuery.trim();
     if (query.isEmpty) return;
 
-    final parsed = _parseDateRange(query);
+    final parsed = parseScheduleDateRange(query);
     final dateRange = parsed.$1; // (DateTime start, DateTime end)?
     final textQuery = parsed.$2;
 
@@ -10727,11 +8038,15 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         _isSearchMode = true;
         _isSearchLoading = false;
       });
-      // Scroll to bottom so newest results are visible
+      // Show the start of the results. _listItems reverses the day order when
+      // sorting newest-first, so the most relevant result is already at the
+      // top — the previous jump to maxScrollExtent landed on the OLDEST match.
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-        }
+        if (!_scrollController.hasClients) return;
+        final pos = _sortBy == 'newest'
+            ? 0.0
+            : _scrollController.position.maxScrollExtent;
+        _scrollController.jumpTo(pos);
       });
     } catch (_) {
       if (!mounted) return;
@@ -10767,73 +8082,6 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
     }).toList();
   }
 
-  /// Parse a date range out of [query].
-  /// Returns `((startDate, endDate)?, remainingText)`.
-  /// If no date is detected, the first element is null and the full query is returned as text.
-  ///
-  /// Handles: "april 21 2025", "oct 30 2019", "4/21/25", "4/21/2025",
-  ///          "april 2025" (whole month), "2024" (whole year).
-  ((DateTime, DateTime)?, String) _parseDateRange(String query) {
-    var q = query.toLowerCase().trim();
-
-    String strip(String src, Pattern pat) =>
-        src.replaceAll(pat, ' ').replaceAll(RegExp(r'\s{2,}'), ' ').trim();
-
-    (DateTime, DateTime) dayRange(int y, int mo, int d) =>
-        (DateTime(y, mo, d), DateTime(y, mo, d, 23, 59, 59));
-
-    // MM/DD/YY or MM/DD/YYYY
-    final slash = RegExp(r'\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b');
-    var m = slash.firstMatch(q);
-    if (m != null) {
-      var y = int.parse(m.group(3)!);
-      if (y < 100) y += 2000;
-      return (dayRange(y, int.parse(m.group(1)!), int.parse(m.group(2)!)), strip(q, slash));
-    }
-
-    // Month name patterns
-    for (final entry in _monthMap.entries) {
-      final mn = entry.key;
-      final mo = entry.value;
-
-      // "april 21 2025"
-      final pat1 = RegExp(r'\b' + mn + r'\s+(\d{1,2})\s+(20\d{2})\b');
-      m = pat1.firstMatch(q);
-      if (m != null) {
-        return (dayRange(int.parse(m.group(2)!), mo, int.parse(m.group(1)!)), strip(q, pat1));
-      }
-
-      // "21 april 2025"
-      final pat2 = RegExp(r'\b(\d{1,2})\s+' + mn + r'\s+(20\d{2})\b');
-      m = pat2.firstMatch(q);
-      if (m != null) {
-        return (dayRange(int.parse(m.group(2)!), mo, int.parse(m.group(1)!)), strip(q, pat2));
-      }
-
-      // "april 2025" → whole month
-      final pat3 = RegExp(r'\b' + mn + r'\s+(20\d{2})\b');
-      m = pat3.firstMatch(q);
-      if (m != null) {
-        final y = int.parse(m.group(1)!);
-        final lastDay = DateTime(y, mo + 1, 0).day;
-        return (
-          (DateTime(y, mo, 1), DateTime(y, mo, lastDay, 23, 59, 59)),
-          strip(q, pat3),
-        );
-      }
-    }
-
-    // "2024" → whole year
-    final yearPat = RegExp(r'\b(20\d{2})\b');
-    m = yearPat.firstMatch(q);
-    if (m != null) {
-      final y = int.parse(m.group(1)!);
-      return ((DateTime(y, 1, 1), DateTime(y, 12, 31, 23, 59, 59)), strip(q, yearPat));
-    }
-
-    // No date found — full query is text
-    return (null, q);
-  }
 
   // ---------------------------------------------------------------------------
   // List building
@@ -10864,10 +8112,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
   String _formatDayHeader(String dayKey) {
     final parts = dayKey.split('-');
     final dt = DateTime(int.parse(parts[0]), int.parse(parts[1]), int.parse(parts[2]));
-    const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
-    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June',
-        'July', 'August', 'September', 'October', 'November', 'December'];
-    return '${dayNames[dt.weekday - 1]}, ${monthNames[dt.month - 1]} ${dt.day}, ${dt.year}';
+    return formatFullDate(dt);
   }
 
   bool _isToday(String dayKey) => dayKey == _dayKey(DateTime.now());
@@ -10896,6 +8141,41 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
         .join(', ');
   }
 
+  /// Opens an event's detail screen. Shared by the mobile list, the desktop
+  /// grid and the Operations Hub, so all three routes land on the same screen
+  /// and there is only one place an event can be edited.
+  Future<bool?> _openEventDetail(QbtScheduleEvent event) async {
+    final changed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ScheduleEventDetailScreen(
+          event: event,
+          users: _users,
+          assignedNames: _assignedNames(event),
+          color: _parseColor(event.color),
+          formatTime: _formatTime,
+        ),
+      ),
+    );
+    if (changed == true) _load();
+    return changed;
+  }
+
+  /// Opens the hub as a different view of the events already loaded here.
+  Future<void> _openHub() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => OperationsHubScreen(
+          events: _events,
+          users: _users,
+          onOpenEvent: _openEventDetail,
+        ),
+      ),
+    );
+    if (mounted) _load();
+  }
+
   Future<void> _onToggleComplete(QbtScheduleEvent event) async {
     final next = !_completedIds.contains(event.id);
     setState(() {
@@ -10906,131 +8186,51 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
       }
     });
     await sbSetEventCompleted(eventId: event.id, completed: next);
-    if (next && mounted) {
-      final meta = await sbGetEventMeta(event.id);
-      final jobType = meta['job_type'] as String?;
-      final liftIds = (meta['lift_ids'] as List<String>?) ?? [];
 
-      if ((jobType == 'Ramp Install' || jobType == 'Ramp Removal') && liftIds.isEmpty && mounted) {
-        final isInstall = jobType == 'Ramp Install';
-        final fundingSource = (meta['funding_source'] as String?) ?? 'Private';
-        final isCcals = fundingSource == 'CCALS';
-        final confirm = await showDialog<bool>(
-          context: context,
-          builder: (_) => AlertDialog(
-            title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
-            content: Text(
-              isInstall
-                  ? 'Select the ramps and quantities used on this job to deduct them from ${isCcals ? 'CCALS' : 'Able Home'} inventory.'
-                  : 'Select the ramps and quantities recovered on this job to add them back to ${isCcals ? 'CCALS' : 'Able Home'} inventory.',
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context, true),
-                style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                child: const Text('Open Form'),
-              ),
-            ],
-          ),
-        );
-        if (confirm == true && mounted) {
-          await Navigator.of(context).push(
-            MaterialPageRoute(
-              builder: (_) => JobAdjustmentScreen(
-                initialJobRef: event.title,
-                initialTabIndex: isInstall ? 0 : 1,
-                isCcals: isCcals,
-              ),
-            ),
-          );
-        }
-      }
+    if (!next || !mounted) return;
 
-      if (jobType != null && liftIds.isNotEmpty && mounted) {
-        final prefs = await SharedPreferences.getInstance();
-        final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
-        final userEmail = AuthService.instance.profile?.email ?? '';
-        for (final liftId in liftIds) {
-          final lift = await sbFetchLiftById(liftId);
-          if (lift == null || !mounted) continue;
-          String? newStatus;
-          String dialogTitle = '';
-          String dialogBody = '';
-          String confirmLabel = '';
-          if (jobType == 'Stairlift Install') {
-            newStatus = 'Installed';
-            dialogTitle = 'Mark lift as Installed?';
-            dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?';
-            confirmLabel = 'Mark Installed';
-          } else if (jobType == 'Stairlift Removal') {
-            newStatus = 'Removed';
-            dialogTitle = 'Mark lift as Removed?';
-            dialogBody = 'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?';
-            confirmLabel = 'Mark Removed';
-          }
-          if (newStatus != null && mounted) {
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: Text(dialogTitle),
-                content: Text(dialogBody),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: Text(confirmLabel),
-                  ),
-                ],
-              ),
-            );
-            if (confirm == true && mounted) {
-              await sbMarkLiftStatus(
-                liftId: lift.liftId,
-                newStatus: newStatus,
-                userEmail: userEmail,
-                userName: userName,
-                note: 'Marked $newStatus via schedule event: ${event.title}',
-                eventDate: newStatus == 'Installed' ? event.start : null,
-              );
-              if (newStatus == 'Installed' && lift.customerId.isEmpty && mounted) {
-                await _offerCreateCustomerForLift(context, lift, event);
-              }
-            }
-          } else if ((jobType == 'Stairlift Service' || jobType == 'Stairlift Annual Service') && mounted) {
-            final serviceType = jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: const Text('Log service record?'),
-                content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: const Text('Log Service'),
-                  ),
-                ],
-              ),
-            );
-            if (confirm == true && mounted) {
-              await Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => LiftServiceFormScreen(
-                    lift: lift,
-                    prefillServiceType: serviceType,
-                    prefillCustomerName: event.title,
-                    prefillDate: formatDate(DateTime.now()),
-                    offerInvoicePhoto: true,
-                  ),
-                ),
-              );
-            }
-          }
-        }
-      }
+    final meta = await sbGetEventMeta(event.id);
+    if (!mounted) return;
+
+    // One shared handler, identical to the event detail screen's path.
+    final ok = await handleJobCompletion(
+      context: context,
+      event: event,
+      jobType: meta['job_type'] as String?,
+      fundingSource:
+          normalizeFundingSource(meta['funding_source'] as String?),
+      liftIds: (meta['lift_ids'] as List<String>?) ?? const [],
+    );
+
+    // Same CRM automation the detail screen runs. This used to fire only from
+    // the detail screen, so checking a job off from the list silently skipped
+    // the review request and annual reminder.
+    final customer = meta['customer'] as Map<String, String>?;
+    final customerId = customer?['customer_id'] ?? '';
+    if (ok && customerId.isNotEmpty && mounted) {
+      await _handleCustomerLifecycleOnComplete(
+        context,
+        event,
+        meta['job_type'] as String?,
+        customerId,
+        customerName: customer?['name'],
+      );
+    }
+
+    // A required step was abandoned (e.g. ramp quantities never entered), so
+    // the job is not actually done. Roll the check-off back rather than
+    // leaving inventory wrong behind a ticked box.
+    if (!ok) {
+      await sbSetEventCompleted(eventId: event.id, completed: false);
+      if (!mounted) return;
+      setState(() => _completedIds.remove(event.id));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Job left open — ramp quantities are needed to complete it.'),
+          duration: Duration(seconds: 4),
+        ),
+      );
     }
   }
 
@@ -11050,23 +8250,7 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               error: _error,
               onToggleComplete: _onToggleComplete,
               onRefresh: _load,
-              onTapEvent: (event) async {
-                final color = _parseColor(event.color);
-                final changed = await Navigator.push<bool>(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ScheduleEventDetailScreen(
-                      event: event,
-                      users: _users,
-                      assignedNames: _assignedNames(event),
-                      color: color,
-                      formatTime: _formatTime,
-                    ),
-                  ),
-                );
-                if (changed == true) _load();
-                return changed;
-              },
+              onTapEvent: _openEventDetail,
               onAddEvent: () async {
                 final created = await Navigator.push<bool>(
                   context,
@@ -11081,6 +8265,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
               },
               activeStart: _activeHistoryStart,
               activeEnd: _liveRangeEnd,
+              archiveBanner: _archiveStale ? _staleArchiveBanner() : null,
+              onOpenHub: _openHub,
             ),
           );
         }
@@ -11092,24 +8278,24 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             backgroundColor: kBrandGreenDark,
             foregroundColor: Colors.white,
             title: _searchActive
-                ? Theme(
-                    data: ThemeData.dark(),
-                    child: TextField(
-                      controller: _searchController,
-                      autofocus: true,
-                      cursorColor: Colors.white,
-                      style:
-                          const TextStyle(color: Colors.white, fontSize: 16),
-                      decoration: const InputDecoration(
-                        hintText:
-                            'Search by name, date, address, assignee...',
-                        hintStyle: TextStyle(color: Colors.white60),
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                      ),
-                      onChanged: _onSearchChanged,
+                // White text on the dark green app bar. `filled: false` is
+                // required: the global inputDecorationTheme sets
+                // fillColor: Colors.white, which would otherwise paint a white
+                // box behind this white text and make it unreadable.
+                ? TextField(
+                    controller: _searchController,
+                    autofocus: true,
+                    cursorColor: Colors.white,
+                    style: const TextStyle(color: Colors.white, fontSize: 16),
+                    decoration: const InputDecoration(
+                      filled: false,
+                      hintText: 'Search by name, date, address, assignee...',
+                      hintStyle: TextStyle(color: Colors.white60),
+                      border: InputBorder.none,
+                      enabledBorder: InputBorder.none,
+                      focusedBorder: InputBorder.none,
                     ),
+                    onChanged: _onSearchChanged,
                   )
                 : const Text('Schedule',
                     style: TextStyle(fontWeight: FontWeight.bold)),
@@ -11133,6 +8319,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
                   },
                 )
               else ...[
+                IconButton(
+                  icon: const Icon(Icons.pending_actions_rounded),
+                  tooltip: 'Operations Hub',
+                  onPressed: _openHub,
+                ),
                 IconButton(
                   icon: const Icon(Icons.search),
                   tooltip: 'Search',
@@ -11181,7 +8372,11 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
 
   Widget _staleArchiveBanner() {
     final last = _latestArchivedAt;
-    final lastLabel = last != null ? formatDate(last) : 'unknown';
+    // An empty archive and a stalled one need different wording: the first
+    // means history was never captured, the second that capture stopped.
+    final detail = last == null
+        ? 'No archived history found at all.'
+        : 'Last archived ${formatDate(last)}.';
     return Material(
       color: const Color(0xFFFFF3CD), // soft amber
       child: Padding(
@@ -11192,8 +8387,8 @@ class _ScheduleScreenState extends State<ScheduleScreen> {
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'Schedule archive may be stale — older jobs might not be searchable. '
-                'Last archived $lastLabel.',
+                'Schedule archive may be stale — older jobs might not be '
+                'searchable. $detail',
                 style: TextStyle(fontSize: 12.5, color: Colors.orange[900]),
               ),
             ),
@@ -11563,9 +8758,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
 
   String? _jobType;
   bool _savingJobType = false;
-  String? _eventSource;
-  bool _savingSource = false;
-  String _eventFundingSource = 'Private';
+  String _eventFundingSource = kDefaultFundingSource;
+  bool _savingFunding = false;
   List<LiftRecord> _linkedLifts = [];
   bool _loadingMeta = true;
   bool _savingLift = false;
@@ -11620,10 +8814,10 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     if (!mounted) return;
     setState(() {
       _jobType = jobType;
-      _eventSource = meta['source'] as String?;
-      _eventFundingSource = (meta['funding_source'] as String?)?.isNotEmpty == true
-          ? meta['funding_source'] as String
-          : 'Private';
+      // Normalized because historical rows carry casing variants
+      // ('Navicare' vs 'NaviCare') that would otherwise render as unset.
+      _eventFundingSource =
+          normalizeFundingSource(meta['funding_source'] as String?);
       _linkedLifts = lifts;
       _loadingMeta = false;
       _eventPhotoUrls = photos;
@@ -11727,8 +8921,15 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     if (imageFiles.isEmpty || !mounted) return;
 
     setState(() => _uploadingPhoto = true);
-    try {
-      for (final imageFile in imageFiles) {
+
+    // Upload each photo independently. Previously one failure threw out of the
+    // loop, so a tech who picked five photos and lost signal on the third was
+    // told "Upload failed" with no indication that two had actually landed —
+    // and the rest were never attempted.
+    var succeeded = 0;
+    Object? lastError;
+    for (final imageFile in imageFiles) {
+      try {
         await sbUploadEventPhoto(
           eventId: widget.event.id,
           imageFile: imageFile,
@@ -11737,25 +8938,45 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           eventDate: widget.event.start,
           eventLocation: widget.event.location,
         );
-      }
-      final urls = await sbFetchEventPhotos(widget.event.id);
-      if (mounted) {
-        setState(() {
-          _eventPhotoUrls = urls;
-          _uploadingPhoto = false;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(imageFiles.length == 1 ? 'Photo added' : '${imageFiles.length} photos added')),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() => _uploadingPhoto = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Upload failed: $e')),
-        );
+        succeeded++;
+      } catch (e) {
+        lastError = e;
       }
     }
+
+    final failed = imageFiles.length - succeeded;
+    List<String> urls = _eventPhotoUrls;
+    try {
+      urls = await sbFetchEventPhotos(widget.event.id);
+    } catch (_) {
+      // Keep whatever we already had rather than blanking the grid.
+    }
+    if (!mounted) return;
+    setState(() {
+      _eventPhotoUrls = urls;
+      _uploadingPhoto = false;
+    });
+
+    final String message;
+    if (failed == 0) {
+      message = succeeded == 1 ? 'Photo added' : '$succeeded photos added';
+    } else if (succeeded == 0) {
+      message = imageFiles.length == 1
+          ? 'Photo could not be uploaded — tap + to try again. ($lastError)'
+          : 'No photos uploaded — tap + to try again. ($lastError)';
+    } else {
+      // Be explicit about the partial result so the tech knows exactly how
+      // many to re-add rather than guessing.
+      message = '$succeeded of ${imageFiles.length} uploaded — '
+          '$failed still need re-adding.';
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: failed > 0 ? Colors.orange[900] : null,
+        duration: Duration(seconds: failed > 0 ? 6 : 2),
+      ),
+    );
   }
 
   Future<void> _deleteEventPhoto(String url) async {
@@ -11860,6 +9081,82 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     }
   }
 
+  /// Offers to save a generated service summary into the event's notes.
+  ///
+  /// Shown for confirmation rather than saved silently: the summary is
+  /// composed from stored metadata, and if any of that is wrong the tech is
+  /// the one who can see it. Editable before saving. The tech's own notes are
+  /// never overwritten — the summary goes below a marker, and re-completing
+  /// replaces the previous summary rather than stacking copies.
+  Future<void> _offerServiceSummary() async {
+    final summary = buildServiceSummary(
+      event: widget.event,
+      jobType: _jobType,
+      fundingSource: _eventFundingSource,
+      lifts: _linkedLifts,
+      assignedNames: widget.assignedNames,
+    );
+    if (summary == null || !mounted) return;
+
+    final controller = TextEditingController(text: summary);
+    final save = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Save service summary to notes?'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Edit if anything is wrong.',
+                style: TextStyle(fontSize: 12.5, color: Colors.grey[600])),
+            const SizedBox(height: 10),
+            TextField(
+              controller: controller,
+              maxLines: 4,
+              style: const TextStyle(fontSize: 14),
+              decoration: const InputDecoration(border: OutlineInputBorder()),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Skip')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: kBrandGreen, foregroundColor: Colors.white),
+            child: const Text('Save to Notes'),
+          ),
+        ],
+      ),
+    );
+
+    final text = controller.text.trim();
+    controller.dispose();
+    if (save != true || text.isEmpty || !mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await qbtUpdateScheduleEvent(widget.event.copyWith(
+        notes: mergeServiceSummary(widget.event.notes, text),
+      ));
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Summary saved to notes')),
+      );
+    } catch (e) {
+      // Non-fatal: the job is still completed, only the note failed. Say so
+      // rather than implying the check-off did not work.
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Job completed, but the summary could not be saved: $e'),
+          backgroundColor: Colors.orange[900],
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
   Future<void> _toggleCompleted() async {
     final next = !_completed;
     setState(() {
@@ -11868,300 +9165,79 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
     });
     try {
       await sbSetEventCompleted(eventId: widget.event.id, completed: next);
-      debugPrint('[Complete] marked=$next linkedLifts=${_linkedLifts.length} jobType=$_jobType');
-      // Smart completion: trigger downstream actions when marking complete.
-      final isRampJob = next && (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal');
-      if (next && (_linkedLifts.isNotEmpty || isRampJob) && mounted) {
-        await _handleSmartCompletion();
-      }
-      // Warn if completing a service job with no lift linked
-      final isServiceType = _jobType == 'Stairlift Service' || _jobType == 'Stairlift Annual Service';
-      if (next && isServiceType && _linkedLifts.isEmpty && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No lift linked — use the Link Lift button to attach one so a service record can be logged.'),
-            duration: Duration(seconds: 5),
-          ),
+
+      if (next && mounted) {
+        // Same shared handler the schedule list toggle uses, so checking a job
+        // off from either place does exactly the same thing.
+        final ok = await handleJobCompletion(
+          context: context,
+          event: widget.event,
+          jobType: _jobType,
+          fundingSource: _eventFundingSource,
+          lifts: _linkedLifts,
         );
-      }
-      // CRM: when completing a job for a linked customer, drive their lifecycle
-      // and queue follow-ups (review request, annual reminder, recurrence).
-      if (next && (_linkedCustomerId?.isNotEmpty ?? false) && mounted) {
-        await _handleCustomerLifecycleOnComplete(_linkedCustomerId!);
+
+        if (!ok) {
+          // A required step was abandoned, so the job is not done. Undo the
+          // check-off instead of leaving inventory wrong behind a ticked box.
+          await sbSetEventCompleted(
+              eventId: widget.event.id, completed: false);
+          if (!mounted) return;
+          setState(() => _completed = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'Job left open — ramp quantities are needed to complete it.'),
+              duration: Duration(seconds: 4),
+            ),
+          );
+          return;
+        }
+
+        // Warn if completing a service job with no lift linked
+        final isServiceType = _jobType == 'Stairlift Service' ||
+            _jobType == 'Stairlift Annual Service';
+        if (isServiceType && _linkedLifts.isEmpty && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  'No lift linked — use the Link Lift button to attach one so a service record can be logged.'),
+              duration: Duration(seconds: 5),
+            ),
+          );
+        }
+
+        // Service summary into the event notes, so what happened on the job
+        // is recorded without the tech typing anything.
+        if (mounted) await _offerServiceSummary();
+
+        // CRM: drive the customer's lifecycle and queue follow-ups.
+        if ((_linkedCustomerId?.isNotEmpty ?? false) && mounted) {
+          await _handleCustomerLifecycleOnComplete(
+            context,
+            widget.event,
+            _jobType,
+            _linkedCustomerId!,
+            customerName: _linkedCustomerName,
+          );
+        }
+
+        if (mounted) await _loadMeta(); // refresh lift statuses
       }
     } catch (e) {
       debugPrint('[Complete] ERROR: $e');
-      if (mounted) setState(() => _completed = !next);
+      // The app_config write may already have succeeded, so re-read rather
+      // than assuming the previous local value is still correct.
+      if (mounted) {
+        setState(() => _completed = !next);
+        await _loadCompleted();
+      }
     } finally {
       if (mounted) setState(() => _savingComplete = false);
     }
   }
 
-  Future<void> _handleSmartCompletion() async {
-    debugPrint('[SmartComplete] jobType=$_jobType lifts=${_linkedLifts.map((l) => l.liftId).toList()}');
-    final prefs = await SharedPreferences.getInstance();
-    final userName = prefs.getString('user_name') ?? AuthService.instance.profile?.name ?? '';
-    final userEmail = AuthService.instance.profile?.email ?? '';
 
-    // Ramp job — always offer the adjustment form
-    if (_jobType == 'Ramp Install' || _jobType == 'Ramp Removal') {
-      if (!mounted) return;
-      final isInstall = _jobType == 'Ramp Install';
-      final confirm = await showDialog<bool>(
-        context: context,
-        builder: (_) => AlertDialog(
-          title: Text(isInstall ? 'Record ramp install?' : 'Record ramp removal?'),
-          content: Text(
-            isInstall
-                ? 'Select the ramps and quantities used on this job to deduct them from inventory.'
-                : 'Select the ramps and quantities recovered on this job to add them back to inventory.',
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context, true),
-              style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-              child: const Text('Open Form'),
-            ),
-          ],
-        ),
-      );
-      if (confirm == true && mounted) {
-        await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => JobAdjustmentScreen(
-              initialJobRef: widget.event.title,
-              initialTabIndex: isInstall ? 0 : 1,
-              isCcals: _eventFundingSource == 'CCALS',
-            ),
-          ),
-        );
-      }
-      return;
-    }
-
-    for (final lift in List<LiftRecord>.from(_linkedLifts)) {
-      debugPrint('[SmartComplete] processing lift=${lift.liftId} status=${lift.status}');
-      if (!mounted) return;
-      switch (_jobType) {
-        case 'Stairlift Install':
-          if (mounted) {
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: const Text('Mark lift as Installed?'),
-                content: Text(
-                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Installed?',
-                ),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: const Text('Mark Installed'),
-                  ),
-                ],
-              ),
-            );
-            debugPrint('[SmartComplete] Install confirm=$confirm');
-            if (confirm == true && mounted) {
-              debugPrint('[SmartComplete] calling sbMarkLiftStatus Installed for ${lift.liftId}');
-              await sbMarkLiftStatus(
-                liftId: lift.liftId,
-                newStatus: 'Installed',
-                userEmail: userEmail,
-                userName: userName,
-                note: 'Marked installed via schedule event: ${widget.event.title}',
-                eventDate: widget.event.start,
-              );
-              debugPrint('[SmartComplete] sbMarkLiftStatus done');
-            }
-          }
-          break;
-
-        case 'Stairlift Removal':
-        case 'Stairlift Buyback':
-        case 'Stairlift Buyout':
-        case 'Stairlift Buyback / Buyout':
-          if (mounted) {
-            final isBuyback = _jobType == 'Stairlift Buyback' || _jobType == 'Stairlift Buyout';
-            final confirm = await showDialog<bool>(
-              context: context,
-              builder: (_) => AlertDialog(
-                title: Text(isBuyback ? 'Mark lift as Removed (Buyback)?' : 'Mark lift as Removed?'),
-                content: Text(
-                  'Update ${lift.brand} ${lift.series} (SN: ${lift.serialNumber}) to Removed?',
-                ),
-                actions: [
-                  TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context, true),
-                    style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                    child: const Text('Mark Removed'),
-                  ),
-                ],
-              ),
-            );
-            if (confirm == true && mounted) {
-              await sbMarkLiftStatus(
-                liftId: lift.liftId,
-                newStatus: 'Removed',
-                userEmail: userEmail,
-                userName: userName,
-                note: 'Marked removed via schedule event: ${widget.event.title}',
-              );
-            }
-          }
-          break;
-
-        case 'Stairlift Service':
-        case 'Stairlift Annual Service':
-          if (!mounted) return;
-          final serviceType = _jobType == 'Stairlift Annual Service' ? 'Annual Service' : 'Service Call';
-          final confirm = await showDialog<bool>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text('Log service record?'),
-              content: Text('Create a $serviceType record for ${lift.brand} ${lift.series}?'),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Skip')),
-                ElevatedButton(
-                  onPressed: () => Navigator.pop(context, true),
-                  style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-                  child: const Text('Log Service'),
-                ),
-              ],
-            ),
-          );
-          if (confirm == true && mounted) {
-            await Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => LiftServiceFormScreen(
-                  lift: lift,
-                  prefillServiceType: serviceType,
-                  prefillCustomerName: widget.event.title,
-                  prefillDate: formatDate(DateTime.now()),
-                  offerInvoicePhoto: true,
-                ),
-              ),
-            );
-          }
-          break;
-      }
-    }
-    if (mounted) await _loadMeta(); // refresh all lift statuses
-  }
-
-  /// CRM lifecycle automation, triggered when a schedule event tied to a
-  /// customer is marked complete. Uses the event's start date as the
-  /// completion date (per the technician check-off). Suggestions are one-tap
-  /// prompts; only the review/annual queuing on install is automatic.
-  Future<void> _handleCustomerLifecycleOnComplete(String customerId) async {
-    final completionDate = widget.event.start;
-    final jt = _jobType ?? '';
-    final isInstall = jt == 'Stairlift Install' || jt == 'Ramp Install';
-    final isAnnual = jt == 'Stairlift Annual Service';
-    final isBuybackOrRemoval = jt == 'Stairlift Removal' ||
-        jt == 'Stairlift Buyback' ||
-        jt == 'Stairlift Buyout' ||
-        jt == 'Stairlift Buyback / Buyout' ||
-        jt == 'Ramp Removal';
-
-    try {
-      if (isInstall) {
-        // Automatic: queue a review request + arm the annual clock (+1yr).
-        final annualDue = DateTime(
-            completionDate.year + 1, completionDate.month, completionDate.day);
-        await sbEnsurePendingActivity(
-          customerId: customerId,
-          type: CustomerActivityType.review,
-          sourceEventId: widget.event.id,
-        );
-        await sbEnsurePendingActivity(
-          customerId: customerId,
-          type: CustomerActivityType.annual,
-          dueDate: annualDue,
-          sourceEventId: widget.event.id,
-        );
-        await sbSetCustomerAnnualDue(customerId, annualDue);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Review request queued and annual reminder set for next year.'),
-            duration: Duration(seconds: 4),
-          ));
-        }
-        // Suggest moving the customer to Active.
-        await _suggestCustomerStatus(
-            customerId, CustomerLifecycleStatus.active, 'Active');
-      } else if (isAnnual) {
-        // Close the pending annual activity and roll the next one forward +1yr.
-        final activities = await sbFetchActivitiesForCustomer(customerId);
-        final pendingAnnual = activities
-            .where((a) =>
-                a.type == CustomerActivityType.annual &&
-                a.status == CustomerActivityStatus.pending)
-            .cast<CustomerActivity?>()
-            .firstWhere((_) => true, orElse: () => null);
-        if (pendingAnnual != null) {
-          await sbUpdateActivityStatus(
-              pendingAnnual.activityId, CustomerActivityStatus.done);
-        }
-        final nextDue = DateTime(
-            completionDate.year + 1, completionDate.month, completionDate.day);
-        await sbEnsurePendingActivity(
-          customerId: customerId,
-          type: CustomerActivityType.annual,
-          dueDate: nextDue,
-          sourceEventId: widget.event.id,
-        );
-        await sbSetCustomerAnnualDue(customerId, nextDue);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Annual logged — next annual reminder set for next year.'),
-            duration: Duration(seconds: 4),
-          ));
-        }
-      } else if (isBuybackOrRemoval) {
-        // Mark any pending buyback-candidate flag done, and suggest Past.
-        final activities = await sbFetchActivitiesForCustomer(customerId);
-        for (final a in activities) {
-          if (a.type == CustomerActivityType.buybackCandidate &&
-              a.status == CustomerActivityStatus.pending) {
-            await sbUpdateActivityStatus(a.activityId, CustomerActivityStatus.done);
-          }
-        }
-        await _suggestCustomerStatus(
-            customerId, CustomerLifecycleStatus.past, 'Past customer');
-      }
-    } catch (e) {
-      debugPrint('[CRM lifecycle] ERROR: $e');
-    }
-  }
-
-  /// One-tap prompt to move a linked customer to [target]. Never auto-applied.
-  Future<void> _suggestCustomerStatus(
-      String customerId, CustomerLifecycleStatus target, String label) async {
-    if (!mounted) return;
-    final name = _linkedCustomerName ?? 'this customer';
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text('Mark $name as $label?'),
-        content: Text('Update the customer’s lifecycle status to $label.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Not now')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: kBrandGreen, foregroundColor: Colors.white),
-            child: Text('Mark $label'),
-          ),
-        ],
-      ),
-    );
-    if (confirm == true) {
-      await sbUpdateCustomerLifecycle(customerId, target);
-    }
-  }
 
   Future<void> _openMaps(String location) async {
     final encoded = Uri.encodeComponent(location);
@@ -12187,6 +9263,8 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
         : sameTime
             ? widget.formatTime(startLocal)
             : '${widget.formatTime(startLocal)} – ${widget.formatTime(endLocal)}';
+
+    final dateLabel = formatFullDate(startLocal);
 
     final color = widget.color;
     final luminance = color.computeLuminance();
@@ -12349,31 +9427,58 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           ),
           const SizedBox(height: 8),
 
-          // Lead source row
+          // Who is paying. Replaces the old lead-source dropdown: funding
+          // source is what changes the work (CCALS ramps draw from a separate
+          // inventory pool), and until now the detail screen READ this value
+          // for the completion flow but never showed it, so a tech could not
+          // see or correct a wrong one.
           Row(
             children: [
-              Icon(Icons.source_outlined, size: 16, color: Colors.grey[500]),
+              Icon(Icons.account_balance_wallet_outlined,
+                  size: 16, color: Colors.grey[500]),
               const SizedBox(width: 6),
-              Text('Source:', style: TextStyle(fontSize: 13, color: Colors.grey[600])),
+              Text('Paid by:',
+                  style: TextStyle(fontSize: 13, color: Colors.grey[600])),
               const SizedBox(width: 8),
               DropdownButton<String>(
-                value: const ['VA', 'Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other'].contains(_eventSource)
-                    ? _eventSource : null,
-                hint: Text('Set source', style: TextStyle(color: Colors.grey[500], fontSize: 13)),
+                value: _eventFundingSource,
                 underline: const SizedBox(),
                 isDense: true,
-                items: [
-                  const DropdownMenuItem(value: null, child: Text('— None —', style: TextStyle(color: Colors.grey))),
-                  ...['VA', 'Web Lead', 'Call-in', 'Navicare', 'Angi Lead', 'Home Advisor', 'Other']
-                      .map((s) => DropdownMenuItem(value: s, child: Text(s, style: const TextStyle(fontSize: 13)))),
-                ],
-                onChanged: _savingSource ? null : (val) async {
-                  setState(() { _eventSource = val; _savingSource = true; });
-                  await sbSetEventSource(widget.event.id, val);
-                  if (mounted) setState(() => _savingSource = false);
-                },
+                items: kFundingSources
+                    .map((s) => DropdownMenuItem(
+                        value: s,
+                        child:
+                            Text(s, style: const TextStyle(fontSize: 13))))
+                    .toList(),
+                onChanged: _savingFunding
+                    ? null
+                    : (val) async {
+                        if (val == null) return;
+                        final previous = _eventFundingSource;
+                        // Captured before the await: using context afterwards
+                        // is unsafe if this screen is popped mid-write.
+                        final messenger = ScaffoldMessenger.of(context);
+                        setState(() {
+                          _eventFundingSource = val;
+                          _savingFunding = true;
+                        });
+                        try {
+                          await sbSetEventFundingSource(widget.event.id, val);
+                        } catch (e) {
+                          // Keep the UI honest: if the write failed, the stored
+                          // value is still the old one.
+                          if (mounted) {
+                            setState(() => _eventFundingSource = previous);
+                          }
+                          messenger.showSnackBar(
+                            SnackBar(
+                                content: Text('Could not save funding source: $e')),
+                          );
+                        }
+                        if (mounted) setState(() => _savingFunding = false);
+                      },
               ),
-              if (_savingSource)
+              if (_savingFunding)
                 const Padding(
                   padding: EdgeInsets.only(left: 8),
                   child: SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2)),
@@ -12546,6 +9651,17 @@ class _ScheduleEventDetailScreenState extends State<ScheduleEventDetailScreen> {
           ),
 
           const SizedBox(height: 20),
+
+          // Date — techs open an event from search results and need to know
+          // WHEN it was without backing out to the list's day header.
+          _DetailRow(
+            icon: Icons.calendar_today,
+            label: 'Date',
+            value: dateLabel,
+            color: color,
+          ),
+
+          const SizedBox(height: 16),
 
           // Time
           _DetailRow(
@@ -13098,667 +10214,40 @@ class _LinkLiftToJobScreenState extends State<_LinkLiftToJobScreen> {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Scheduling Queue — pending service calls and removals
-// ---------------------------------------------------------------------------
-
-class SchedulingQueueScreen extends StatefulWidget {
-  const SchedulingQueueScreen({super.key});
-
-  @override
-  State<SchedulingQueueScreen> createState() => _SchedulingQueueScreenState();
-}
-
-class _SchedulingQueueScreenState extends State<SchedulingQueueScreen>
-    with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-
-  List<ServiceJobRecord> _serviceJobs = [];
-  List<RemovalJobRecord> _removalJobs = [];
-  List<WebLeadRecord> _webLeads = [];
-  bool _loading = true;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: 3, vsync: this);
-    _load();
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final results = await Future.wait([
-        sbFetchServiceJobs(),
-        sbFetchRemovalJobs(),
-        sbFetchWebLeads(),
-      ]);
-      if (!mounted) return;
-      final serviceJobs = (results[0] as List<ServiceJobRecord>)
-          .where((j) => j.status == 'Needs Scheduling')
-          .toList();
-      final removalJobs = (results[1] as List<RemovalJobRecord>)
-          .where((j) => j.status == 'Needs Scheduling')
-          .toList();
-      setState(() {
-        _serviceJobs = serviceJobs;
-        _removalJobs = removalJobs;
-        _webLeads = results[2] as List<WebLeadRecord>;
-        _loading = false;
-      });
-    } catch (e) {
-      if (mounted) setState(() { _loading = false; _error = e.toString(); });
-    }
-  }
-
-  Future<void> _openAddSheet() async {
-    final choice = await showModalBottomSheet<String>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.build_outlined),
-              title: const Text('Service Call'),
-              onTap: () => Navigator.pop(ctx, 'service'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.move_to_inbox_outlined),
-              title: const Text('Removal'),
-              onTap: () => Navigator.pop(ctx, 'removal'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (choice == null || !mounted) return;
-    if (choice == 'service') {
-      final saved = await Navigator.of(context).push<bool>(
-        MaterialPageRoute(builder: (_) => const ServiceJobFormScreen()),
-      );
-      if (saved == true && mounted) _load();
-    } else {
-      final saved = await Navigator.of(context).push<bool>(
-        MaterialPageRoute(builder: (_) => const RemovalJobFormScreen()),
-      );
-      if (saved == true && mounted) _load();
-    }
-  }
-
-  Future<void> _scheduleServiceJob(ServiceJobRecord job) async {
-    Map<String, QbtUser> users;
-    try {
-      users = await qbtFetchUsers();
-    } catch (_) {
-      users = {};
-    }
-    if (!mounted) return;
-    final prefillTitle = job.title.isNotEmpty ? job.title : '${job.jobType} — ${job.customerName}';
-    final liftIds = job.liftId.isNotEmpty ? [job.liftId] : <String>[];
-    final saved = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        builder: (_) => ScheduleEventFormScreen(
-          users: users,
-          initialDate: DateTime.now(),
-          prefillTitle: prefillTitle,
-          prefillLocation: job.address,
-          prefillNotes: job.notes,
-          prefillJobType: job.jobType,
-          prefillLiftIds: liftIds,
-          sourceJobId: job.jobId,
-          sourceJobTable: 'service_jobs',
-          prefillFundingSource: job.fundingSource,
-        ),
-      ),
-    );
-    if (saved == true && mounted) _load();
-  }
-
-  Future<void> _scheduleRemovalJob(RemovalJobRecord job) async {
-    Map<String, QbtUser> users;
-    try {
-      users = await qbtFetchUsers();
-    } catch (_) {
-      users = {};
-    }
-    if (!mounted) return;
-    final prefillTitle = job.title.isNotEmpty ? job.title : 'Removal — ${job.customerName}';
-    final liftIds = job.liftId.isNotEmpty ? [job.liftId] : <String>[];
-    final saved = await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        builder: (_) => ScheduleEventFormScreen(
-          users: users,
-          initialDate: DateTime.now(),
-          prefillTitle: prefillTitle,
-          prefillLocation: job.address,
-          prefillNotes: job.notes,
-          prefillJobType: 'Removal',
-          prefillLiftIds: liftIds,
-          sourceJobId: job.jobId,
-          sourceJobTable: 'removal_jobs',
-          prefillFundingSource: job.fundingSource,
-        ),
-      ),
-    );
-    if (saved == true && mounted) _load();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final svcCount = _serviceJobs.length;
-    final remCount = _removalJobs.length;
-    final newLeadCount = _webLeads.where((l) => l.status == 'New').length;
-
-    return Scaffold(
-      appBar: AppBar(
-        backgroundColor: kBrandGreenDark,
-        foregroundColor: Colors.white,
-        title: const Text('Queue'),
-        bottom: TabBar(
-          controller: _tabController,
-          indicatorColor: Colors.white,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white60,
-          labelStyle: GoogleFonts.nunito(fontWeight: FontWeight.w700),
-          unselectedLabelStyle: GoogleFonts.nunito(),
-          tabs: [
-            Tab(text: svcCount > 0 ? 'Service ($svcCount)' : 'Service'),
-            Tab(text: remCount > 0 ? 'Removals ($remCount)' : 'Removals'),
-            Tab(text: newLeadCount > 0 ? 'Leads ($newLeadCount new)' : 'Leads'),
-          ],
-        ),
-      ),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: kBrandGreen,
-        foregroundColor: Colors.white,
-        onPressed: _openAddSheet,
-        child: const Icon(Icons.add),
-      ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text('Error: $_error'),
-                      const SizedBox(height: 12),
-                      ElevatedButton(onPressed: _load, child: const Text('Retry')),
-                    ],
-                  ),
-                )
-              : TabBarView(
-                  controller: _tabController,
-                  children: [
-                    _QueueServiceTab(
-                      jobs: _serviceJobs,
-                      onRefresh: _load,
-                      onSchedule: _scheduleServiceJob,
-                      onTap: (job) async {
-                        final saved = await Navigator.of(context).push<bool>(
-                          MaterialPageRoute(builder: (_) => ServiceJobFormScreen(existing: job)),
-                        );
-                        if (saved == true && mounted) _load();
-                      },
-                      onDelete: (job) async {
-                        await sbDeleteServiceJob(jobId: job.jobId);
-                        _load();
-                      },
-                    ),
-                    _QueueRemovalTab(
-                      jobs: _removalJobs,
-                      onRefresh: _load,
-                      onSchedule: _scheduleRemovalJob,
-                      onTap: (job) async {
-                        final saved = await Navigator.of(context).push<bool>(
-                          MaterialPageRoute(builder: (_) => RemovalJobFormScreen(existing: job)),
-                        );
-                        if (saved == true && mounted) _load();
-                      },
-                      onDelete: (job) async {
-                        await sbDeleteRemovalJob(jobId: job.jobId);
-                        _load();
-                      },
-                    ),
-                    _WebLeadsTab(leads: _webLeads, onRefresh: _load),
-                  ],
-                ),
-    );
-  }
-}
-
-class _QueueServiceTab extends StatelessWidget {
-  final List<ServiceJobRecord> jobs;
-  final Future<void> Function() onRefresh;
-  final Future<void> Function(ServiceJobRecord) onSchedule;
-  final Future<void> Function(ServiceJobRecord) onTap;
-  final Future<void> Function(ServiceJobRecord) onDelete;
-
-  const _QueueServiceTab({
-    required this.jobs,
-    required this.onRefresh,
-    required this.onSchedule,
-    required this.onTap,
-    required this.onDelete,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (jobs.isEmpty) {
-      return const Center(
-        child: Text(
-          'No service calls waiting to be scheduled.',
-          style: TextStyle(color: Colors.grey),
-          textAlign: TextAlign.center,
-        ),
-      );
-    }
-    return RefreshIndicator(
-      onRefresh: onRefresh,
-      child: ListView.builder(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 80),
-        itemCount: jobs.length,
-        itemBuilder: (ctx, i) => _QueueCard.service(
-          job: jobs[i],
-          onSchedule: () => onSchedule(jobs[i]),
-          onTap: () => onTap(jobs[i]),
-          onDelete: () => onDelete(jobs[i]),
-        ),
-      ),
-    );
-  }
-}
-
-class _QueueRemovalTab extends StatelessWidget {
-  final List<RemovalJobRecord> jobs;
-  final Future<void> Function() onRefresh;
-  final Future<void> Function(RemovalJobRecord) onSchedule;
-  final Future<void> Function(RemovalJobRecord) onTap;
-  final Future<void> Function(RemovalJobRecord) onDelete;
-
-  const _QueueRemovalTab({
-    required this.jobs,
-    required this.onRefresh,
-    required this.onSchedule,
-    required this.onTap,
-    required this.onDelete,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (jobs.isEmpty) {
-      return const Center(
-        child: Text(
-          'No removals waiting to be scheduled.',
-          style: TextStyle(color: Colors.grey),
-          textAlign: TextAlign.center,
-        ),
-      );
-    }
-    return RefreshIndicator(
-      onRefresh: onRefresh,
-      child: ListView.builder(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 80),
-        itemCount: jobs.length,
-        itemBuilder: (ctx, i) => _QueueCard.removal(
-          job: jobs[i],
-          onSchedule: () => onSchedule(jobs[i]),
-          onTap: () => onTap(jobs[i]),
-          onDelete: () => onDelete(jobs[i]),
-        ),
-      ),
-    );
-  }
-}
-
-class _JobTypeChip extends StatelessWidget {
-  final String jobType;
-  const _JobTypeChip({required this.jobType});
-
-  @override
-  Widget build(BuildContext context) {
-    final isAnnual = jobType == 'Stairlift Annual Service';
-    final bg = isAnnual
-        ? const Color(0xFFEF6C00).withValues(alpha: 0.12)
-        : kBrandGreen.withValues(alpha: 0.12);
-    final fg = isAnnual ? const Color(0xFFBF360C) : kBrandGreenDark;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(4),
-      ),
-      child: Text(
-        jobType,
-        style: GoogleFonts.nunito(fontSize: 11, fontWeight: FontWeight.w700, color: fg),
-      ),
-    );
-  }
-}
-
-class _QueueCard extends StatefulWidget {
-  final String jobType;
-  final String title;
-  final String customerName;
-  final String address;
-  final String phone;
-  final String liftLabel;
-  final String notes;
-  final String dateRequested; // empty for removals
-  final VoidCallback onTap;
-  final Future<void> Function() onSchedule;
-  final Future<void> Function() onDelete;
-
-  const _QueueCard({
-    required this.jobType,
-    required this.title,
-    required this.customerName,
-    required this.address,
-    required this.phone,
-    required this.liftLabel,
-    required this.notes,
-    required this.dateRequested,
-    required this.onTap,
-    required this.onSchedule,
-    required this.onDelete,
-  });
-
-  factory _QueueCard.service({
-    required ServiceJobRecord job,
-    required VoidCallback onTap,
-    required Future<void> Function() onSchedule,
-    required Future<void> Function() onDelete,
-  }) {
-    return _QueueCard(
-      jobType: job.jobType.isEmpty ? 'Service' : job.jobType,
-      title: job.title,
-      customerName: job.customerName,
-      address: job.address,
-      phone: job.phone,
-      liftLabel: job.liftType,
-      notes: job.notes,
-      dateRequested: job.dateRequested.isNotEmpty
-          ? normalizeDateDisplay(job.dateRequested)
-          : '',
-      onTap: onTap,
-      onSchedule: onSchedule,
-      onDelete: onDelete,
-    );
-  }
-
-  factory _QueueCard.removal({
-    required RemovalJobRecord job,
-    required VoidCallback onTap,
-    required Future<void> Function() onSchedule,
-    required Future<void> Function() onDelete,
-  }) {
-    return _QueueCard(
-      jobType: 'Removal',
-      title: job.title,
-      customerName: job.customerName,
-      address: job.address,
-      phone: job.phone,
-      liftLabel: job.liftType,
-      notes: job.notes,
-      dateRequested: '',
-      onTap: onTap,
-      onSchedule: onSchedule,
-      onDelete: onDelete,
-    );
-  }
-
-  @override
-  State<_QueueCard> createState() => _QueueCardState();
-}
-
-class _QueueCardState extends State<_QueueCard> {
-  bool _scheduling = false;
-
-  Future<void> _handleSchedule() async {
-    setState(() => _scheduling = true);
-    try {
-      await widget.onSchedule();
-    } finally {
-      if (mounted) setState(() => _scheduling = false);
-    }
-  }
-
-  Future<void> _handleDelete() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Delete entry?'),
-        content: Text('Remove "${widget.title.isNotEmpty ? widget.title : widget.customerName}" from the queue? This cannot be undone.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red.shade600, foregroundColor: Colors.white),
-            child: const Text('Delete'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-    await widget.onDelete();
-  }
-
-  Future<void> _launchPhone() async {
-    if (widget.phone.isEmpty) return;
-    final uri = Uri(scheme: 'tel', path: widget.phone);
-    if (await canLaunchUrl(uri)) await launchUrl(uri);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final headline = widget.title.isNotEmpty ? widget.title : widget.customerName;
-    return Card(
-      margin: const EdgeInsets.only(bottom: 10),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: widget.onTap,
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-            // Colored left accent bar
-            Container(
-              width: 5,
-              decoration: BoxDecoration(
-                color: kBrandGreen,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(10),
-                  bottomLeft: Radius.circular(10),
-                ),
-              ),
-            ),
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Job type chip + title headline
-                    Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _JobTypeChip(jobType: widget.jobType),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            headline,
-                            style: GoogleFonts.nunito(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    if (widget.customerName.isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          Icon(Icons.person_outline, size: 14, color: Colors.grey[600]),
-                          const SizedBox(width: 4),
-                          Text(
-                            widget.customerName,
-                            style: GoogleFonts.nunito(fontSize: 13, color: Colors.grey[700]),
-                          ),
-                        ],
-                      ),
-                    ],
-                    if (widget.address.isNotEmpty) ...[
-                      const SizedBox(height: 2),
-                      Row(
-                        children: [
-                          Icon(Icons.location_on_outlined, size: 14, color: Colors.grey[600]),
-                          const SizedBox(width: 4),
-                          Expanded(
-                            child: Text(
-                              widget.address,
-                              style: GoogleFonts.nunito(fontSize: 13, color: Colors.grey[700]),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                    if (widget.phone.isNotEmpty) ...[
-                      const SizedBox(height: 2),
-                      GestureDetector(
-                        onTap: _launchPhone,
-                        child: Row(
-                          children: [
-                            Icon(Icons.phone_outlined, size: 14, color: Colors.grey[600]),
-                            const SizedBox(width: 4),
-                            Text(
-                              widget.phone,
-                              style: GoogleFonts.nunito(
-                                fontSize: 13,
-                                color: kBrandGreen,
-                                decoration: TextDecoration.underline,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                    if (widget.liftLabel.isNotEmpty) ...[
-                      const SizedBox(height: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Colors.grey[100],
-                          borderRadius: BorderRadius.circular(4),
-                          border: Border.all(color: Colors.grey[300]!),
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.stairs_rounded, size: 13, color: Colors.grey[600]),
-                            const SizedBox(width: 4),
-                            Flexible(
-                              child: Text(
-                                widget.liftLabel,
-                                style: GoogleFonts.nunito(fontSize: 12, color: Colors.grey[700]),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                    if (widget.dateRequested.isNotEmpty) ...[
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          Icon(Icons.calendar_today_outlined, size: 13, color: Colors.grey[500]),
-                          const SizedBox(width: 4),
-                          Text(
-                            'Requested: ${widget.dateRequested}',
-                            style: GoogleFonts.nunito(fontSize: 12, color: Colors.grey[600]),
-                          ),
-                        ],
-                      ),
-                    ],
-                    if (widget.notes.isNotEmpty) ...[
-                      const SizedBox(height: 6),
-                      Text(
-                        widget.notes,
-                        style: GoogleFonts.nunito(
-                          fontSize: 12,
-                          fontStyle: FontStyle.italic,
-                          color: Colors.grey[600],
-                        ),
-                      ),
-                    ],
-                    const SizedBox(height: 10),
-                    // Action buttons
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        IconButton(
-                          onPressed: _handleDelete,
-                          icon: const Icon(Icons.delete_outline, size: 20),
-                          color: Colors.red.shade400,
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                          tooltip: 'Delete',
-                        ),
-                        const SizedBox(width: 8),
-                        ElevatedButton.icon(
-                          onPressed: _scheduling ? null : _handleSchedule,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: kBrandGreen,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                            minimumSize: Size.zero,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          icon: _scheduling
-                              ? const SizedBox(
-                                  width: 14, height: 14,
-                                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                                )
-                              : const Icon(Icons.calendar_month_rounded, size: 16),
-                          label: Text('Schedule', style: GoogleFonts.nunito(fontWeight: FontWeight.w700)),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Customer search delegate — used by LiftFormScreen to link a lift to a customer
-// ---------------------------------------------------------------------------
-
-// QB-backed customer search — searches QuickBooks live.
-// Returns a (name, qbCustomerId) pair — no local Supabase customer record needed.
 typedef _QbCustomerResult = ({String name, String qbCustomerId});
 
 class _CustomerSearchDelegate extends SearchDelegate<_QbCustomerResult?> {
+  // The app theme sets appBarTheme.titleTextStyle to white (for green app bars)
+  // AND inputDecorationTheme.fillColor to white. SearchDelegate renders its
+  // field in the app bar using both, which produced white-on-white: the typed
+  // text was invisible. Force a dark field on a white bar instead.
+  @override
+  TextStyle? get searchFieldStyle =>
+      GoogleFonts.nunito(color: Colors.black87, fontSize: 17);
+
+  @override
+  ThemeData appBarTheme(BuildContext context) {
+    final base = Theme.of(context);
+    return base.copyWith(
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Colors.white,
+        foregroundColor: Colors.black87,
+        elevation: 1,
+        iconTheme: IconThemeData(color: Colors.black87),
+        actionsIconTheme: IconThemeData(color: Colors.black87),
+      ),
+      // Transparent fill so the white page fill can't hide dark-on-white text.
+      inputDecorationTheme: const InputDecorationTheme(
+        filled: false,
+        border: InputBorder.none,
+        enabledBorder: InputBorder.none,
+        focusedBorder: InputBorder.none,
+        hintStyle: TextStyle(color: Colors.black45),
+      ),
+      textSelectionTheme: const TextSelectionThemeData(cursorColor: kBrandGreen),
+    );
+  }
+
   @override
   List<Widget> buildActions(BuildContext context) => [
     if (query.isNotEmpty)

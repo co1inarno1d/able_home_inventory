@@ -62,18 +62,68 @@ String normalizeBinDisplay(String raw) {
 /// Extracts the city/town from an address string.
 /// Handles "123 Main St, Needham, MA 02492" → "Needham"
 /// Falls back to the full address if parsing fails.
+/// Best-effort town from a free-text address.
+///
+/// Returns '' when the town cannot be determined, NOT the whole address.
+/// The previous version fell back to returning `address` unchanged, so a
+/// one-line address like "116 West Alvord st Springfield" ended up stored as
+/// the city — which then polluted the city filter and the hub's
+/// group-by-town counts. A blank is a visible gap; a street address
+/// masquerading as a town is invisible bad data.
 String extractCity(String address) {
-  if (address.isEmpty) return '';
-  // Try comma-delimited: "Street, City, State ZIP"
-  final parts = address.split(',').map((p) => p.trim()).toList();
+  var s = address.trim();
+  if (s.isEmpty) return '';
+
+  // Drop country and any trailing ZIP so they are never mistaken for a town.
+  s = s.replaceAll(RegExp(r',?\s*(united states|usa)\.?\s*$',
+      caseSensitive: false), '');
+  s = s.replaceAll(RegExp(r'\s+\d{5}(-\d{4})?\s*$'), '').trim();
+
+  const states = {
+    'ma', 'ri', 'nh', 'ct', 'vt', 'me', 'ny',
+    'massachusetts', 'rhode island', 'connecticut', 'new hampshire',
+    'vermont', 'maine', 'new york',
+  };
+
+  final parts = s
+      .split(',')
+      .map((p) => p.trim())
+      .where((p) => p.isNotEmpty)
+      .toList();
+
   if (parts.length >= 2) {
-    // Second part is usually city
-    final candidate = parts[1].trim();
-    if (candidate.isNotEmpty && !RegExp(r'^\d').hasMatch(candidate)) {
-      return candidate;
+    // Walk back from the end, skipping a trailing state, and take the first
+    // part that looks like a place name rather than a street line.
+    for (var i = parts.length - 1; i >= 1; i--) {
+      final c = parts[i].replaceAll(RegExp(r'\s+\d.*$'), '').trim();
+      if (c.isEmpty) continue;
+      if (states.contains(c.toLowerCase())) continue;
+      if (RegExp(r'^\d').hasMatch(c)) continue;
+      return c;
     }
+    return '';
   }
-  return address;
+
+  // No commas. "116 West Alvord st Springfield" — the town is the trailing
+  // word(s) after a street suffix. Only trust it when a suffix is present,
+  // since otherwise the last word is just part of the street name.
+  final m = RegExp(
+    r'\b(st|street|rd|road|ave|avenue|dr|drive|ln|lane|ct|court|cir|circle|'
+    r'blvd|boulevard|ter|terrace|pl|place|way|hwy|highway|pkwy|parkway|'
+    r'sq|square|trl|trail)\.?\s+(.+)$',
+    caseSensitive: false,
+  ).firstMatch(s);
+  if (m != null) {
+    final tail = m
+        .group(2)!
+        .split(RegExp(r'\s+'))
+        .where((w) => !states.contains(w.toLowerCase()))
+        .join(' ')
+        .trim();
+    if (tail.isNotEmpty && !RegExp(r'^\d').hasMatch(tail)) return tail;
+  }
+
+  return '';
 }
 
 // ---------------------------------------------------------------------------
@@ -105,31 +155,50 @@ bool eventIsRampJob(QbtScheduleEvent event) {
 }
 
 /// Infer job type from a schedule event title.
+///
+/// This is the ONLY copy. It previously existed here and in main.dart with
+/// divergent logic — this copy had lost the buyback/buyout branch, so a
+/// "Smith buyback" event classified as untyped for any caller importing from
+/// here while main.dart classified it as a removal.
+///
+/// Returns values that may need [normalizeJobType] before display: 'Eval',
+/// 'Schedule Service' and 'Schedule Removal' are not in [kJobTypes].
 String? inferJobTypeFromTitle(String title) {
   final t = title.toLowerCase();
 
+  // Evals / measures / assessments → not a trackable job
   if (t.contains('eval') || t.contains('measure') || t.contains('assessment')) {
     return 'Eval';
   }
 
+  // Scheduling notes: "set up …" or "schedule …" at the start
   final isSetupNote = t.startsWith('set up') ||
       t.startsWith('set-up') ||
       t.startsWith('schedule ');
   if (isSetupNote) {
     if (t.contains('service') || t.contains('annual')) return 'Schedule Service';
     if (t.contains('removal') || t.contains('remove')) return 'Schedule Removal';
-    return null;
+    return null; // other setup notes (ramp rental setup, etc.) — ignore
   }
 
   final hasRamp = t.contains('ramp') &&
       !t.contains('adjustment') &&
       !t.contains('meeting');
 
+  // Explicit installs
   if (t.contains('install')) return hasRamp ? 'Ramp Install' : 'Stairlift Install';
+
+  // Buybacks and buyouts are removals: the lift comes back to us.
+  if (t.contains('buyback') || t.contains('buyout')) return 'Stairlift Removal';
+
   if (t.contains('removal') || t.contains('remove')) {
     return hasRamp ? 'Ramp Removal' : 'Stairlift Removal';
   }
+
+  // Ramp jobs with no explicit install/removal keyword
   if (hasRamp) return 'Ramp Install';
+
+  // Service calls
   if (t.contains('annual')) return 'Stairlift Annual Service';
   if (t.contains('service')) return 'Stairlift Service';
 
@@ -261,6 +330,106 @@ const List<String> kFundingSources = [
   'Mass Health',
   'Other',
 ];
+
+/// The default funding source. Stored as NULL rather than this string — see
+/// sbSetEventFundingSource — so reads must fall back to it.
+const String kDefaultFundingSource = 'Private';
+
+/// Normalizes a stored funding source onto [kFundingSources].
+///
+/// Historical rows carry casing variants: one screen wrote 'Navicare' while
+/// another wrote 'NaviCare', and the schema has no check constraints to stop
+/// it. Without normalizing, a dropdown guarded by `contains()` falls through
+/// to null and shows a stored value as unset.
+String normalizeFundingSource(String? raw) {
+  final v = (raw ?? '').trim();
+  if (v.isEmpty) return kDefaultFundingSource;
+  for (final s in kFundingSources) {
+    if (s.toLowerCase() == v.toLowerCase()) return s;
+  }
+  return 'Other';
+}
+
+// ---------------------------------------------------------------------------
+// JOB TYPES
+// ---------------------------------------------------------------------------
+
+/// The job types a schedule event can carry.
+///
+/// This was hardcoded inline in four places (the event form and three times in
+/// the detail screen's dropdown). A value stored in app_config that is missing
+/// from the list it is rendered against silently displays as "unset", so there
+/// must be exactly one list.
+const List<String> kJobTypes = [
+  'Stairlift Install',
+  'Stairlift Removal',
+  'Stairlift Buyback / Buyout',
+  'Stairlift Service',
+  'Stairlift Annual Service',
+  'Ramp Install',
+  'Ramp Removal',
+  'Needs Scheduling',
+  'Reminder',
+  'Other',
+];
+
+/// Values [inferJobTypeFromTitle] can return that are NOT offered in the
+/// dropdown, mapped onto one that is.
+///
+/// The inference function predates the dropdown list and emits 'Eval',
+/// 'Schedule Service' and 'Schedule Removal'. Those were persisted to
+/// app_config and then rendered against a list that does not contain them, so
+/// the dropdown fell through to null and showed a stored job type as unset.
+const Map<String, String> kJobTypeAliases = {
+  'Schedule Service': 'Needs Scheduling',
+  'Schedule Removal': 'Needs Scheduling',
+  'Eval': 'Other',
+};
+
+/// Maps any stored or inferred job type onto [kJobTypes].
+/// Returns null only when there is genuinely no type.
+String? normalizeJobType(String? raw) {
+  final v = (raw ?? '').trim();
+  if (v.isEmpty) return null;
+  for (final t in kJobTypes) {
+    if (t.toLowerCase() == v.toLowerCase()) return t;
+  }
+  final alias = kJobTypeAliases[v];
+  if (alias != null) return alias;
+  for (final entry in kJobTypeAliases.entries) {
+    if (entry.key.toLowerCase() == v.toLowerCase()) return entry.value;
+  }
+  return 'Other';
+}
+
+/// True when the title reads like a to-do rather than a booked job —
+/// "Set up Leominster service", "Schedule the Dartmouth removal". These are
+/// the office's own reminders to book something, and they belong in the hub's
+/// Needs Scheduling bucket.
+bool titleLooksUnscheduled(String title) {
+  final t = title.toLowerCase().trimLeft();
+  return t.startsWith('set up') ||
+      t.startsWith('set-up') ||
+      t.startsWith('setup') ||
+      t.startsWith('schedule ') ||
+      t.startsWith('need to schedule') ||
+      t.startsWith('needs scheduling') ||
+      t.startsWith('call ') ||
+      t.startsWith('book ');
+}
+
+/// True when a stairlift job involves a curved rail.
+///
+/// Prefers the linked lift's rail type, which is authoritative. Falls back to
+/// the event title, because on a new install the lift is usually not linked
+/// until the work is done — exactly the jobs the hub most needs to show.
+/// Defaults to straight, which is the common case.
+bool isCurvedRailJob({String? liftRailType, String title = ''}) {
+  final rt = (liftRailType ?? '').trim().toLowerCase();
+  if (rt.isNotEmpty) return rt.startsWith('curv');
+  final t = title.toLowerCase();
+  return t.contains('curve') || t.contains('curved');
+}
 
 /// Returns true if the funding source requires agency confirmation before scheduling.
 bool requiresAgencyConfirmation(String fundingSource) {

@@ -1,17 +1,18 @@
 // lib/screens/email_review_screen.dart
 //
 // Email Review Queue — surfaces agency emails that the scan-agency-emails Edge
-// Function flagged for manual review (either unrecognised sender or no matching
-// ops_job found). Colin can dismiss them (already handled externally) or
-// advance the matching job manually.
+// Function flagged for manual review (either an unrecognised sender or no
+// matching job found). They can be dismissed, or turned into a schedule event
+// so the work is tracked alongside everything else.
 
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../models/models.dart';
+import '../qbt_api.dart';
 import '../supabase_api.dart';
 import '../utils/utils.dart';
-import 'operations_hub_screen.dart';
+import 'schedule_event_form_screen.dart';
 
 class EmailReviewScreen extends StatefulWidget {
   const EmailReviewScreen({super.key});
@@ -48,27 +49,28 @@ class _EmailReviewScreenState extends State<EmailReviewScreen> {
   }
 
   Future<void> _createJob(EmailQueueItem item) async {
-    // Pre-fill an ops job with info extracted from the email
+    // Creates a SCHEDULE EVENT, not an ops_jobs row. Work lives in the
+    // schedule now, and the hub is a view of it — a job created here has to
+    // land where every other job lives or it would be invisible in both.
+    //
+    // Titled "Set up ..." deliberately: an agency email means work needs
+    // booking, not that it is booked. That phrasing is what puts it in the
+    // hub's To Schedule bucket until a real date is set.
+    final customer = (item.customerName ?? '').trim();
+    final users = await qbtFetchUsers().catchError(
+        (_) => <String, QbtUser>{});
+    if (!mounted) return;
+
     final saved = await Navigator.of(context).push<bool>(
       MaterialPageRoute(
-        builder: (_) => OpsJobFormScreen(
-          existing: OpsJob(
-            jobId: '',
-            jobType: OpsJobType.stairliftInstall,
-            status: item.fundingSource != null
-                ? OpsJobStatus.waitingAgencyConfirmation
-                : OpsJobStatus.needsInfo,
-            customerName: item.customerName ?? '',
-            address: '',
-            city: '',
-            phone: '',
-            liftType: '',
-            fundingSource: item.fundingSource ?? 'Private',
-            notes: 'From agency email — ${item.subject}\n${item.snippet}',
-            dateRequested: item.scannedAt ?? DateTime.now(),
-            sourceTable: 'ops_jobs',
-            sourceId: '',
-          ),
+        builder: (_) => ScheduleEventFormScreen(
+          users: users,
+          initialDate: DateTime.now(),
+          prefillTitle:
+              customer.isNotEmpty ? 'Set up $customer' : 'Set up — see notes',
+          prefillJobType: 'Needs Scheduling',
+          prefillFundingSource: item.fundingSource ?? 'Private',
+          prefillNotes: 'From agency email — ${item.subject}\n${item.snippet}',
         ),
       ),
     );

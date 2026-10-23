@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'initials_avatar.dart';
 import 'qbt_api.dart';
 import 'supabase_api.dart';
+import 'utils/schedule_search.dart';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public constants (shared with main.dart via import)
@@ -33,6 +34,15 @@ class ScheduleDesktopView extends StatefulWidget {
   /// Latest date currently loaded in [events].
   final DateTime activeEnd;
 
+  /// Opens the Operations Hub — the same events in a tabular view.
+  final VoidCallback? onOpenHub;
+
+  /// Optional warning shown above the grid when schedule history looks
+  /// unreliable. Built by the parent, which owns the archive-health state.
+  /// Previously this banner existed only in the mobile layout, so desktop
+  /// users got no signal that older jobs might be missing from search.
+  final Widget? archiveBanner;
+
   const ScheduleDesktopView({
     super.key,
     required this.events,
@@ -44,8 +54,10 @@ class ScheduleDesktopView extends StatefulWidget {
     required this.onRefresh,
     required this.onTapEvent,
     required this.onAddEvent,
+    this.onOpenHub,
     required this.activeStart,
     required this.activeEnd,
+    this.archiveBanner,
   });
 
   @override
@@ -68,16 +80,6 @@ class _ScheduleDesktopViewState extends State<ScheduleDesktopView> {
 
   static const double _kLeftColW  = 170.0;
   static const double _kRowMinH   = 72.0;
-
-  static const Map<String, int> _monthMap = {
-    'jan': 1, 'january': 1,   'feb': 2, 'february': 2,
-    'mar': 3, 'march': 3,     'apr': 4, 'april': 4,
-    'may': 5,                 'jun': 6, 'june': 6,
-    'jul': 7, 'july': 7,      'aug': 8, 'august': 8,
-    'sep': 9, 'sept': 9, 'september': 9,
-    'oct': 10, 'october': 10, 'nov': 11, 'november': 11,
-    'dec': 12, 'december': 12,
-  };
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -169,7 +171,7 @@ class _ScheduleDesktopViewState extends State<ScheduleDesktopView> {
     final query = _searchQuery.trim();
     if (query.isEmpty) return;
 
-    final parsed = _parseDateRange(query);
+    final parsed = parseScheduleDateRange(query);
     final dateRange = parsed.$1;
     final textQuery = parsed.$2;
 
@@ -227,61 +229,6 @@ class _ScheduleDesktopViewState extends State<ScheduleDesktopView> {
     }).toList();
   }
 
-  ((DateTime, DateTime)?, String) _parseDateRange(String query) {
-    var q = query.toLowerCase().trim();
-
-    String strip(String src, Pattern pat) =>
-        src.replaceAll(pat, ' ').replaceAll(RegExp(r'\s{2,}'), ' ').trim();
-
-    (DateTime, DateTime) dayRange(int y, int mo, int d) =>
-        (DateTime(y, mo, d), DateTime(y, mo, d, 23, 59, 59));
-
-    final slash = RegExp(r'\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b');
-    var m = slash.firstMatch(q);
-    if (m != null) {
-      var y = int.parse(m.group(3)!);
-      if (y < 100) y += 2000;
-      return (dayRange(y, int.parse(m.group(1)!), int.parse(m.group(2)!)), strip(q, slash));
-    }
-
-    for (final entry in _monthMap.entries) {
-      final mn = entry.key;
-      final mo = entry.value;
-
-      final pat1 = RegExp(r'\b' + mn + r'\s+(\d{1,2})\s+(20\d{2})\b');
-      m = pat1.firstMatch(q);
-      if (m != null) {
-        return (dayRange(int.parse(m.group(2)!), mo, int.parse(m.group(1)!)), strip(q, pat1));
-      }
-
-      final pat2 = RegExp(r'\b(\d{1,2})\s+' + mn + r'\s+(20\d{2})\b');
-      m = pat2.firstMatch(q);
-      if (m != null) {
-        return (dayRange(int.parse(m.group(2)!), mo, int.parse(m.group(1)!)), strip(q, pat2));
-      }
-
-      final pat3 = RegExp(r'\b' + mn + r'\s+(20\d{2})\b');
-      m = pat3.firstMatch(q);
-      if (m != null) {
-        final y = int.parse(m.group(1)!);
-        final lastDay = DateTime(y, mo + 1, 0).day;
-        return (
-          (DateTime(y, mo, 1), DateTime(y, mo, lastDay, 23, 59, 59)),
-          strip(q, pat3),
-        );
-      }
-    }
-
-    final yearPat = RegExp(r'\b(20\d{2})\b');
-    m = yearPat.firstMatch(q);
-    if (m != null) {
-      final y = int.parse(m.group(1)!);
-      return ((DateTime(y, 1, 1), DateTime(y, 12, 31, 23, 59, 59)), strip(q, yearPat));
-    }
-
-    return (null, q);
-  }
-
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
@@ -307,6 +254,7 @@ class _ScheduleDesktopViewState extends State<ScheduleDesktopView> {
     return Column(
       children: [
         _buildNavBar(),
+        if (widget.archiveBanner != null && !_isSearchMode) widget.archiveBanner!,
         if (_isSearchLoading)
           const LinearProgressIndicator(color: kDesktopBrandGreen),
         if (!_isSearchMode) _buildDayHeaders(),
@@ -365,6 +313,10 @@ class _ScheduleDesktopViewState extends State<ScheduleDesktopView> {
           _iconBtn(Icons.refresh, widget.onRefresh, 'Refresh'),
           // Add event
           _iconBtn(Icons.add_circle_outline, widget.onAddEvent, 'Add event'),
+          // Operations Hub — a different view of these same events
+          if (widget.onOpenHub != null)
+            _iconBtn(Icons.pending_actions_rounded, widget.onOpenHub!,
+                'Operations Hub'),
         ],
       ),
     );

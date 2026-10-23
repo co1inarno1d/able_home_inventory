@@ -46,3 +46,7 @@ app.*.map.json
 
 # Local Netlify folder
 .netlify
+
+# Reconciliation working files — event dumps and filled-in review sheets.
+# These contain customer names, addresses and phone numbers; they stay local.
+scripts/reconcile/work/

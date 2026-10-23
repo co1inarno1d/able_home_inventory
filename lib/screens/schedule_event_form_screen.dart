@@ -70,10 +70,6 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
   bool _qbExpanded = false;
   final _qbSearchCtrl = TextEditingController();
 
-  static const _fundingSourceOptions = [
-    'Private', 'VA', 'CCALS', 'NaviCare', 'Summit', 'Fallon', 'Mass Health', 'Other',
-  ];
-
   static const _jobTypeOptions = [
     'Stairlift Install',
     'Stairlift Removal',
@@ -394,7 +390,7 @@ class _ScheduleEventFormScreenState extends State<ScheduleEventFormScreen> {
                 labelText: 'Funding Source',
                 border: OutlineInputBorder(),
               ),
-              items: _fundingSourceOptions
+              items: kFundingSources
                   .map((s) => DropdownMenuItem(value: s, child: Text(s)))
                   .toList(),
               onChanged: (v) => setState(() => _fundingSource = v ?? 'Private'),
