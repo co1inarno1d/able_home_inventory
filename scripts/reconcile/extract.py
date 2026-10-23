@@ -234,8 +234,25 @@ _NOT_A_NAME = {
     "street", "road", "ave", "avenue", "drive", "lane", "court", "circle",
     "first", "second", "third", "floor", "front", "back", "entrance",
     "basement", "garage", "stairs", "landing", "door",
-    # our people (so a tech's name is never taken as the customer)
-    "steve", "matt", "chris", "colin", "jeff",
+    # our people, so a tech's name is never taken as the customer. "Ryan Job"
+    # and "Matt job" are how the crew label whose job it is -- Ryan Clark,
+    # Matt -- and "Ryan Job" was previously extracted 36 times as a customer,
+    # outranking the real one on the same note.
+    "steve", "matt", "chris", "colin", "jeff", "ryan", "harry",
+}
+
+# Our own staff first names. A name line that is ONLY a staff first name plus a
+# job word is crew labelling, not a customer.
+_STAFF_FIRST = {"ryan", "matt", "steve", "chris", "colin", "jeff", "harry"}
+
+# State abbreviations and full names. A two-word "name" whose second word is a
+# state is a place line ("Ludlow Ma", "Westport MA"), not a person. These leak
+# through the stacked-format rule because a town line often sits directly
+# above the address.
+_STATE_WORDS = {
+    "ma", "ri", "nh", "ct", "vt", "me", "ny", "nj", "pa",
+    "mass", "massachusetts", "rhode", "island", "connecticut",
+    "hampshire", "vermont", "maine",
 }
 
 # Labeled fields on VA / CCALS intake forms pasted into notes.
@@ -269,6 +286,24 @@ _NAME_THEN_PHONE = re.compile(
 
 _TITLE_PREFIX = re.compile(r"^(?:mr|mrs|ms|miss|dr|rev)\.?\s+", re.I)
 
+# Trailing context that follows a customer's name in the stacked format:
+#   "Suzanne Tatro, son Mark"       -> Suzanne Tatro
+#   "Maryann Bertone for father John" -> Maryann Bertone
+#   "Ernest Oliver is moving to assisted living" -> Ernest Oliver
+# The customer is named first; what follows describes who else is involved.
+_TRAILING_CONTEXT = re.compile(
+    r"\s*(?:,|\b(?:for|is|and|&|\+)\b).*$",
+    re.I,
+)
+
+# "Jeff + Jennifer Fitton" / "Bob and Mary Smith" -- a couple sharing a
+# surname. Keep the FULL text as one household contact rather than guessing
+# which half is the account holder; review can split it if it matters.
+_COUPLE = re.compile(
+    r"^([A-Z][a-zA-Z'’\-]+)\s*(?:\+|&|\band\b)\s*"
+    r"([A-Z][a-zA-Z'’\-]+(?:\s+[A-Z][a-zA-Z'’\-\.]+)?)$"
+)
+
 # Verbs that precede a customer's name in these notes and would otherwise be
 # captured as a first name -- "Meet Diane Baruch", "Call Rose Gervais". Found
 # by auditing addresses that produced two different names for one household.
@@ -284,6 +319,13 @@ def _looks_like_person(name: str) -> bool:
     words = [w.strip(".,'’-").lower() for w in name.split()]
     words = [w for w in words if w]
     if len(words) < 2 or len(words) > 4:
+        return False
+    # Crew labelling: "Ryan Job", "Matt job". The first word is one of our
+    # people and the rest is job vocabulary, not a surname.
+    if words[0] in _STAFF_FIRST and all(w in _NOT_A_NAME for w in words[1:]):
+        return False
+    # A place line, not a person: "Ludlow Ma", "Westport MA".
+    if words[-1] in _STATE_WORDS:
         return False
     if any(w in _NOT_A_NAME for w in words):
         return False
@@ -309,8 +351,24 @@ def extract_names(notes: str) -> list[str]:
         n = n.strip(" ,.|")
         n = _LEADING_VERB.sub("", n)
         n = _TITLE_PREFIX.sub("", n)
-        n = re.sub(r"\s+", " ", n)
-        if n and _looks_like_person(n) and n not in out:
+        n = re.sub(r"\s+", " ", n).strip()
+        if not n:
+            return
+
+        # A couple sharing a surname is one household contact; keep both
+        # names rather than guessing which is the account holder.
+        if _COUPLE.match(n):
+            if n not in out:
+                out.append(n)
+            return
+
+        # Trim trailing context ("Suzanne Tatro, son Mark") only if what
+        # remains still reads as a name -- otherwise keep the original.
+        trimmed = _TRAILING_CONTEXT.sub("", n).strip()
+        if trimmed and trimmed != n and _looks_like_person(trimmed):
+            n = trimmed
+
+        if _looks_like_person(n) and n not in out:
             out.append(n)
 
     # Strongest: an explicit First + Last pair from a form.
@@ -321,6 +379,20 @@ def extract_names(notes: str) -> list[str]:
     # Next: any single labeled name field.
     for m in _LABELED_NAME.finditer(notes):
         add(m.group(1))
+
+    # The stacked format -- customer name, then address, then town, then phone
+    # on consecutive segments. This is how Colin writes them, especially for
+    # evals, and it is the single most common layout. A line is treated as a
+    # name when the NEXT non-empty segment starts with a house number, which
+    # is strong positional evidence even when the line itself is ambiguous.
+    segments = [x.strip(" ,.") for x in re.split(r"\||\n", notes)]
+    segments = [x for x in segments if x]
+    for i, seg in enumerate(segments[:-1]):
+        if len(seg) > 60:
+            continue
+        nxt = segments[i + 1]
+        if re.match(r"^\d+\s*[A-Za-z]?\s+\S", nxt):
+            add(seg)
 
     # Finally: capitalized name-shaped text, in the order it appears. The
     # customer's name is usually the first thing in the note.

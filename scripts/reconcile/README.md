@@ -57,6 +57,25 @@ locked, and re-running never asks again.
 
 - `extract.py` — pulls names, phones and addresses out of one event
 
+## The three note formats this handles
+
+Per Colin, these cover most customer-name entries, and all three are accepted:
+
+1. **Stacked** — name, then address, then town, then phone on consecutive
+   lines. How Colin writes them, especially for evals. A line is read as a
+   name when the next segment starts with a house number, which is strong
+   positional evidence even when the line alone is ambiguous.
+2. **`Meet [name]`** — Matt's habit. Leading verbs are stripped (`meet`,
+   `call`, `contact`, `see`, `text`, `talk to`, …) so "Meet Diane Baruch"
+   yields "Diane Baruch".
+3. **`[name] [phone]`** — Ryan's habit, e.g. `Zach Taylor 978-360-9213`. This
+   is the single most common layout; supporting it moved name coverage from
+   32% to 43%.
+
+Crew labelling is rejected: **"Ryan Job" means Ryan Clark's job**, not a
+customer named Ryan Job — and it previously outranked the real customer on the
+same note. Same for "Matt job".
+
 ## Known extraction limits
 
 Worth knowing before trusting the output:
@@ -68,5 +87,5 @@ Worth knowing before trusting the output:
   Robideaux` / `Mark Robideaux`). Not an error — one household, two contacts.
 - **Business customers** appear as names (`Carabetta Companies`, a property
   manager). Correct, but they behave differently from a household.
-- **884 addresses** currently resolve to more than one name. Most collapse via
+- **951 addresses** currently resolve to more than one name. Most collapse via
   the two cases above; the rest go to review.
